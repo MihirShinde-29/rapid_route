@@ -15,3 +15,19 @@ Pillars: Pathfinding & Navigation, Swarm & Boids Modeling
 Both prototypes implement A* routing, live congestion, and road closures with live rerouting for a small emergency fleet.
 They do not yet include the zone/density demand model, OD matrix, car-following microsimulation, junction rules,
 or cost-based route assignment. Those are the planned MVP work for the mid-term.
+
+## Simulation (`sim/`, MVP work in progress)
+TypeScript + Vite + Three.js. The sim core has no DOM access and runs headless in tests; `render3d/` (styled after the 3D prototype) only reads state.
+```
+cd sim
+npm install
+npm run dev     # open the printed localhost URL
+npm test
+```
+Needs Node 20+. Vite is pinned to 6 / Vitest to 3 because newer releases need a newer Node.
+
+Open `http://localhost:5173/?start=8` to open at 08:00 with the morning peak already loaded.
+
+Done so far: zones with density, a production-constrained gravity OD matrix per time-of-day period, Poisson trip
+generation with AM/PM peaks, IDM car-following, junction right-of-way, a placeholder free-flow router, and a 3D view
+(buildings follow zone density, roads tint by congestion, OD arcs and heatmap). Work split: `docs/MVP_WORK_SPLIT.md`.

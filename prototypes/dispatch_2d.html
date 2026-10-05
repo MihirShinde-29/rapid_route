@@ -1,0 +1,1193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dispatch — Emergency Response Routing Sim</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0B0F14;
+    --panel:#121821;
+    --panel-2:#0E141C;
+    --line:#212C37;
+    --line-soft:#1A232C;
+    --text:#DCE4EA;
+    --text-dim:#7C8A97;
+    --text-faint:#4E5A65;
+    --accent-ems:#4FA8E0;
+    --accent-fire:#5FBFA0;
+    --accent-police:#8B8FE8;
+    --sev-critical:#D8442D;
+    --sev-moderate:#E0A83A;
+    --sev-minor:#D8CE6B;
+    --road:#212C37;
+    --road-busy:#7A5A2A;
+    --road-heavy:#7A3A2A;
+    --font-sans:'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+    --font-mono:'IBM Plex Mono', ui-monospace, 'SFMono-Regular', monospace;
+  }
+  :root:not([data-theme="light"]){ /* dark is default */ }
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme="dark"]){
+      --bg:#EDEFF1;
+      --panel:#FFFFFF;
+      --panel-2:#F5F6F8;
+      --line:#D3D8DD;
+      --line-soft:#E2E6EA;
+      --text:#1B242C;
+      --text-dim:#5B6772;
+      --text-faint:#94A0AA;
+      --road:#C6CDD3;
+      --road-busy:#C99A3E;
+      --road-heavy:#C1573F;
+    }
+  }
+  :root[data-theme="light"]{
+    --bg:#EDEFF1;
+    --panel:#FFFFFF;
+    --panel-2:#F5F6F8;
+    --line:#D3D8DD;
+    --line-soft:#E2E6EA;
+    --text:#1B242C;
+    --text-dim:#5B6772;
+    --text-faint:#94A0AA;
+    --road:#C6CDD3;
+    --road-busy:#C99A3E;
+    --road-heavy:#C1573F;
+  }
+
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:var(--font-sans);
+    min-height:100vh;
+    display:flex;
+    flex-direction:column;
+    animation:boot .5s ease-out;
+  }
+  @keyframes boot{ from{opacity:0} to{opacity:1} }
+  @media (prefers-reduced-motion: reduce){
+    body{animation:none;}
+  }
+
+  header{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:16px;
+    padding:14px 20px;
+    border-bottom:1px solid var(--line);
+    background:var(--panel-2);
+    flex-wrap:wrap;
+  }
+  .brand{
+    display:flex;
+    align-items:baseline;
+    gap:10px;
+  }
+  .brand h1{
+    font-size:19px;
+    font-weight:700;
+    letter-spacing:0.02em;
+    margin:0;
+  }
+  .brand .sub{
+    font-family:var(--font-mono);
+    font-size:11px;
+    color:var(--text-dim);
+    letter-spacing:0.06em;
+  }
+  .controls{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    flex-wrap:wrap;
+    font-family:var(--font-mono);
+    font-size:12px;
+  }
+  .controls .clock{
+    color:var(--text-dim);
+    min-width:64px;
+  }
+  button, select{
+    font-family:var(--font-mono);
+    font-size:12px;
+    background:var(--panel);
+    color:var(--text);
+    border:1px solid var(--line);
+    border-radius:3px;
+    padding:7px 12px;
+    cursor:pointer;
+  }
+  button:hover{ border-color:var(--text-dim); }
+  button:focus-visible, select:focus-visible{
+    outline:2px solid var(--accent-ems);
+    outline-offset:1px;
+  }
+  button.primary{
+    background:var(--accent-ems);
+    border-color:var(--accent-ems);
+    color:#08131C;
+    font-weight:600;
+  }
+
+  main{
+    flex:1;
+    display:flex;
+    gap:1px;
+    background:var(--line);
+    min-height:0;
+  }
+  .map-wrap{
+    flex:1 1 auto;
+    min-width:0;
+    background:var(--panel-2);
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding:12px;
+  }
+  #mapCanvas{
+    width:100%;
+    height:auto;
+    max-height:78vh;
+    display:block;
+  }
+
+  aside{
+    flex:0 0 300px;
+    background:var(--panel);
+    display:flex;
+    flex-direction:column;
+    overflow:hidden;
+  }
+  section.panel{
+    border-bottom:1px solid var(--line-soft);
+    padding:14px 16px;
+    overflow-y:auto;
+  }
+  section.panel h2{
+    font-size:11px;
+    letter-spacing:0.08em;
+    text-transform:uppercase;
+    color:var(--text-dim);
+    margin:0 0 10px 0;
+    font-weight:600;
+  }
+
+  .stat-grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:10px;
+  }
+  .stat{
+    background:var(--panel-2);
+    border:1px solid var(--line-soft);
+    border-radius:4px;
+    padding:8px 10px;
+  }
+  .stat .val{
+    font-family:var(--font-mono);
+    font-size:20px;
+    font-weight:600;
+    line-height:1.1;
+  }
+  .stat .lbl{
+    font-size:10.5px;
+    color:var(--text-dim);
+    margin-top:2px;
+  }
+
+  .queue-list, .fleet-list{
+    list-style:none;
+    margin:0; padding:0;
+    display:flex;
+    flex-direction:column;
+    gap:6px;
+    max-height:220px;
+    overflow-y:auto;
+  }
+  .queue-list li, .fleet-list li{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    padding:6px 8px;
+    background:var(--panel-2);
+    border:1px solid var(--line-soft);
+    border-radius:4px;
+    font-size:12px;
+  }
+  .dot{
+    width:9px; height:9px; border-radius:50%;
+    flex:0 0 auto;
+  }
+  .queue-list .meta{
+    flex:1;
+    min-width:0;
+  }
+  .queue-list .type-line{
+    display:flex;
+    justify-content:space-between;
+    gap:6px;
+  }
+  .queue-list .wait{
+    font-family:var(--font-mono);
+    color:var(--text-dim);
+    font-size:11px;
+  }
+  .fleet-list .unit-name{ flex:1; }
+  .fleet-list .unit-status{
+    font-family:var(--font-mono);
+    font-size:10.5px;
+    color:var(--text-dim);
+    text-transform:uppercase;
+    letter-spacing:0.04em;
+  }
+  .empty-note{
+    color:var(--text-faint);
+    font-size:12px;
+    padding:6px 2px;
+  }
+
+  footer{
+    padding:8px 20px;
+    border-top:1px solid var(--line);
+    background:var(--panel-2);
+    font-family:var(--font-mono);
+    font-size:10.5px;
+    color:var(--text-faint);
+    display:flex;
+    justify-content:space-between;
+    flex-wrap:wrap;
+    gap:8px;
+  }
+
+  @media (max-width: 820px){
+    main{ flex-direction:column; }
+    aside{ flex:0 0 auto; flex-direction:row; overflow-x:auto; }
+    section.panel{ border-bottom:none; border-right:1px solid var(--line-soft); min-width:220px; }
+    #mapCanvas{ max-height:60vh; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <h1>DISPATCH</h1>
+    <span class="sub">EMERGENCY RESPONSE ROUTING SIM</span>
+  </div>
+  <div class="controls">
+    <span class="clock" id="clockReadout">00:00</span>
+    <button id="playPauseBtn" class="primary">Pause</button>
+    <select id="speedSelect" aria-label="Simulation speed">
+      <option value="0.5">0.5×</option>
+      <option value="1" selected>1×</option>
+      <option value="2">2×</option>
+      <option value="4">4×</option>
+    </select>
+    <button id="spawnBtn">Trigger Incident</button>
+    <button id="resetBtn">Reset</button>
+  </div>
+</header>
+
+<main>
+  <div class="map-wrap">
+    <canvas id="mapCanvas" width="900" height="600" role="img" aria-label="Live map of city grid showing emergency units and incidents"></canvas>
+  </div>
+  <aside>
+    <section class="panel">
+      <h2>Fleet Overview</h2>
+      <div class="stat-grid">
+        <div class="stat"><div class="val" id="statAvailable">0</div><div class="lbl">Units available</div></div>
+        <div class="stat"><div class="val" id="statActive">0</div><div class="lbl">Active incidents</div></div>
+        <div class="stat"><div class="val" id="statHandled">0</div><div class="lbl">Calls handled</div></div>
+        <div class="stat"><div class="val" id="statAvgResponse">—</div><div class="lbl">Avg response</div></div>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Incident Queue</h2>
+      <ul class="queue-list" id="queueList"></ul>
+    </section>
+    <section class="panel">
+      <h2>Unit Status</h2>
+      <ul class="fleet-list" id="fleetList"></ul>
+    </section>
+  </aside>
+</main>
+
+<footer>
+  <span>A* pathfinding · live congestion · dynamic road closures</span>
+  <span id="closureNote">All routes clear</span>
+</footer>
+
+<script>
+(function(){
+  "use strict";
+
+  // ---------- Canvas / grid setup ----------
+  const canvas = document.getElementById('mapCanvas');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const PAD = 56;
+  const COLS = 9, ROWS = 6;
+  const spX = (W - 2*PAD) / (COLS - 1);
+  const spY = (H - 2*PAD) / (ROWS - 1);
+
+  function nodeId(r,c){ return r*COLS + c; }
+  function nodePos(id){
+    const r = Math.floor(id / COLS), c = id % COLS;
+    return { x: PAD + c*spX, y: PAD + r*spY, r, c };
+  }
+
+  const NUM_NODES = COLS*ROWS;
+  const nodes = [];
+  for(let i=0;i<NUM_NODES;i++) nodes.push(nodePos(i));
+
+  // Build rectilinear edges
+  const edges = [];
+  const edgeIndex = {}; // "a-b" -> edge
+  function edgeKey(a,b){ return a<b ? a+'_'+b : b+'_'+a; }
+  function addEdge(a,b){
+    const dx = nodes[a].x - nodes[b].x, dy = nodes[a].y - nodes[b].y;
+    const dist = Math.sqrt(dx*dx+dy*dy);
+    const e = { a, b, dist, congestion:1, blocked:false, blockedUntil:0 };
+    edges.push(e);
+    edgeIndex[edgeKey(a,b)] = e;
+  }
+  for(let r=0;r<ROWS;r++){
+    for(let c=0;c<COLS;c++){
+      const id = nodeId(r,c);
+      if(c < COLS-1) addEdge(id, nodeId(r,c+1));
+      if(r < ROWS-1) addEdge(id, nodeId(r+1,c));
+    }
+  }
+  const adj = {}; // nodeId -> [{to, edge}]
+  nodes.forEach((_,i)=> adj[i] = []);
+  edges.forEach(e=>{
+    adj[e.a].push({to:e.b, edge:e});
+    adj[e.b].push({to:e.a, edge:e});
+  });
+
+  // ---------- Stations & units ----------
+  const stationDefs = [
+    { type:'ems',    node: nodeId(1,1) },
+    { type:'ems',    node: nodeId(4,7) },
+    { type:'fire',   node: nodeId(1,7) },
+    { type:'fire',   node: nodeId(4,1) },
+    { type:'police', node: nodeId(0,4) },
+    { type:'police', node: nodeId(5,4) },
+  ];
+
+  const TYPE_META = {
+    ems:    { color:'var(--accent-ems)',    hex:'#4FA8E0', icon:'🚑', label:'EMS' },
+    fire:   { color:'var(--accent-fire)',   hex:'#5FBFA0', icon:'🚒', label:'FIRE' },
+    police: { color:'var(--accent-police)', hex:'#8B8FE8', icon:'🚓', label:'POLICE' },
+  };
+  const SEV_META = {
+    critical: { hex:'#D8442D', label:'CRITICAL' },
+    moderate: { hex:'#E0A83A', label:'MODERATE' },
+    minor:    { hex:'#D8CE6B', label:'MINOR' },
+  };
+  const INCIDENT_TYPE_TO_UNIT = { medical:'ems', fire:'fire', crime:'police' };
+  const INCIDENT_LABEL = { medical:'MEDICAL', fire:'FIRE', crime:'CRIME' };
+  const INCIDENT_ICON = { medical:'➕', fire:'🔥', crime:'🚨' };
+
+  // ---------- City blocks (visual backdrop only, no gameplay effect) ----------
+  const cityBlocks = [];
+  (function buildCityBlocks(){
+    const parkBlock = { r: 1, c: 2 };
+    const waterBlock = { r: 3, c: 5 };
+    for(let r=0;r<ROWS-1;r++){
+      for(let c=0;c<COLS-1;c++){
+        const nTL = nodes[nodeId(r,c)], nBR = nodes[nodeId(r+1,c+1)];
+        const inset = 11;
+        const bx = nTL.x+inset, by = nTL.y+inset, bw = (nBR.x-nTL.x)-inset*2, bh=(nBR.y-nTL.y)-inset*2;
+        let type = 'urban';
+        if(r===parkBlock.r && c===parkBlock.c) type='park';
+        else if(r===waterBlock.r && c===waterBlock.c) type='water';
+        const block = { x:bx, y:by, w:bw, h:bh, type, buildings:[], trees:[] };
+        if(type==='urban'){
+          const cols = 1 + Math.floor(Math.random()*2);
+          const rows = 1 + Math.floor(Math.random()*2);
+          const cw = bw/cols, ch = bh/rows;
+          for(let i=0;i<cols;i++){
+            for(let j=0;j<rows;j++){
+              const pad = 3 + Math.random()*2;
+              block.buildings.push({
+                x: bx + i*cw + pad, y: by + j*ch + pad,
+                w: cw - pad*2, h: ch - pad*2,
+                shade: 0.55 + Math.random()*0.35,
+                windows: Math.random() > 0.4
+              });
+            }
+          }
+        } else if(type==='park'){
+          const count = 6 + Math.floor(Math.random()*5);
+          for(let i=0;i<count;i++){
+            block.trees.push({ x: bx + Math.random()*bw, y: by + Math.random()*bh, r: 3+Math.random()*3 });
+          }
+        }
+        cityBlocks.push(block);
+      }
+    }
+  })();
+
+  let units = [];
+  function initUnits(){
+    units = stationDefs.map((s, i) => ({
+      id: i,
+      type: s.type,
+      home: s.node,
+      currentNode: s.node,
+      x: nodes[s.node].x,
+      y: nodes[s.node].y,
+      path: [],
+      segIdx: 0,
+      segProgress: 0,
+      state: 'idle', // idle | dispatched | onscene | returning
+      target: null,  // incident id
+      onSceneUntil: 0,
+      dispatchedAt: 0,
+      trail: [],
+      angle: 0,
+    }));
+  }
+
+  // ---------- Incidents ----------
+  let incidents = [];
+  let incidentSeq = 0;
+  let simTime = 0; // ms
+  let nextSpawnAt = 3000;
+  let nextCongestionAt = 2500;
+  let nextClosureAt = 9000;
+  let activeClosureEdge = null;
+
+  let callsHandled = 0;
+  let totalResponseTime = 0;
+
+  function pickWeighted(items){
+    const total = items.reduce((s,i)=>s+i.w,0);
+    let r = Math.random()*total;
+    for(const it of items){ if((r-=it.w) <= 0) return it.v; }
+    return items[items.length-1].v;
+  }
+
+  function spawnIncident(){
+    const type = pickWeighted([{v:'medical',w:0.4},{v:'fire',w:0.25},{v:'crime',w:0.35}]);
+    const severity = pickWeighted([{v:'critical',w:0.2},{v:'moderate',w:0.5},{v:'minor',w:0.3}]);
+    let node;
+    do { node = Math.floor(Math.random()*NUM_NODES); }
+    while(stationDefs.some(s=>s.node===node));
+    incidents.push({
+      id: incidentSeq++,
+      type, severity, node,
+      spawnTime: simTime,
+      state: 'waiting', // waiting | assigned | onscene | resolved
+      unitId: null,
+    });
+  }
+
+  // ---------- A* pathfinding ----------
+  function heuristic(a,b){
+    const na=nodes[a], nb=nodes[b];
+    return Math.hypot(na.x-nb.x, na.y-nb.y);
+  }
+  function edgeWeight(e){
+    if(e.blocked) return Infinity;
+    return e.dist * e.congestion;
+  }
+  function findPath(start, goal){
+    if(start === goal) return { path:[start], cost:0 };
+    const openSet = new Set([start]);
+    const cameFrom = {};
+    const gScore = {}; gScore[start] = 0;
+    const fScore = {}; fScore[start] = heuristic(start, goal);
+    while(openSet.size > 0){
+      let current = null, best = Infinity;
+      for(const n of openSet){ const f = fScore[n]!==undefined?fScore[n]:Infinity; if(f<best){best=f; current=n;} }
+      if(current === goal){
+        const path = [current];
+        while(cameFrom[current]!==undefined){ current = cameFrom[current]; path.unshift(current); }
+        return { path, cost: gScore[goal] };
+      }
+      openSet.delete(current);
+      for(const {to, edge} of adj[current]){
+        const w = edgeWeight(edge);
+        if(!isFinite(w)) continue;
+        const tentative = gScore[current] + w;
+        if(tentative < (gScore[to]!==undefined?gScore[to]:Infinity)){
+          cameFrom[to] = current;
+          gScore[to] = tentative;
+          fScore[to] = tentative + heuristic(to, goal);
+          openSet.add(to);
+        }
+      }
+    }
+    return null; // no path
+  }
+
+  // ---------- Dispatch logic ----------
+  const SERVICE_TIME = { medical:[4000,7000], fire:[6000,10000], crime:[3000,6000] };
+  const BASE_SPEED = 0.11; // px per ms at congestion=1
+
+  function tryDispatch(){
+    const waiting = incidents.filter(i=>i.state==='waiting')
+      .sort((a,b)=>{
+        const sevRank = {critical:0, moderate:1, minor:2};
+        if(sevRank[a.severity] !== sevRank[b.severity]) return sevRank[a.severity]-sevRank[b.severity];
+        return a.spawnTime - b.spawnTime;
+      });
+
+    for(const inc of waiting){
+      const neededType = INCIDENT_TYPE_TO_UNIT[inc.type];
+      const waitedMs = simTime - inc.spawnTime;
+      const mutualAid = waitedMs > 15000;
+
+      let candidates = units.filter(u => u.state==='idle' && (u.type===neededType || mutualAid));
+      if(candidates.length === 0) continue;
+
+      let best = null, bestCost = Infinity, bestPath = null;
+      for(const u of candidates){
+        const result = findPath(u.currentNode, inc.node);
+        if(result && result.cost < bestCost){
+          bestCost = result.cost; best = u; bestPath = result.path;
+        }
+      }
+      if(best){
+        best.state = 'dispatched';
+        best.path = bestPath;
+        best.segIdx = 0;
+        best.segProgress = 0;
+        best.target = inc.id;
+        best.dispatchedAt = simTime;
+        inc.state = 'assigned';
+        inc.unitId = best.id;
+      }
+    }
+  }
+
+  function reoptimizeUnit(u){
+    if(u.state !== 'dispatched' && u.state !== 'returning') return;
+    const remaining = u.path.slice(u.segIdx);
+    const blockedAhead = remaining.some((n,i)=>{
+      if(i===remaining.length-1) return false;
+      const e = edgeIndex[edgeKey(remaining[i], remaining[i+1])];
+      return e && e.blocked;
+    });
+    if(!blockedAhead) return;
+    const goal = u.path[u.path.length-1];
+    const result = findPath(u.currentNode, goal);
+    if(result){
+      u.path = result.path;
+      u.segIdx = 0;
+      u.segProgress = 0;
+    }
+  }
+
+  function reoptimizeAll(){
+    units.forEach(reoptimizeUnit);
+  }
+
+  // ---------- Simulation tick ----------
+  let paused = false;
+  let speedMultiplier = 1;
+
+  function updateCongestion(){
+    const shuffled = [...edges].sort(()=>Math.random()-0.5);
+    for(let i=0;i<Math.min(6, shuffled.length); i++){
+      shuffled[i].congestion = pickWeighted([{v:1,w:0.5},{v:2,w:0.35},{v:3,w:0.15}]);
+    }
+  }
+
+  function updateClosures(){
+    // clear expired closures
+    edges.forEach(e=>{
+      if(e.blocked && simTime >= e.blockedUntil){
+        e.blocked = false;
+      }
+    });
+    if(!edges.some(e=>e.blocked)){
+      const candidate = edges[Math.floor(Math.random()*edges.length)];
+      candidate.blocked = true;
+      candidate.blockedUntil = simTime + 6000 + Math.random()*5000;
+      reoptimizeAll();
+    }
+    const closed = edges.filter(e=>e.blocked);
+    document.getElementById('closureNote').textContent = closed.length
+      ? `Road closed near node ${closed[0].a}–${closed[0].b} · units rerouting`
+      : 'All routes clear';
+  }
+
+  function moveUnit(u, dt){
+    if(u.state !== 'dispatched' && u.state !== 'returning') return;
+    if(u.segIdx >= u.path.length - 1){
+      arriveAtDestination(u);
+      return;
+    }
+    const from = u.path[u.segIdx], to = u.path[u.segIdx+1];
+    const e = edgeIndex[edgeKey(from,to)];
+    if(!e || e.blocked){ reoptimizeUnit(u); return; }
+    const travelTime = e.dist / (BASE_SPEED / e.congestion);
+    u.segProgress += dt / travelTime;
+    if(u.segProgress >= 1){
+      u.segProgress = 0;
+      u.segIdx += 1;
+      u.currentNode = to;
+      if(u.segIdx >= u.path.length - 1){
+        arriveAtDestination(u);
+        return;
+      }
+    }
+    const p0 = nodes[u.path[u.segIdx]], p1 = nodes[u.path[u.segIdx+1]];
+    u.x = p0.x + (p1.x - p0.x) * u.segProgress;
+    u.y = p0.y + (p1.y - p0.y) * u.segProgress;
+    u.angle = Math.atan2(p1.y - p0.y, p1.x - p0.x);
+    u.trail.push({ x:u.x, y:u.y, t: simTime });
+    if(u.trail.length > 14) u.trail.shift();
+  }
+
+  function arriveAtDestination(u){
+    const finalNode = u.path[u.path.length-1];
+    u.currentNode = finalNode;
+    u.x = nodes[finalNode].x;
+    u.y = nodes[finalNode].y;
+    if(u.state === 'dispatched'){
+      const inc = incidents.find(i=>i.id===u.target);
+      if(inc){
+        inc.state = 'onscene';
+        const [lo,hi] = SERVICE_TIME[inc.type];
+        inc.serviceUntil = simTime + lo + Math.random()*(hi-lo);
+        totalResponseTime += (simTime - inc.spawnTime);
+      }
+      u.state = 'onscene';
+    } else if(u.state === 'returning'){
+      u.state = 'idle';
+      u.path = [];
+      u.target = null;
+    }
+    u.trail = [];
+  }
+
+  function updateOnScene(){
+    incidents.forEach(inc=>{
+      if(inc.state === 'onscene' && simTime >= inc.serviceUntil){
+        inc.state = 'resolved';
+        callsHandled += 1;
+        const u = units.find(uu=>uu.id===inc.unitId);
+        if(u){
+          const result = findPath(u.currentNode, u.home);
+          u.state = 'returning';
+          u.path = result ? result.path : [u.currentNode, u.home];
+          u.segIdx = 0;
+          u.segProgress = 0;
+        }
+      }
+    });
+    incidents = incidents.filter(i=>i.state !== 'resolved');
+  }
+
+  function tick(dt){
+    simTime += dt;
+    if(simTime >= nextSpawnAt){
+      if(incidents.filter(i=>i.state!=='resolved').length < 10) spawnIncident();
+      nextSpawnAt = simTime + 2800 + Math.random()*2800;
+    }
+    if(simTime >= nextCongestionAt){
+      updateCongestion();
+      nextCongestionAt = simTime + 3500;
+    }
+    if(simTime >= nextClosureAt){
+      updateClosures();
+      nextClosureAt = simTime + 8000;
+    }
+    tryDispatch();
+    units.forEach(u => moveUnit(u, dt));
+    updateOnScene();
+  }
+
+  // ---------- Rendering ----------
+  function cssVar(name){
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
+  function draw(){
+    const isLight = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim().toUpperCase() === '#EDEFF1'
+      || document.documentElement.getAttribute('data-theme') === 'light';
+    const bg = cssVar('--panel-2') || '#0E141C';
+    const roadC = cssVar('--road') || '#212C37';
+    const roadBusy = cssVar('--road-busy') || '#7A5A2A';
+    const roadHeavy = cssVar('--road-heavy') || '#7A3A2A';
+    const line = cssVar('--line') || '#212C37';
+    const textDim = cssVar('--text-dim') || '#7C8A97';
+    const panel = cssVar('--panel') || '#121821';
+
+    ctx.clearRect(0,0,W,H);
+
+    // ambient backdrop wash
+    const grad = ctx.createRadialGradient(W*0.5, H*0.42, 40, W*0.5, H*0.5, W*0.75);
+    grad.addColorStop(0, isLight ? '#FAFBFC' : '#131B24');
+    grad.addColorStop(1, bg);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0,0,W,H);
+
+    // ---- city blocks ----
+    cityBlocks.forEach(block=>{
+      if(block.type === 'water'){
+        const wg = ctx.createLinearGradient(block.x, block.y, block.x, block.y+block.h);
+        wg.addColorStop(0, isLight ? '#BFDCE8' : '#12303D');
+        wg.addColorStop(1, isLight ? '#A9CEDD' : '#0C2530');
+        ctx.fillStyle = wg;
+        roundRect(block.x, block.y, block.w, block.h, 6);
+        ctx.fill();
+        ctx.strokeStyle = isLight ? '#8FB9C9' : '#1B4A5C';
+        ctx.lineWidth = 1;
+        for(let i=0;i<3;i++){
+          const wy = block.y + (i+1)*block.h/4 + 3*Math.sin(simTime/900 + i);
+          ctx.beginPath();
+          ctx.moveTo(block.x+6, wy);
+          ctx.lineTo(block.x+block.w-6, wy);
+          ctx.globalAlpha = 0.35;
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+      } else if(block.type === 'park'){
+        ctx.fillStyle = isLight ? '#D8E6D0' : '#152A1C';
+        roundRect(block.x, block.y, block.w, block.h, 6);
+        ctx.fill();
+        block.trees.forEach(t=>{
+          ctx.beginPath();
+          ctx.arc(t.x, t.y, t.r, 0, Math.PI*2);
+          ctx.fillStyle = isLight ? '#8FB87A' : '#2E5C3A';
+          ctx.fill();
+        });
+      } else {
+        ctx.fillStyle = isLight ? '#E4E7EA' : '#0F161E';
+        roundRect(block.x, block.y, block.w, block.h, 5);
+        ctx.fill();
+        block.buildings.forEach(b=>{
+          ctx.save();
+          ctx.shadowColor = 'rgba(0,0,0,0.35)';
+          ctx.shadowBlur = 4;
+          ctx.shadowOffsetY = 2;
+          const shade = isLight
+            ? `rgba(150,160,170,${b.shade*0.5})`
+            : `rgba(${40+b.shade*30},${52+b.shade*34},${64+b.shade*38},1)`;
+          ctx.fillStyle = shade;
+          roundRect(b.x, b.y, b.w, b.h, 2);
+          ctx.fill();
+          ctx.restore();
+          if(b.windows && b.w>10 && b.h>10){
+            ctx.fillStyle = isLight ? 'rgba(255,255,255,0.6)' : 'rgba(232,201,63,0.35)';
+            const wx = Math.max(2, Math.floor(b.w/6));
+            const wy = Math.max(2, Math.floor(b.h/6));
+            for(let i=0;i<wx;i++){
+              for(let j=0;j<wy;j++){
+                ctx.fillRect(b.x+3+i*5.5, b.y+3+j*5.5, 1.6, 1.6);
+              }
+            }
+          }
+        });
+      }
+    });
+
+    function roundRect(x,y,w,h,r){
+      ctx.beginPath();
+      ctx.moveTo(x+r,y);
+      ctx.arcTo(x+w,y,x+w,y+h,r);
+      ctx.arcTo(x+w,y+h,x,y+h,r);
+      ctx.arcTo(x,y+h,x,y,r);
+      ctx.arcTo(x,y,x+w,y,r);
+      ctx.closePath();
+    }
+
+    // ---- roads ----
+    edges.forEach(e=>{
+      const p0 = nodes[e.a], p1 = nodes[e.b];
+      ctx.lineCap = 'round';
+      // base bed
+      ctx.beginPath();
+      ctx.moveTo(p0.x,p0.y); ctx.lineTo(p1.x,p1.y);
+      ctx.strokeStyle = isLight ? '#D7DCE1' : '#182129';
+      ctx.lineWidth = 13;
+      ctx.stroke();
+      // lane markings
+      ctx.beginPath();
+      ctx.moveTo(p0.x,p0.y); ctx.lineTo(p1.x,p1.y);
+      ctx.setLineDash([7,7]);
+      ctx.strokeStyle = isLight ? '#BFC7CE' : '#2A3743';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // status overlay
+      if(e.blocked){
+        ctx.beginPath();
+        ctx.moveTo(p0.x,p0.y); ctx.lineTo(p1.x,p1.y);
+        ctx.strokeStyle = '#D8442D';
+        ctx.globalAlpha = 0.75;
+        ctx.setLineDash([8,6]);
+        ctx.lineWidth = 5;
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+        const mx=(p0.x+p1.x)/2, my=(p0.y+p1.y)/2;
+        ctx.font = '13px sans-serif';
+        ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillText('🚧', mx, my);
+        ctx.textBaseline='alphabetic';
+      } else if(e.congestion >= 3){
+        ctx.beginPath();
+        ctx.moveTo(p0.x,p0.y); ctx.lineTo(p1.x,p1.y);
+        ctx.strokeStyle = roadHeavy;
+        ctx.globalAlpha = 0.7;
+        ctx.lineWidth = 6;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      } else if(e.congestion === 2){
+        ctx.beginPath();
+        ctx.moveTo(p0.x,p0.y); ctx.lineTo(p1.x,p1.y);
+        ctx.strokeStyle = roadBusy;
+        ctx.globalAlpha = 0.55;
+        ctx.lineWidth = 5;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      ctx.lineCap = 'butt';
+    });
+
+    // intersections
+    nodes.forEach(n=>{
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, 3, 0, Math.PI*2);
+      ctx.fillStyle = isLight ? '#C7CDD3' : '#232F3A';
+      ctx.fill();
+    });
+
+    // ---- route lines (marching ants) ----
+    units.forEach(u=>{
+      if((u.state==='dispatched' || u.state==='returning') && u.path.length>1){
+        const meta = TYPE_META[u.type];
+        ctx.beginPath();
+        ctx.moveTo(u.x, u.y);
+        for(let i=u.segIdx+1;i<u.path.length;i++){
+          const p = nodes[u.path[i]];
+          ctx.lineTo(p.x,p.y);
+        }
+        ctx.setLineDash([6,6]);
+        ctx.lineDashOffset = -simTime/40;
+        ctx.strokeStyle = meta.hex;
+        ctx.globalAlpha = 0.55;
+        ctx.lineWidth = 2.2;
+        ctx.shadowColor = meta.hex;
+        ctx.shadowBlur = 6;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+        ctx.globalAlpha = 1;
+        ctx.setLineDash([]);
+        ctx.lineDashOffset = 0;
+      }
+    });
+
+    // ---- stations ----
+    stationDefs.forEach(s=>{
+      const p = nodes[s.node];
+      const meta = TYPE_META[s.type];
+      const halo = 20 + 2*Math.sin(simTime/700 + s.node);
+      const hg = ctx.createRadialGradient(p.x,p.y,2,p.x,p.y,halo);
+      hg.addColorStop(0, meta.hex + '55');
+      hg.addColorStop(1, meta.hex + '00');
+      ctx.fillStyle = hg;
+      ctx.beginPath();
+      ctx.arc(p.x,p.y,halo,0,Math.PI*2);
+      ctx.fill();
+
+      ctx.save();
+      ctx.shadowColor = 'rgba(0,0,0,0.4)';
+      ctx.shadowBlur = 5;
+      ctx.shadowOffsetY = 2;
+      ctx.fillStyle = panel;
+      roundRect(p.x-11, p.y-11, 22, 22, 5);
+      ctx.fill();
+      ctx.restore();
+      ctx.strokeStyle = meta.hex;
+      ctx.lineWidth = 2;
+      roundRect(p.x-11, p.y-11, 22, 22, 5);
+      ctx.stroke();
+      ctx.font = '13px sans-serif';
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(meta.icon, p.x, p.y+1);
+      ctx.textBaseline='alphabetic';
+      ctx.font = '8.5px "IBM Plex Mono", monospace';
+      ctx.fillStyle = textDim;
+      ctx.fillText(meta.label, p.x, p.y-17);
+    });
+
+    // ---- incidents ----
+    incidents.forEach(inc=>{
+      const p = nodes[inc.node];
+      const meta = SEV_META[inc.severity];
+      const age = simTime - inc.spawnTime;
+      const pulse = 3*Math.sin(simTime/260);
+      const baseR = 12 + pulse;
+
+      // spawn burst ring
+      if(age < 800){
+        const t = age/800;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 10 + t*26, 0, Math.PI*2);
+        ctx.strokeStyle = meta.hex;
+        ctx.globalAlpha = (1-t)*0.7;
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+
+      const glow = ctx.createRadialGradient(p.x,p.y,1,p.x,p.y, baseR*2.1);
+      glow.addColorStop(0, meta.hex + (inc.state==='waiting' ? '55' : '99'));
+      glow.addColorStop(1, meta.hex + '00');
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(p.x,p.y, baseR*2.1, 0, Math.PI*2);
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, Math.max(baseR-3,8), 0, Math.PI*2);
+      ctx.fillStyle = meta.hex;
+      ctx.globalAlpha = inc.state==='waiting' ? 0.55 : 0.95;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      if(inc.state==='waiting'){
+        ctx.setLineDash([3,3]);
+        ctx.strokeStyle = meta.hex;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.setLineDash([]);
+      } else {
+        ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      ctx.font = '11px sans-serif';
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(INCIDENT_ICON[inc.type], p.x, p.y+0.5);
+      ctx.textBaseline='alphabetic';
+    });
+
+    // ---- units (trail + vehicle) ----
+    units.forEach(u=>{
+      const meta = TYPE_META[u.type];
+      // trail
+      u.trail.forEach((pt,i)=>{
+        const age = simTime - pt.t;
+        if(age > 900) return;
+        const a = (1 - age/900) * 0.35 * (i/u.trail.length);
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 3.2, 0, Math.PI*2);
+        ctx.fillStyle = meta.hex;
+        ctx.globalAlpha = a;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      });
+
+      const moving = u.state==='dispatched' || u.state==='returning';
+      ctx.save();
+      ctx.translate(u.x, u.y);
+      if(moving) ctx.rotate(u.angle);
+      // heading wedge
+      if(moving){
+        ctx.beginPath();
+        ctx.moveTo(6,0);
+        ctx.lineTo(16,-5);
+        ctx.lineTo(16,5);
+        ctx.closePath();
+        ctx.fillStyle = meta.hex;
+        ctx.globalAlpha = 0.85;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      ctx.restore();
+
+      ctx.save();
+      ctx.shadowColor = 'rgba(0,0,0,0.45)';
+      ctx.shadowBlur = 5;
+      ctx.shadowOffsetY = 2;
+      ctx.beginPath();
+      ctx.arc(u.x, u.y, 12, 0, Math.PI*2);
+      ctx.fillStyle = panel;
+      ctx.fill();
+      ctx.restore();
+      ctx.beginPath();
+      ctx.arc(u.x, u.y, 12, 0, Math.PI*2);
+      ctx.strokeStyle = meta.hex;
+      ctx.lineWidth = u.state==='onscene' ? 3 : 2;
+      ctx.stroke();
+      if(u.state==='onscene'){
+        const p2 = 2*Math.sin(simTime/200);
+        ctx.beginPath();
+        ctx.arc(u.x, u.y, 15+p2, 0, Math.PI*2);
+        ctx.strokeStyle = meta.hex;
+        ctx.globalAlpha = 0.4;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      ctx.font = '13px sans-serif';
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(meta.icon, u.x, u.y+1);
+      ctx.textBaseline='alphabetic';
+    });
+
+    // ---- legend ----
+    const legX = 14, legY = H-96, legW = 168, legH = 82;
+    ctx.save();
+    ctx.globalAlpha = 0.92;
+    ctx.fillStyle = panel;
+    roundRect(legX, legY, legW, legH, 6);
+    ctx.fill();
+    ctx.strokeStyle = line;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.restore();
+    ctx.font = '9px "IBM Plex Mono", monospace';
+    ctx.fillStyle = textDim;
+    ctx.textAlign = 'left';
+    ctx.fillText('SEVERITY', legX+10, legY+16);
+    Object.entries(SEV_META).forEach(([key,m], i)=>{
+      const yy = legY+16 + (i+1)*15;
+      ctx.beginPath();
+      ctx.arc(legX+14, yy-3, 4, 0, Math.PI*2);
+      ctx.fillStyle = m.hex;
+      ctx.fill();
+      ctx.fillStyle = textDim;
+      ctx.fillText(m.label, legX+24, yy);
+    });
+    ctx.fillStyle = textDim;
+    ctx.fillText('UNITS', legX+92, legY+16);
+    Object.entries(TYPE_META).forEach(([key,m], i)=>{
+      const yy = legY+16 + (i+1)*15;
+      ctx.font = '10px sans-serif';
+      ctx.fillText(m.icon, legX+92, yy+1);
+      ctx.font = '9px "IBM Plex Mono", monospace';
+      ctx.fillStyle = textDim;
+      ctx.fillText(m.label, legX+108, yy);
+    });
+
+    // vignette
+    const vg = ctx.createRadialGradient(W/2,H/2, H*0.35, W/2,H/2, H*0.9);
+    vg.addColorStop(0,'rgba(0,0,0,0)');
+    vg.addColorStop(1, isLight ? 'rgba(0,0,0,0.05)' : 'rgba(0,0,0,0.35)');
+    ctx.fillStyle = vg;
+    ctx.fillRect(0,0,W,H);
+  }
+
+  // ---------- UI updates ----------
+  function formatClock(ms){
+    const totalSec = Math.floor(ms/1000);
+    const m = Math.floor(totalSec/60).toString().padStart(2,'0');
+    const s = (totalSec%60).toString().padStart(2,'0');
+    return m+':'+s;
+  }
+
+  function updateSidebar(){
+    document.getElementById('clockReadout').textContent = formatClock(simTime);
+
+    const available = units.filter(u=>u.state==='idle').length;
+    document.getElementById('statAvailable').textContent = available;
+    document.getElementById('statActive').textContent = incidents.length;
+    document.getElementById('statHandled').textContent = callsHandled;
+    document.getElementById('statAvgResponse').textContent = callsHandled>0
+      ? Math.round(totalResponseTime/callsHandled/1000)+'s'
+      : '—';
+
+    const queueList = document.getElementById('queueList');
+    queueList.innerHTML = '';
+    if(incidents.length === 0){
+      const li = document.createElement('li');
+      li.className='empty-note';
+      li.textContent = 'No active incidents';
+      queueList.appendChild(li);
+    } else {
+      incidents.slice().sort((a,b)=>a.spawnTime-b.spawnTime).slice(0,8).forEach(inc=>{
+        const li = document.createElement('li');
+        const dot = document.createElement('span');
+        dot.className='dot';
+        dot.style.background = SEV_META[inc.severity].hex;
+        const meta = document.createElement('div');
+        meta.className='meta';
+        const stateLabel = inc.state==='waiting' ? 'waiting' : inc.state==='assigned' ? 'en route' : 'on scene';
+        meta.innerHTML = `<div class="type-line"><span>${INCIDENT_LABEL[inc.type]}</span><span class="wait">${stateLabel}</span></div>`;
+        li.appendChild(dot);
+        li.appendChild(meta);
+        queueList.appendChild(li);
+      });
+    }
+
+    const fleetList = document.getElementById('fleetList');
+    fleetList.innerHTML = '';
+    units.forEach(u=>{
+      const li = document.createElement('li');
+      const dot = document.createElement('span');
+      dot.className='dot';
+      dot.style.background = TYPE_META[u.type].hex;
+      const name = document.createElement('span');
+      name.className='unit-name';
+      name.textContent = `${TYPE_META[u.type].label} ${u.id+1}`;
+      const status = document.createElement('span');
+      status.className='unit-status';
+      status.textContent = u.state;
+      li.appendChild(dot);
+      li.appendChild(name);
+      li.appendChild(status);
+      fleetList.appendChild(li);
+    });
+  }
+
+  // ---------- Main loop ----------
+  let lastFrame = null;
+  function frame(ts){
+    if(lastFrame === null) lastFrame = ts;
+    let dt = ts - lastFrame;
+    lastFrame = ts;
+    dt = Math.min(dt, 100);
+    if(!paused){
+      tick(dt * speedMultiplier);
+    }
+    draw();
+    updateSidebar();
+    requestAnimationFrame(frame);
+  }
+
+  // ---------- Controls ----------
+  document.getElementById('playPauseBtn').addEventListener('click', (e)=>{
+    paused = !paused;
+    e.target.textContent = paused ? 'Resume' : 'Pause';
+  });
+  document.getElementById('speedSelect').addEventListener('change', (e)=>{
+    speedMultiplier = parseFloat(e.target.value);
+  });
+  document.getElementById('spawnBtn').addEventListener('click', ()=>{
+    if(incidents.filter(i=>i.state!=='resolved').length < 12) spawnIncident();
+  });
+  document.getElementById('resetBtn').addEventListener('click', ()=>{
+    location.reload();
+  });
+
+  // ---------- Init ----------
+  function init(){
+    initUnits();
+    incidents = [];
+    simTime = 0;
+    callsHandled = 0;
+    totalResponseTime = 0;
+    edges.forEach(e=>{ e.congestion = 1; e.blocked = false; });
+    requestAnimationFrame(frame);
+  }
+  init();
+})();
+</script>
+</body>
+</html>

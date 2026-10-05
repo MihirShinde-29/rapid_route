@@ -1,0 +1,63 @@
+MIME-Version: 1.0
+Date: Mon, 21 Sep 2026 16:52:06 -0400
+Message-ID: <CAC5dJVjiQKc+NnG=keLMtQ61JO3yKR06Lrc1D4-72w8=4+2cyw@mail.gmail.com>
+Subject: [CS 549] Project Approval Request - Group Vector Response
+From: Mihir Umesh Shinde <mus12@scarletmail.rutgers.edu>
+To: mk1353@cs.rutgers.edu, mubbasir.kapadia@gmail.com, 
+	DANRUI LI <danrui.li@rutgers.edu>, Sen Zhang <sz519@scarletmail.rutgers.edu>
+Cc: Ananya Das Hullumane Neelameghashyam <ah1895@scarletmail.rutgers.edu>
+Content-Type: multipart/alternative; boundary="0000000000006c34d4065c046cd4"
+
+--0000000000006c34d4065c046cd4
+Content-Type: text/plain; charset="UTF-8"
+
+Dear Mubbasir Kapadia, Danrui, and Sen,
+
+Our group (Rapid Route) would like to request formal approval for our
+semester project concept, revised based on TA feedback.
+
+Project summary: "Dispatch" is an interactive visual simulation of a city's
+traffic and emergency response. The core of the project is a realistic
+traffic substrate: a zone-based city map where building density drives trip
+generation, an origin-destination (OD) matrix distributes trips across
+zones with peak/off-peak variation, and a car-following microsimulation
+with junction-level right-of-way rules moves hundreds of vehicles without
+overlaps or desyncs. Routes are assigned by lowest expected travel cost,
+not raw distance. Emergency units (ambulances, fire trucks, police) are
+then dispatched through this same realistic traffic, rather than through
+hand-waved random congestion.
+
+Selected pillars (changed):
+1. Pathfinding & Navigation
+2. Swarm & Boids Modeling
+
+Could you please confirm formal approval of this revised concept and let us
+know which mentor will be assigned to our group for the semester?
+
+Thank you,
+Mihir Shinde (Group Leader)
+On behalf of Group Rapid Route
+
+--0000000000006c34d4065c046cd4
+Content-Type: text/html; charset="UTF-8"
+Content-Transfer-Encoding: quoted-printable
+
+<div dir=3D"ltr">Dear Mubbasir Kapadia, Danrui, and Sen,<br><br>Our group (=
+Rapid Route) would like to request formal approval for our semester project=
+ concept, revised based on TA feedback.<br><br>Project summary: &quot;Dispa=
+tch&quot; is an interactive visual simulation of a city&#39;s traffic and e=
+mergency response. The core of the project is a realistic traffic substrate=
+: a zone-based city map where building density drives trip generation, an o=
+rigin-destination (OD) matrix distributes trips across zones with peak/off-=
+peak variation, and a car-following microsimulation with junction-level rig=
+ht-of-way rules moves hundreds of vehicles without overlaps or desyncs. Rou=
+tes are assigned by lowest expected travel cost, not raw distance. Emergenc=
+y units (ambulances, fire trucks, police) are then dispatched through this =
+same realistic traffic, rather than through hand-waved random congestion.<b=
+r><br>Selected pillars (changed):<br>1. Pathfinding &amp; Navigation<br>2. =
+Swarm &amp; Boids Modeling<br><br>Could you please confirm formal approval =
+of this revised concept and let us know which mentor will be assigned to ou=
+r group for the semester?<br><br>Thank you,<br>Mihir Shinde (Group Leader)<=
+br>On behalf of Group Rapid Route</div>
+
+--0000000000006c34d4065c046cd4--

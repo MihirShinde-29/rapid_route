@@ -31,4 +31,14 @@ describe('A* router', () => {
     expect(result.links).toEqual([2, 3]);
     expect(result.cost).toBeCloseTo(20, 6);
   });
+
+  it('can compare a shorter congested candidate with a longer live route', () => {
+    const net = testNetwork();
+    const live = new Router(net, (link) => (link.id === 0 || link.id === 1 ? 80 : 10));
+    const shorter = new Router(net, (link) => link.length).routeWithCost(0, 2);
+    const chosen = live.routeWithCost(0, 2);
+    expect(chosen.links).toEqual([2, 3]);
+    expect(live.pathCost(chosen.links)).toBeLessThan(live.pathCost(shorter.links));
+    expect(live.pathDistance(chosen.links)).toBeGreaterThan(live.pathDistance(shorter.links));
+  });
 });

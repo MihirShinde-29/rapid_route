@@ -59,6 +59,14 @@ export class Router {
     return { links: links.reverse(), cost: g[to] };
   }
 
+  pathCost(links: number[]): number {
+    return links.reduce((sum, id) => sum + this.cost(this.net.links[id]), 0);
+  }
+
+  pathDistance(links: number[]): number {
+    return links.reduce((sum, id) => sum + this.net.links[id].length, 0);
+  }
+
   private heuristic(from: number, to: number): number {
     const a = this.net.nodes[from];
     const b = this.net.nodes[to];

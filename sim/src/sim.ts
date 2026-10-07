@@ -12,7 +12,10 @@ export interface RouteDecision {
   from: number;
   to: number;
   chosen: RouteResult;
-  shortest: RouteResult;
+  shorter: RouteResult;
+  chosenDistance: number;
+  shorterDistance: number;
+  shorterLiveCost: number;
   time: number;
 }
 
@@ -28,7 +31,7 @@ export const DEFAULT_CONFIG: SimConfig = {
   seed: 549,
   grid: DEFAULT_GRID,
   startHour: 6,
-  peakTripsPerHour: 4500, // ~225 cars at peak; the single-lane grid breaks down above ~5000
+  peakTripsPerHour: 9000, // ~200 cars at peak in the MVP stress test
   beta: 0.02,
 };
 
@@ -41,9 +44,10 @@ export class Simulation {
   readonly cost: Float64Array;
   readonly trips: TripGenerator;
   readonly router: Router;
-  readonly freeFlowRouter: Router;
+  readonly distanceRouter: Router;
   readonly traffic: TrafficModel;
   readonly routeLog: RouteDecision[] = [];
+  proofRoute: RouteDecision | null = null;
   time: number;
 
   readonly produced: Int32Array;
@@ -64,7 +68,7 @@ export class Simulation {
     // Route at departure using current mean link speed. Empty links naturally
     // fall back to their speed limit through TrafficModel.linkMeanSpeed().
     this.router = new Router(this.grid.net, (link) => link.length / Math.max(1, this.traffic.linkMeanSpeed(link.id)));
-    this.freeFlowRouter = new Router(this.grid.net);
+    this.distanceRouter = new Router(this.grid.net, (link) => link.length);
     this.time = config.startHour * HOUR;
     this.produced = new Int32Array(this.zones.length);
     this.attracted = new Int32Array(this.zones.length);
@@ -77,8 +81,20 @@ export class Simulation {
       this.attracted[trip.destZone]++;
       this.recent.push(trip.departTime);
       const chosen = this.router.routeWithCost(trip.originNode, trip.destNode);
-      const shortest = this.freeFlowRouter.routeWithCost(trip.originNode, trip.destNode);
-      this.routeLog.unshift({ tripId: trip.id, from: trip.originNode, to: trip.destNode, chosen, shortest, time: this.time });
+      const shorter = this.distanceRouter.routeWithCost(trip.originNode, trip.destNode);
+      const decision: RouteDecision = {
+        tripId: trip.id,
+        from: trip.originNode,
+        to: trip.destNode,
+        chosen,
+        shorter,
+        chosenDistance: this.router.pathDistance(chosen.links),
+        shorterDistance: this.distanceRouter.pathDistance(shorter.links),
+        shorterLiveCost: this.router.pathCost(shorter.links),
+        time: this.time,
+      };
+      this.routeLog.unshift(decision);
+      if (!this.proofRoute && this.isLongerFaster(decision)) this.proofRoute = decision;
       if (this.routeLog.length > 20) this.routeLog.pop();
       this.traffic.enqueue(trip, chosen.links);
     }
@@ -94,5 +110,9 @@ export class Simulation {
   // Observed departures over the trailing sim hour.
   observedTripsPerHour(): number {
     return this.recent.length;
+  }
+
+  private isLongerFaster(decision: RouteDecision): boolean {
+    return decision.chosen.links.length > decision.shorter.links.length && decision.chosen.cost < decision.shorterLiveCost;
   }
 }

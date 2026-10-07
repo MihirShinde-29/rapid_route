@@ -310,7 +310,7 @@ export class View3D {
   // Highlight the most recently assigned route so the cost proof is visible
   // in the same view as the traffic and congestion tinting.
   private syncRouteHighlight(): void {
-    const decision = this.sim.routeLog[0];
+    const decision = this.sim.proofRoute ?? this.sim.routeLog[0];
     if (!this.routeHighlight || !decision) return;
     if (decision.tripId === this.highlightedTrip) return;
     this.highlightedTrip = decision.tripId;

@@ -30,6 +30,7 @@ Open `http://localhost:5173/?start=8` to open at 08:00 with the morning peak alr
 
 Done so far: zones with density, a production-constrained gravity OD matrix per time-of-day period, Poisson trip
 generation with AM/PM peaks, IDM car-following, junction right-of-way, A* route assignment using live mean link speeds,
-and a 3D view (buildings follow zone density, roads tint by congestion, OD arcs and heatmap). The latest assigned route
-is highlighted in yellow and the sidebar compares its live expected travel time with the free-flow shortest baseline.
+and a 3D view (buildings follow zone density, roads tint by congestion, OD arcs and heatmap). The app compares the
+selected live route against a shorter distance-based candidate using current travel times. When a longer route is faster,
+it is retained as the proof route, highlighted in yellow, and labeled in the sidebar.
 Work split: `docs/MVP_WORK_SPLIT.md`.

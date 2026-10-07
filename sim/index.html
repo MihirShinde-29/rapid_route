@@ -179,17 +179,17 @@
           <h2>Route assignment proof</h2>
           <div class="stat-grid">
             <div class="stat"><div class="val" id="routeChosen">—</div><div class="lbl">Chosen live cost</div></div>
-            <div class="stat"><div class="val" id="routeBaseline">—</div><div class="lbl">Free-flow shortest</div></div>
+            <div class="stat"><div class="val" id="routeBaseline">—</div><div class="lbl">Shorter route live cost</div></div>
           </div>
           <div class="note" id="routeDelta">Waiting for a departure…</div>
-          <div class="route-log" id="routeLog">Latest route decision appears here.</div>
+          <div class="route-log" id="routeLog">Waiting for a longer-but-faster example.</div>
         </section>
       </aside>
     </main>
 
     <footer>
       <span>IDM car-following · junction right-of-way · gravity OD demand · roads:<span class="key" style="background:#7a5a2a"></span>slow<span class="key" style="background:#7a3a2a"></span>jammed</span>
-      <span><b style="color:#ffd166">yellow route</b> = latest cost-based assignment · live link travel time</span>
+      <span><b style="color:#ffd166">yellow route</b> = proof route when found · live link travel time</span>
     </footer>
     <script type="module" src="/src/main.ts"></script>
   </body>

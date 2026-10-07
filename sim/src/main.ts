@@ -75,14 +75,16 @@ function updateSidebar(): void {
   $('backlog').textContent = traffic.waitingToDepart.toLocaleString();
   $('gridlock').textContent = `Removed by gridlock guard (stopped > 3 min): ${traffic.removedGridlock}`;
 
-  const latestRoute = sim.routeLog[0];
+  const latestRoute = sim.proofRoute ?? sim.routeLog[0];
   if (latestRoute) {
     const selected = latestRoute.chosen;
-    const baseline = latestRoute.shortest;
+    const shorter = latestRoute.shorter;
     $('routeChosen').textContent = `${selected.cost.toFixed(1)} s`;
-    $('routeBaseline').textContent = `${baseline.cost.toFixed(1)} s`;
-    $('routeDelta').textContent = `${selected.links.length} links vs ${baseline.links.length} free-flow`;
-    $('routeLog').textContent = `Trip #${latestRoute.tripId}: chosen ${selected.cost.toFixed(1)} s · shortest ${baseline.cost.toFixed(1)} s`;
+    $('routeBaseline').textContent = `${latestRoute.shorterLiveCost.toFixed(1)} s`;
+    $('routeDelta').textContent = `${selected.links.length} links / ${latestRoute.chosenDistance.toFixed(0)} m vs ${shorter.links.length} links / ${latestRoute.shorterDistance.toFixed(0)} m`;
+    $('routeLog').textContent = sim.proofRoute
+      ? `PROOF trip #${latestRoute.tripId}: longer route is ${(latestRoute.shorterLiveCost - selected.cost).toFixed(1)} s faster`
+      : `Monitoring trip #${latestRoute.tripId}: waiting for a longer-but-faster example`;
   }
 
   if (period !== shownPeriod) {

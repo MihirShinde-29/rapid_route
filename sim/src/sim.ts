@@ -4,8 +4,17 @@ import { buildGrid, DEFAULT_GRID, type Grid, type GridOptions } from './network/
 import { generateZones, type Zone } from './demand/zones';
 import { zoneCostMatrix } from './demand/od';
 import { TripGenerator, type Trip } from './demand/trips';
-import { Router } from './routing/router';
+import { Router, type RouteResult } from './routing/router';
 import { TrafficModel } from './traffic/traffic';
+
+export interface RouteDecision {
+  tripId: number;
+  from: number;
+  to: number;
+  chosen: RouteResult;
+  shortest: RouteResult;
+  time: number;
+}
 
 export interface SimConfig {
   seed: number;
@@ -32,7 +41,9 @@ export class Simulation {
   readonly cost: Float64Array;
   readonly trips: TripGenerator;
   readonly router: Router;
+  readonly freeFlowRouter: Router;
   readonly traffic: TrafficModel;
+  readonly routeLog: RouteDecision[] = [];
   time: number;
 
   readonly produced: Int32Array;
@@ -49,8 +60,11 @@ export class Simulation {
       peakTripsPerHour: config.peakTripsPerHour,
       beta: config.beta,
     });
-    this.router = new Router(this.grid.net);
     this.traffic = new TrafficModel(this.grid.net);
+    // Route at departure using current mean link speed. Empty links naturally
+    // fall back to their speed limit through TrafficModel.linkMeanSpeed().
+    this.router = new Router(this.grid.net, (link) => link.length / Math.max(1, this.traffic.linkMeanSpeed(link.id)));
+    this.freeFlowRouter = new Router(this.grid.net);
     this.time = config.startHour * HOUR;
     this.produced = new Int32Array(this.zones.length);
     this.attracted = new Int32Array(this.zones.length);
@@ -62,7 +76,11 @@ export class Simulation {
       this.produced[trip.originZone]++;
       this.attracted[trip.destZone]++;
       this.recent.push(trip.departTime);
-      this.traffic.enqueue(trip, this.router.route(trip.originNode, trip.destNode));
+      const chosen = this.router.routeWithCost(trip.originNode, trip.destNode);
+      const shortest = this.freeFlowRouter.routeWithCost(trip.originNode, trip.destNode);
+      this.routeLog.unshift({ tripId: trip.id, from: trip.originNode, to: trip.destNode, chosen, shortest, time: this.time });
+      if (this.routeLog.length > 20) this.routeLog.pop();
+      this.traffic.enqueue(trip, chosen.links);
     }
     this.traffic.step(this.time, dt);
     this.totalTrips += spawned.length;

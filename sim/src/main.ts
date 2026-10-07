@@ -75,6 +75,16 @@ function updateSidebar(): void {
   $('backlog').textContent = traffic.waitingToDepart.toLocaleString();
   $('gridlock').textContent = `Removed by gridlock guard (stopped > 3 min): ${traffic.removedGridlock}`;
 
+  const latestRoute = sim.routeLog[0];
+  if (latestRoute) {
+    const selected = latestRoute.chosen;
+    const baseline = latestRoute.shortest;
+    $('routeChosen').textContent = `${selected.cost.toFixed(1)} s`;
+    $('routeBaseline').textContent = `${baseline.cost.toFixed(1)} s`;
+    $('routeDelta').textContent = `${selected.links.length} links vs ${baseline.links.length} free-flow`;
+    $('routeLog').textContent = `Trip #${latestRoute.tripId}: chosen ${selected.cost.toFixed(1)} s · shortest ${baseline.cost.toFixed(1)} s`;
+  }
+
   if (period !== shownPeriod) {
     shownPeriod = period;
     $('periodStat').textContent = PERIOD_LABEL[period];

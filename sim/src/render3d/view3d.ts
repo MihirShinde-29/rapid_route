@@ -46,6 +46,8 @@ export class View3D {
   private lastCongestion = -Infinity;
   private tmp = new THREE.Object3D();
   private tmpColor = new THREE.Color();
+  private routeHighlight: THREE.LineSegments | null = null;
+  private highlightedTrip = -1;
   showDesireLines = true;
 
   constructor(
@@ -79,6 +81,13 @@ export class View3D {
     this.buildZones(mulberry32(sim.config.seed + 1));
     this.buildArcPool();
     this.buildCars();
+    this.routeHighlight = new THREE.LineSegments(
+      new THREE.BufferGeometry(),
+      new THREE.LineBasicMaterial({ color: 0xffd166, transparent: true, opacity: 0.95, depthTest: false }),
+    );
+    this.routeHighlight.position.y = 0.55;
+    this.routeHighlight.visible = false;
+    this.scene.add(this.routeHighlight);
 
     this.resize();
     new ResizeObserver(() => this.resize()).observe(container);
@@ -298,6 +307,27 @@ export class View3D {
     }
   }
 
+  // Highlight the most recently assigned route so the cost proof is visible
+  // in the same view as the traffic and congestion tinting.
+  private syncRouteHighlight(): void {
+    const decision = this.sim.routeLog[0];
+    if (!this.routeHighlight || !decision) return;
+    if (decision.tripId === this.highlightedTrip) return;
+    this.highlightedTrip = decision.tripId;
+    const points: number[] = [];
+    for (const id of decision.chosen.links) {
+      const link = this.sim.grid.net.links[id];
+      const a = this.sim.grid.net.nodes[link.from];
+      const b = this.sim.grid.net.nodes[link.to];
+      points.push(this.wx(a.x), 0, this.wz(a.y), this.wx(b.x), 0, this.wz(b.y));
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(points, 3));
+    this.routeHighlight.geometry.dispose();
+    this.routeHighlight.geometry = geometry;
+    this.routeHighlight.visible = points.length > 0;
+  }
+
   // Fixed pool of OD arcs, reused round-robin so busy peaks allocate nothing.
   private buildArcPool(): void {
     for (let k = 0; k < ARC_POOL; k++) {
@@ -349,6 +379,7 @@ export class View3D {
       arc.material.opacity = 0.7 * (1 - age / ARC_LIFE_MS);
     }
     this.syncCars();
+    this.syncRouteHighlight();
     if (now - this.lastCongestion > CONGESTION_REFRESH_MS) {
       this.lastCongestion = now;
       this.syncCongestion();

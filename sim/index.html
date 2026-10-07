@@ -97,6 +97,7 @@
       .list .name { flex: 1; font-family: var(--font-mono); font-size: 11.5px; }
       .list .num { font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
       .dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
+      .route-log { margin-top: 8px; padding: 7px 8px; border-left: 2px solid #ffd166; background: var(--panel-2); color: var(--text-dim); font-family: var(--font-mono); font-size: 10px; line-height: 1.45; }
 
       footer {
         padding: 8px 20px; border-top: 1px solid var(--line); background: var(--panel-2);
@@ -174,12 +175,21 @@
           <h2>Zones · trips out / in</h2>
           <ul class="list" id="zoneTypes"></ul>
         </section>
+        <section class="panel route-proof">
+          <h2>Route assignment proof</h2>
+          <div class="stat-grid">
+            <div class="stat"><div class="val" id="routeChosen">—</div><div class="lbl">Chosen live cost</div></div>
+            <div class="stat"><div class="val" id="routeBaseline">—</div><div class="lbl">Free-flow shortest</div></div>
+          </div>
+          <div class="note" id="routeDelta">Waiting for a departure…</div>
+          <div class="route-log" id="routeLog">Latest route decision appears here.</div>
+        </section>
       </aside>
     </main>
 
     <footer>
       <span>IDM car-following · junction right-of-way · gravity OD demand · roads:<span class="key" style="background:#7a5a2a"></span>slow<span class="key" style="background:#7a3a2a"></span>jammed</span>
-      <span>Not built yet: cost-based routing (cars use free-flow shortest paths)</span>
+      <span><b style="color:#ffd166">yellow route</b> = latest cost-based assignment · live link travel time</span>
     </footer>
     <script type="module" src="/src/main.ts"></script>
   </body>

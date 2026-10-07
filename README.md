@@ -29,5 +29,7 @@ Needs Node 20+. Vite is pinned to 6 / Vitest to 3 because newer releases need a 
 Open `http://localhost:5173/?start=8` to open at 08:00 with the morning peak already loaded.
 
 Done so far: zones with density, a production-constrained gravity OD matrix per time-of-day period, Poisson trip
-generation with AM/PM peaks, IDM car-following, junction right-of-way, a placeholder free-flow router, and a 3D view
-(buildings follow zone density, roads tint by congestion, OD arcs and heatmap). Work split: `docs/MVP_WORK_SPLIT.md`.
+generation with AM/PM peaks, IDM car-following, junction right-of-way, A* route assignment using live mean link speeds,
+and a 3D view (buildings follow zone density, roads tint by congestion, OD arcs and heatmap). The latest assigned route
+is highlighted in yellow and the sidebar compares its live expected travel time with the free-flow shortest baseline.
+Work split: `docs/MVP_WORK_SPLIT.md`.

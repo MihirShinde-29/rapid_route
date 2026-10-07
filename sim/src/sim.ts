@@ -88,7 +88,7 @@ export class Simulation {
       this.routeLog.unshift(decision);
       if (!this.proofRoute && this.isLongerFaster(decision)) this.proofRoute = decision;
       if (this.routeLog.length > 20) this.routeLog.pop();
-      this.traffic.enqueue(trip, chosen.links);
+      this.traffic.enqueue(trip, decision.chosen.links);
     }
     this.traffic.step(this.time, dt);
     this.totalTrips += spawned.length;

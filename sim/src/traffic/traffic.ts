@@ -45,6 +45,7 @@ export class TrafficModel {
   private connectors = new Map<number, Connector>();
   private onConnector = new Map<Connector, Vehicle[]>();
   private backlog: { trip: Trip; route: number[] }[] = [];
+  private forcedSpeeds = new Map<number, number>();
   private nextId = 0;
 
   arrived = 0;
@@ -99,10 +100,20 @@ export class TrafficModel {
   // Interface for routing: mean speed on a link, free-flow if empty.
   linkMeanSpeed(linkId: number): number {
     const lane = this.lanes[linkId];
-    if (lane.vehicles.length === 0) return lane.link.speedLimit;
-    let sum = 0;
-    for (const v of lane.vehicles) sum += v.v;
-    return sum / lane.vehicles.length;
+    const observed = lane.vehicles.length === 0 ? lane.link.speedLimit : lane.vehicles.reduce((sum, v) => sum + v.v, 0) / lane.vehicles.length;
+    return Math.min(observed, this.forcedSpeeds.get(linkId) ?? Infinity);
+  }
+
+  setForcedSpeed(linkId: number, speed: number): void {
+    this.forcedSpeeds.set(linkId, Math.max(0.5, speed));
+  }
+
+  clearForcedSpeeds(): void {
+    this.forcedSpeeds.clear();
+  }
+
+  isForcedJammed(linkId: number): boolean {
+    return this.forcedSpeeds.has(linkId);
   }
 
   step(t: number, dt: number): void {

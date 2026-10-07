@@ -34,3 +34,7 @@ and a 3D view (buildings follow zone density, roads tint by congestion, OD arcs 
 selected live route against a shorter distance-based candidate using current travel times. When a longer route is faster,
 it is retained as the proof route, highlighted in yellow, and labeled in the sidebar.
 Work split: `docs/MVP_WORK_SPLIT.md`.
+
+Assignment 3 recording plan and evidence checklist: `docs/ASSIGNMENT3_DEMO_SCRIPT.md`.
+
+For a reproducible routing demo, click `Jam short route` and then `Probe trip`. The sidebar compares the selected live route with the shorter candidate and keeps the first longer-but-faster proof highlighted.

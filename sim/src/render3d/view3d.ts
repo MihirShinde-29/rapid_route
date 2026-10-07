@@ -47,6 +47,7 @@ export class View3D {
   private tmp = new THREE.Object3D();
   private tmpColor = new THREE.Color();
   private routeHighlight: THREE.LineSegments | null = null;
+  private proofCar: THREE.Mesh | null = null;
   private highlightedTrip = -1;
   showDesireLines = true;
 
@@ -88,6 +89,12 @@ export class View3D {
     this.routeHighlight.position.y = 0.55;
     this.routeHighlight.visible = false;
     this.scene.add(this.routeHighlight);
+    this.proofCar = new THREE.Mesh(
+      new THREE.SphereGeometry(0.75, 12, 8),
+      new THREE.MeshBasicMaterial({ color: 0xfff1a8, depthTest: false }),
+    );
+    this.proofCar.visible = false;
+    this.scene.add(this.proofCar);
 
     this.resize();
     new ResizeObserver(() => this.resize()).observe(container);
@@ -300,7 +307,7 @@ export class View3D {
     for (const st of this.streets) {
       let ratio = 1;
       for (const id of st.links) {
-        if (traffic.lanes[id].vehicles.length > 0) ratio = Math.min(ratio, traffic.linkMeanSpeed(id) / net.links[id].speedLimit);
+        if (traffic.lanes[id].vehicles.length > 0 || traffic.isForcedJammed(id)) ratio = Math.min(ratio, traffic.linkMeanSpeed(id) / net.links[id].speedLimit);
       }
       const color = ratio < 0.3 ? ROAD_COLORS.jammed : ratio < 0.6 ? ROAD_COLORS.slow : st.arterial ? ROAD_COLORS.arterial : ROAD_COLORS.local;
       st.mat.color.setHex(color);
@@ -326,6 +333,23 @@ export class View3D {
     this.routeHighlight.geometry.dispose();
     this.routeHighlight.geometry = geometry;
     this.routeHighlight.visible = points.length > 0;
+  }
+
+  private syncProofCar(): void {
+    if (!this.proofCar) return;
+    const proofId = this.sim.proofRoute?.tripId;
+    if (proofId === undefined) {
+      this.proofCar.visible = false;
+      return;
+    }
+    const vehicle = [...this.sim.traffic.vehicles].find((v) => v.trip.id === proofId);
+    if (!vehicle) {
+      this.proofCar.visible = false;
+      return;
+    }
+    const p = this.sim.traffic.pose(vehicle);
+    this.proofCar.position.set(this.wx(p.x), 1.1, this.wz(p.y));
+    this.proofCar.visible = true;
   }
 
   // Fixed pool of OD arcs, reused round-robin so busy peaks allocate nothing.
@@ -380,6 +404,7 @@ export class View3D {
     }
     this.syncCars();
     this.syncRouteHighlight();
+    this.syncProofCar();
     if (now - this.lastCongestion > CONGESTION_REFRESH_MS) {
       this.lastCongestion = now;
       this.syncCongestion();

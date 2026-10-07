@@ -17,6 +17,7 @@ export interface RouteDecision {
   shorterDistance: number;
   shorterLiveCost: number;
   time: number;
+  kind?: 'generated' | 'probe';
 }
 
 export interface SimConfig {
@@ -48,6 +49,9 @@ export class Simulation {
   readonly traffic: TrafficModel;
   readonly routeLog: RouteDecision[] = [];
   proofRoute: RouteDecision | null = null;
+  probeDecision: RouteDecision | null = null;
+  probeJammed = false;
+  private probeId = 1000000;
   time: number;
 
   readonly produced: Int32Array;
@@ -80,19 +84,7 @@ export class Simulation {
       this.produced[trip.originZone]++;
       this.attracted[trip.destZone]++;
       this.recent.push(trip.departTime);
-      const chosen = this.router.routeWithCost(trip.originNode, trip.destNode);
-      const shorter = this.distanceRouter.routeWithCost(trip.originNode, trip.destNode);
-      const decision: RouteDecision = {
-        tripId: trip.id,
-        from: trip.originNode,
-        to: trip.destNode,
-        chosen,
-        shorter,
-        chosenDistance: this.router.pathDistance(chosen.links),
-        shorterDistance: this.distanceRouter.pathDistance(shorter.links),
-        shorterLiveCost: this.router.pathCost(shorter.links),
-        time: this.time,
-      };
+      const decision = this.assignTrip(trip, 'generated');
       this.routeLog.unshift(decision);
       if (!this.proofRoute && this.isLongerFaster(decision)) this.proofRoute = decision;
       if (this.routeLog.length > 20) this.routeLog.pop();
@@ -110,6 +102,41 @@ export class Simulation {
   // Observed departures over the trailing sim hour.
   observedTripsPerHour(): number {
     return this.recent.length;
+  }
+
+  spawnProbeTrip(): RouteDecision {
+    const from = this.grid.nodeAt(Math.floor(this.grid.opts.rows / 2), 1);
+    const to = this.grid.nodeAt(Math.floor(this.grid.opts.rows / 2), this.grid.opts.cols - 2);
+    const trip: Trip = {
+      id: this.probeId++, originZone: 0, destZone: 1, originNode: from, destNode: to, departTime: this.time,
+    };
+    const decision = this.assignTrip(trip, 'probe');
+    this.probeDecision = decision;
+    this.routeLog.unshift(decision);
+    if (this.isLongerFaster(decision)) this.proofRoute = decision;
+    this.traffic.enqueue(trip, decision.chosen.links);
+    return decision;
+  }
+
+  toggleProbeJam(): boolean {
+    const from = this.grid.nodeAt(Math.floor(this.grid.opts.rows / 2), 1);
+    const to = this.grid.nodeAt(Math.floor(this.grid.opts.rows / 2), this.grid.opts.cols - 2);
+    const shorter = this.distanceRouter.routeWithCost(from, to);
+    this.probeJammed = !this.probeJammed;
+    this.traffic.clearForcedSpeeds();
+    if (this.probeJammed) for (const id of shorter.links) this.traffic.setForcedSpeed(id, this.grid.net.links[id].speedLimit * 0.12);
+    return this.probeJammed;
+  }
+
+  private assignTrip(trip: Trip, kind: 'generated' | 'probe'): RouteDecision {
+    const chosen = this.router.routeWithCost(trip.originNode, trip.destNode);
+    const shorter = this.distanceRouter.routeWithCost(trip.originNode, trip.destNode);
+    return {
+      tripId: trip.id, from: trip.originNode, to: trip.destNode, chosen, shorter,
+      chosenDistance: this.router.pathDistance(chosen.links),
+      shorterDistance: this.distanceRouter.pathDistance(shorter.links),
+      shorterLiveCost: this.router.pathCost(shorter.links), time: this.time, kind,
+    };
   }
 
   private isLongerFaster(decision: RouteDecision): boolean {

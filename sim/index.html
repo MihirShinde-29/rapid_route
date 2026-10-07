@@ -98,6 +98,14 @@
       .list .num { font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
       .dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
       .route-log { margin-top: 8px; padding: 7px 8px; border-left: 2px solid #ffd166; background: var(--panel-2); color: var(--text-dim); font-family: var(--font-mono); font-size: 10px; line-height: 1.45; }
+      .route-mechanism { margin-top: 8px; font-size: 10.5px; line-height: 1.45; color: var(--text-dim); }
+      .proof-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+      .proof-item { display: grid; grid-template-columns: 16px 1fr; column-gap: 6px; padding: 6px 8px; background: var(--panel-2); border: 1px solid var(--line-soft); border-radius: 4px; }
+      .proof-item::before { content: '○'; color: var(--text-faint); font-family: var(--font-mono); }
+      .proof-item.done::before { content: '✓'; color: #74d99f; }
+      .proof-item.active::before { content: '…'; color: #ffd166; }
+      .proof-item strong { display: block; font-family: var(--font-mono); font-size: 11px; font-weight: 500; }
+      .proof-item span { display: block; color: var(--text-dim); font-size: 10px; margin-top: 2px; }
 
       footer {
         padding: 8px 20px; border-top: 1px solid var(--line); background: var(--panel-2);
@@ -128,6 +136,8 @@
           <option value="60" selected>60×</option>
           <option value="300">300×</option>
         </select>
+        <button id="probe">Probe trip</button>
+        <button id="jam">Jam short route</button>
         <button id="arcs" aria-pressed="true">OD arcs</button>
         <button id="reset">Reset</button>
       </div>
@@ -183,6 +193,16 @@
           </div>
           <div class="note" id="routeDelta">Waiting for a departure…</div>
           <div class="route-log" id="routeLog">Waiting for a longer-but-faster example.</div>
+          <div class="route-mechanism" id="routeMechanism">New trips compare current link speeds at departure.</div>
+        </section>
+        <section class="panel">
+          <h2>MVP evidence checklist</h2>
+          <ul class="proof-list">
+            <li class="proof-item active" id="mvpDemand"><div><strong>Zone + OD demand</strong><span id="mvpDemandDetail">Waiting for trips…</span></div></li>
+            <li class="proof-item active" id="mvpTraffic"><div><strong>Peak traffic population</strong><span id="mvpTrafficDetail">Need 150+ cars</span></div></li>
+            <li class="proof-item active" id="mvpSafety"><div><strong>Following + junction safety</strong><span id="mvpSafetyDetail">Checking spacing and gridlock…</span></div></li>
+            <li class="proof-item active" id="mvpRouting"><div><strong>Longer-but-faster route</strong><span id="mvpRoutingDetail">Waiting for proof…</span></div></li>
+          </ul>
         </section>
       </aside>
     </main>

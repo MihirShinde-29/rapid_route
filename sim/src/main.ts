@@ -34,7 +34,10 @@ const TYPE_CSS: Record<ZoneType, string> = {
 const speedSel = $('speed') as HTMLSelectElement;
 const pauseBtn = $('pause') as HTMLButtonElement;
 const arcsBtn = $('arcs') as HTMLButtonElement;
+const probeBtn = $('probe') as HTMLButtonElement;
+const jamBtn = $('jam') as HTMLButtonElement;
 let paused = false;
+let peakCars = 0;
 pauseBtn.onclick = () => {
   paused = !paused;
   pauseBtn.textContent = paused ? 'Resume' : 'Pause';
@@ -42,6 +45,18 @@ pauseBtn.onclick = () => {
 arcsBtn.onclick = () => {
   view.showDesireLines = !view.showDesireLines;
   arcsBtn.setAttribute('aria-pressed', String(view.showDesireLines));
+};
+probeBtn.onclick = () => {
+  const d = sim.spawnProbeTrip();
+  $('routeLog').textContent = `PROBE trip #${d.tripId} assigned at ${formatClock(sim.time)}. Watch its route and costs.`;
+  updateSidebar();
+};
+jamBtn.onclick = () => {
+  const active = sim.toggleProbeJam();
+  jamBtn.textContent = active ? 'Remove short-route jam' : 'Jam short route';
+  $('routeMechanism').textContent = active
+    ? 'Controlled jam active on the shorter candidate. Click Probe trip to test a new departure against it.'
+    : 'Controlled jam removed. New trips use observed traffic only.';
 };
 $('reset').onclick = () => location.reload();
 
@@ -70,12 +85,23 @@ function updateSidebar(): void {
   $('total').textContent = sim.totalTrips.toLocaleString();
   const traffic = sim.traffic;
   $('cars').textContent = traffic.vehicles.size.toLocaleString();
+  peakCars = Math.max(peakCars, traffic.vehicles.size);
   $('arrived').textContent = traffic.arrived.toLocaleString();
   $('meanTrip').textContent = traffic.arrived > 0 ? `${Math.round(traffic.meanTravelTime)} s` : '—';
   $('backlog').textContent = traffic.waitingToDepart.toLocaleString();
   $('gridlock').textContent = `Removed by gridlock guard (stopped > 3 min): ${traffic.removedGridlock}`;
 
-  const latestRoute = sim.proofRoute ?? sim.routeLog[0];
+  const invariantErrors = traffic.checkInvariants();
+  $('mvpDemand').className = `proof-item done`;
+  $('mvpTraffic').className = `proof-item ${peakCars >= 150 ? 'done' : 'active'}`;
+  $('mvpSafety').className = `proof-item ${invariantErrors.length === 0 && traffic.removedGridlock === 0 ? 'done' : 'active'}`;
+  $('mvpRouting').className = `proof-item ${sim.proofRoute ? 'done' : 'active'}`;
+  $('mvpDemandDetail').textContent = `${sim.totalTrips.toLocaleString()} trips · ${PERIOD_LABEL[period]}`;
+  $('mvpTrafficDetail').textContent = `peak ${peakCars} cars · target 150+`;
+  $('mvpSafetyDetail').textContent = invariantErrors.length === 0 ? 'no overlaps / no gridlock' : `${invariantErrors.length} invariant warning(s)`;
+  $('mvpRoutingDetail').textContent = sim.proofRoute ? 'longer route is faster · proof retained' : 'collecting a longer-but-faster example';
+
+  const latestRoute = sim.proofRoute ?? sim.probeDecision ?? sim.routeLog[0];
   if (latestRoute) {
     const selected = latestRoute.chosen;
     const shorter = latestRoute.shorter;
@@ -84,7 +110,12 @@ function updateSidebar(): void {
     $('routeDelta').textContent = `${selected.links.length} links / ${latestRoute.chosenDistance.toFixed(0)} m vs ${shorter.links.length} links / ${latestRoute.shorterDistance.toFixed(0)} m`;
     $('routeLog').textContent = sim.proofRoute
       ? `PROOF trip #${latestRoute.tripId}: longer route is ${(latestRoute.shorterLiveCost - selected.cost).toFixed(1)} s faster`
-      : `Monitoring trip #${latestRoute.tripId}: waiting for a longer-but-faster example`;
+      : latestRoute.kind === 'probe'
+        ? `PROBE trip #${latestRoute.tripId}: assigned at departure; compare this result after jamming`
+        : `Monitoring trip #${latestRoute.tripId}: waiting for a longer-but-faster example`;
+    $('routeMechanism').textContent = sim.proofRoute
+      ? 'New trips compare live link speeds at departure. Existing trips keep their assigned route; the proof route stays highlighted for the demo.'
+      : 'New trips compare live link speeds at departure. Keep the simulation running at 60x until a longer-but-faster proof is found.';
   }
 
   if (period !== shownPeriod) {

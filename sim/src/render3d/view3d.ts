@@ -3,8 +3,10 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { mulberry32, type Rng } from '../core/rng';
 import type { Simulation } from '../sim';
 import type { Trip } from '../demand/trips';
-import type { Vehicle } from '../traffic/traffic';
+import { DEPART_FRAC, type Vehicle } from '../traffic/traffic';
 import { JUNCTION_RADIUS } from '../traffic/geometry';
+import { hasStreet, nearestJunction } from '../network/grid';
+import type { Light } from '../traffic/signals';
 import type { Zone, ZoneType } from '../demand/zones';
 import { hourOf } from '../core/time';
 import { Sky, Terrain } from './environment';
@@ -31,7 +33,18 @@ const LAMP_COLOR = 0xffc27a;
 const CONGESTION_REFRESH_MS = 500;
 const DEPART_S = 4; // sim s a new car takes to pull out of its lot onto the road
 const PARK_SPEED = 6; // m/s driving off the road into the destination lot
-const LOT_DEPTH = 0.42; // how far from the corner toward the block centre the lot is
+const DRIVEWAY_M = 13; // how far beside the lane a car's driveway starts
+
+type Area = { x0: number; x1: number; z0: number; z1: number }; // world units
+
+// Buildable area of a block in world units, and which of its sides face a street.
+interface Rect {
+  x0: number;
+  x1: number;
+  z0: number;
+  z1: number;
+  street: { top: boolean; right: boolean; bottom: boolean; left: boolean };
+}
 
 // A car that has arrived: drawn driving from the road into its destination lot, then gone.
 interface Parking {
@@ -42,6 +55,7 @@ interface Parking {
   p2: THREE.Vector2; // the lot
   start: number; // sim s
   dur: number;
+  turn: Turn; // indicator towards the lot
 }
 
 function bezier(a: THREE.Vector2, c: THREE.Vector2, b: THREE.Vector2, s: number, out: THREE.Vector2, dir: THREE.Vector2): void {
@@ -51,22 +65,27 @@ function bezier(a: THREE.Vector2, c: THREE.Vector2, b: THREE.Vector2, s: number,
 }
 
 const ease = (s: number) => s * s * (3 - 2 * s);
+const wrapAngle = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
 
 const BRAKE_ON = new THREE.Color(1, 0.12, 0.06);
 const BRAKE_OFF = new THREE.Color(0, 0, 0); // additive: black draws nothing
+const INDICATOR_ON = new THREE.Color(1, 0.55, 0.05);
+const INDICATE_M = 40; // start indicating this far before a turn
+type Turn = 'left' | 'right' | null;
 const SIGNAL = {
   red: new THREE.Color(1, 0.12, 0.08),
   redOff: new THREE.Color(0.18, 0.04, 0.03),
+  yellow: new THREE.Color(1, 0.72, 0.1),
+  yellowOff: new THREE.Color(0.17, 0.12, 0.03),
   green: new THREE.Color(0.2, 1, 0.45),
   greenOff: new THREE.Color(0.03, 0.14, 0.06),
 };
 
-// A signal head on one approach to a junction. It shows the sim's right-of-way decision
-// for that approach: green while its cars hold the junction, red while they wait.
+// A signal head on one approach to a signalised junction. Its lamps show the sim's timed
+// signal for that approach, the same light the cars obey.
 interface Signal {
   lane: number;
-  node: number;
-  arterial: boolean;
+  light: Light | null; // last shown, so lamps are only recoloured on a change
 }
 const ARC_POOL = 600;
 const ARC_POINTS = 13;
@@ -173,13 +192,23 @@ export class View3D {
   private arcLines!: THREE.LineSegments;
   private parking: Parking[] = [];
   private lastVehicles = new Set<Vehicle>();
-  private nodeZones: number[][] = [];
   private bp = new THREE.Vector2();
   private bd = new THREE.Vector2();
-  private fleet = new Map<VehicleKind, { body: THREE.InstancedMesh; lights: THREE.InstancedMesh; brake: THREE.InstancedMesh; n: number }>();
+  private fleet = new Map<
+    VehicleKind,
+    {
+      body: THREE.InstancedMesh;
+      lights: THREE.InstancedMesh;
+      brake: THREE.InstancedMesh;
+      left: THREE.InstancedMesh;
+      right: THREE.InstancedMesh;
+      n: number;
+    }
+  >();
+  private blinkOn = false;
   private brakeMat = new THREE.MeshBasicMaterial({ transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
   private signals: Signal[] = [];
-  private signalLamps!: THREE.InstancedMesh; // two per signal: red then green
+  private signalLamps!: THREE.InstancedMesh; // three per signal: red, yellow, green
   private tags!: { start: HTMLDivElement; end: HTMLDivElement; car: HTMLDivElement };
   private pinNodes: [number | null, number | null] = [null, null];
   private tagV = new THREE.Vector3();
@@ -205,6 +234,9 @@ export class View3D {
   private followTrip: number | null = null;
   private followVeh: Vehicle | null = null;
   private followSeen = false;
+  // Chase camera: sits behind the followed car and turns with it. Dragging looks around;
+  // after letting go the view swings back to face forward.
+  private chase = { heading: 0, look: 0, pitch: 1.05, dist: 16, dragging: false, released: 0, frame: 0 };
   private raycaster = new THREE.Raycaster();
   private ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   onFollowEnd: (() => void) | null = null; // the followed vehicle reached its destination
@@ -229,6 +261,20 @@ export class View3D {
     this.controls.maxDistance = 700;
     this.controls.minPolarAngle = 0.25;
     this.controls.maxPolarAngle = 1.45;
+    this.controls.addEventListener('start', () => {
+      this.chase.dragging = true;
+    });
+    this.controls.addEventListener('end', () => {
+      this.chase.dragging = false;
+      this.chase.released = performance.now();
+      if (this.followSeen) {
+        // Keep the zoom, tilt and look direction the user dragged to, relative to the car.
+        const s = new THREE.Spherical().setFromVector3(this.camera.position.clone().sub(this.controls.target));
+        this.chase.look = wrapAngle(s.theta - this.chase.heading);
+        this.chase.pitch = s.phi;
+        this.chase.dist = s.radius;
+      }
+    });
     const r = 0.6 * Math.max(sim.grid.width, sim.grid.height) * WORLD_PER_M + 10;
     const theta = Math.PI * 0.28;
     const phi = 1.12;
@@ -424,46 +470,331 @@ export class View3D {
     this.scene.add(stripes.build(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7 }), false, true));
     const nodeColor = new THREE.Color(ROAD_COLORS.local);
     for (const n of net.nodes) {
-      this.flat.add(new THREE.CylinderGeometry(1.3, 1.3, 0.26, 16), nodeColor, this.wx(n.x), 0.13, this.wz(n.y));
+      const degree = net.outLinks[n.id].length;
+      if (degree === 0) continue; // inside a superblock
+      // Dead ends get a turning circle.
+      const r = degree === 1 ? 1.9 : 1.3;
+      this.flat.add(new THREE.CylinderGeometry(r, r, 0.26, 20), nodeColor, this.wx(n.x), 0.13, this.wz(n.y));
     }
   }
 
-  // Building height and count follow zone density, so demand is visible in the skyline.
+  // One site per block, laid out by zone type with some variety, so no two blocks look
+  // stamped from the same mould. Superblocks are drawn once as a single park or mall.
   private buildZones(rng: Rng): void {
-    const size = this.sim.grid.opts.spacing * WORLD_PER_M - BLOCK_INSET * 2;
+    const { net, blocks, superblocks } = this.sim.grid;
+    const inSuper = new Set<number>();
+    for (const sb of superblocks) for (const b of sb.blocks) inSuper.add(b);
+    const rects: Rect[] = [];
     for (const z of this.sim.zones) {
-      const cx = this.wx(z.cx);
-      const cz = this.wz(z.cy);
+      const [a, b, c, d] = blocks[z.id].corners;
+      const [tl, tr, br, bl] = [a, b, c, d].map((n) => net.nodes[n]);
+      // Which sides face a street. Sides without one (superblocks, dropped streets) run to
+      // the centreline so neighbouring plates join up.
+      const street = { top: hasStreet(net, a, b), right: hasStreet(net, b, c), bottom: hasStreet(net, c, d), left: hasStreet(net, d, a) };
+      const ins = (on: boolean) => (on ? BLOCK_INSET / WORLD_PER_M : 0);
       const tint = new THREE.Color(ZONE_HEX[z.type]);
       // Low-density blocks read as lawns; denser blocks as paved lots tinted by zone type.
       const plateColor =
         z.type === 'park' ? new THREE.Color(0x3d5a30)
         : z.type === 'residential' && z.density < 0.45 ? new THREE.Color(0x46603a).lerp(tint, 0.08)
         : new THREE.Color(0x30363d).lerp(tint, 0.14);
-      this.flat.add(new THREE.PlaneGeometry(size, size), plateColor, cx, 0.03, cz, -Math.PI / 2);
-      if (z.type === 'park') this.addTrees(cx, cz, size, rng);
-      else this.addBuildings(z, cx, cz, size, tint, rng);
+      const quad = [
+        [tl.x + ins(street.left), tl.y + ins(street.top)],
+        [tr.x - ins(street.right), tr.y + ins(street.top)],
+        [br.x - ins(street.right), br.y - ins(street.bottom)],
+        [bl.x + ins(street.left), bl.y - ins(street.bottom)],
+      ].map(([x, y]) => new THREE.Vector3(this.wx(x), 0.03, this.wz(y)));
+      // A unit plane (same attributes as the rest of the batch) with its corners moved onto the quad.
+      const plate = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+      [quad[0], quad[1], quad[3], quad[2]].forEach((q, i) => plate.attributes.position.setXYZ(i, q.x, q.y, q.z));
+      this.flat.add(plate, plateColor, 0, 0, 0);
+      // An axis-aligned rectangle inside the plate, a little further in, for buildings.
+      const pad = (on: boolean) => (on ? BLOCK_INSET + 0.5 : 0.4);
+      const rect: Rect = {
+        x0: Math.max(this.wx(tl.x), this.wx(bl.x)) + pad(street.left),
+        x1: Math.min(this.wx(tr.x), this.wx(br.x)) - pad(street.right),
+        z0: Math.max(this.wz(tl.y), this.wz(tr.y)) + pad(street.top),
+        z1: Math.min(this.wz(bl.y), this.wz(br.y)) - pad(street.bottom),
+        street,
+      };
+      rects[z.id] = rect;
+      if (inSuper.has(z.id)) continue;
+      if (z.type === 'park') this.addPark(rect, rng, false);
+      else this.addBuildings(z, rect, tint, rng);
+    }
+    for (const sb of superblocks) {
+      const r = sb.blocks.map((b) => rects[b]);
+      const union: Rect = {
+        x0: Math.min(...r.map((q) => q.x0)),
+        x1: Math.max(...r.map((q) => q.x1)),
+        z0: Math.min(...r.map((q) => q.z0)),
+        z1: Math.max(...r.map((q) => q.z1)),
+        street: { top: true, right: true, bottom: true, left: true },
+      };
+      if (sb.kind === 'park') this.addPark(union, rng, true);
+      else this.addMall(union, rng);
+    }
+    this.buildStreetTrees(rng);
+  }
+
+  // Building styles vary block by block: towers, podiums, plazas and car parks downtown,
+  // perimeter blocks or apartment lots in denser housing, houses along the streets in the
+  // suburbs, sheds and container yards in industrial blocks.
+  private addBuildings(z: Zone, r: Rect, tint: THREE.Color, rng: Rng): void {
+    const w = r.x1 - r.x0;
+    const d = r.z1 - r.z0;
+    if (w < 1 || d < 1) return;
+    const cx = (r.x0 + r.x1) / 2;
+    const cz = (r.z0 + r.z1) / 2;
+    const color = () => {
+      const grey = 0.35 + (0.45 + 0.4 * rng()) * 0.25;
+      return new THREE.Color(grey * 0.9, grey * 0.95, grey * 1.05).lerp(tint, 0.18);
+    };
+    // Split an area into roughly square lots of about `size`.
+    const lots = (q: Area, size: number, place: (x: number, z: number, cell: number) => void) => {
+      const nx = Math.max(1, Math.round((q.x1 - q.x0) / size));
+      const nz = Math.max(1, Math.round((q.z1 - q.z0) / size));
+      const cw = (q.x1 - q.x0) / nx;
+      const cd = (q.z1 - q.z0) / nz;
+      for (let i = 0; i < nx; i++) for (let j = 0; j < nz; j++) place(q.x0 + cw * (i + 0.5), q.z0 + cd * (j + 0.5), Math.min(cw, cd));
+    };
+    const style = rng();
+    if (z.type === 'commercial') {
+      if (style < 0.14) {
+        // A tower on one half, a public plaza with trees and a fountain on the other.
+        const split = r.x0 + w * 0.5;
+        this.addTower((r.x0 + split) / 2, cz, Math.min(w * 0.5, d), z.density, color(), rng);
+        this.addPlaza({ x0: split, x1: r.x1, z0: r.z0, z1: r.z1 }, rng);
+      } else if (style < 0.3) {
+        // One podium over the whole block with towers rising from it.
+        const base = (2 + Math.floor(rng() * 2)) * FLOOR;
+        this.addBlock(w, base, d, cx, 0, cz, color(), rng);
+        const n = w > d * 1.3 ? 2 : 1;
+        for (let k = 0; k < n; k++) {
+          const h = (8 + 18 * z.density) * (0.6 + 0.5 * rng());
+          const fp = Math.min(w / n, d) * 0.55;
+          this.addBlock(fp, h, fp, r.x0 + (w / n) * (k + 0.5), base, cz, color(), rng);
+        }
+      } else if (style < 0.38 && z.density < 0.9) {
+        // A surface car park with a low building at the back.
+        this.addParkingLot({ x0: r.x0, x1: r.x1, z0: r.z0 + d * 0.35, z1: r.z1 }, rng);
+        this.addBlock(w * 0.8, 2 * FLOOR, d * 0.26, cx, 0, r.z0 + d * 0.15, color(), rng);
+      } else {
+        lots(r, 5 + rng() * 2, (x, zz, cell) => this.addTower(x, zz, cell, z.density, color(), rng));
+      }
+    } else if (z.type === 'industrial') {
+      if (style < 0.55) {
+        // One big shed and a yard with shipping containers.
+        const shedW = w * (0.55 + 0.1 * rng());
+        this.addWarehouse(r.x0 + shedW / 2, cz, Math.min(shedW, d), color(), rng);
+        this.addYard({ x0: r.x0 + shedW + 0.4, x1: r.x1, z0: r.z0, z1: r.z1 }, rng);
+      } else {
+        lots(r, 5.5, (x, zz, cell) => this.addWarehouse(x, zz, cell, color(), rng));
+      }
+    } else if (z.density >= 0.45) {
+      if (style < 0.5 && w > 6 && d > 6) {
+        // Perimeter block: apartment slabs round the edge, a green courtyard inside.
+        const depth = Math.min(w, d) * 0.24;
+        const floors = Math.max(3, Math.round(((1.6 + 7 * z.density) * (0.7 + 0.4 * rng())) / FLOOR));
+        const h = floors * FLOOR;
+        const c = color();
+        this.addBlock(w, h, depth, cx, 0, r.z0 + depth / 2, c, rng);
+        this.addBlock(w, h, depth, cx, 0, r.z1 - depth / 2, c, rng);
+        this.addBlock(depth, h, d - 2 * depth, r.x0 + depth / 2, 0, cz, c, rng);
+        this.addBlock(depth, h, d - 2 * depth, r.x1 - depth / 2, 0, cz, c, rng);
+        this.flat.add(new THREE.PlaneGeometry(w - 2 * depth, d - 2 * depth), new THREE.Color(0x3f5c34), cx, 0.05, cz, -Math.PI / 2);
+        for (let k = 0; k < 3; k++) this.addTree(cx + (rng() - 0.5) * (w - 2 * depth) * 0.6, cz + (rng() - 0.5) * (d - 2 * depth) * 0.6, rng, 0.6);
+      } else {
+        lots(r, 4.6, (x, zz, cell) => {
+          if (rng() > 0.35 + 0.65 * z.density) this.addTree(x, zz, rng, 0.7);
+          else this.addApartment(x, zz, cell, z.density, color(), rng);
+        });
+      }
+    } else {
+      this.addHouses(z, r, rng);
     }
   }
 
-  // Each lot gets a building shaped by its zone: towers downtown, houses or apartment
-  // blocks in residential areas depending on density, warehouses in industrial zones.
-  private addBuildings(z: Zone, cx: number, cz: number, size: number, tint: THREE.Color, rng: Rng): void {
-    const lots = z.type === 'residential' ? 3 : 2;
-    const cell = size / lots;
-    for (let i = 0; i < lots; i++) {
-      for (let j = 0; j < lots; j++) {
-        if (z.type === 'residential' && rng() > 0.35 + 0.65 * z.density) continue; // sparser at low density
-        const grey = 0.35 + (0.45 + 0.4 * rng()) * 0.25;
-        const color = new THREE.Color(grey * 0.9, grey * 0.95, grey * 1.05).lerp(tint, 0.18);
-        const bx = cx - size / 2 + cell * (i + 0.5);
-        const bz = cz - size / 2 + cell * (j + 0.5);
-        if (z.type === 'commercial') this.addTower(bx, bz, cell, z.density, color, rng);
-        else if (z.type === 'industrial') this.addWarehouse(bx, bz, cell, color, rng);
-        else if (z.density < 0.45) this.addHouse(bx, bz, cell, color, rng);
-        else this.addApartment(bx, bz, cell, z.density, color, rng);
+  // Houses face the streets round the block, each on its own lot with a front lawn and a
+  // driveway, and sometimes a pool or a tree in the back garden.
+  private addHouses(z: Zone, r: Rect, rng: Rng): void {
+    const lot = 3.3; // ~24 m frontage
+    const depth = Math.min(4.2, (r.z1 - r.z0) / 2, (r.x1 - r.x0) / 2);
+    const drive = new THREE.Color(0x5a5f66);
+    const any = r.street.top || r.street.bottom || r.street.left || r.street.right;
+    const sides = any ? r.street : { top: true, right: true, bottom: true, left: true };
+    // Each side's frontage, with the outward normal. The corners belong to the top and bottom rows.
+    const rows: { x0: number; z0: number; dx: number; dz: number; len: number; nx: number; nz: number }[] = [];
+    if (sides.top) rows.push({ x0: r.x0, z0: r.z0, dx: 1, dz: 0, len: r.x1 - r.x0, nx: 0, nz: -1 });
+    if (sides.bottom) rows.push({ x0: r.x0, z0: r.z1, dx: 1, dz: 0, len: r.x1 - r.x0, nx: 0, nz: 1 });
+    const zTop = r.z0 + (sides.top ? depth : 0);
+    const zBot = r.z1 - (sides.bottom ? depth : 0);
+    if (sides.left) rows.push({ x0: r.x0, z0: zTop, dx: 0, dz: 1, len: zBot - zTop, nx: -1, nz: 0 });
+    if (sides.right) rows.push({ x0: r.x1, z0: zTop, dx: 0, dz: 1, len: zBot - zTop, nx: 1, nz: 0 });
+    for (const row of rows) {
+      const n = Math.floor(row.len / lot);
+      if (n < 1) continue;
+      const step = row.len / n;
+      for (let k = 0; k < n; k++) {
+        if (rng() > 0.45 + 0.9 * z.density) continue; // an empty lot now and then
+        const along = step * (k + 0.5);
+        // Front of the lot at the street; the house sits back behind a lawn.
+        const fx = row.x0 + row.dx * along;
+        const fz = row.z0 + row.dz * along;
+        const c = new THREE.Color().setHSL(0.08 + 0.06 * rng(), 0.18 + 0.2 * rng(), 0.55 + 0.2 * rng());
+        this.addHouse(fx - row.nx * depth * 0.42, fz - row.nz * depth * 0.42, Math.min(step, depth) * 1.05, c, rng);
+        // Driveway from the house to the street.
+        const dl = depth * 0.3;
+        this.flat.add(
+          new THREE.PlaneGeometry(row.nx !== 0 ? dl : 0.5, row.nz !== 0 ? dl : 0.5),
+          drive,
+          fx - row.nx * dl * 0.5 + row.dx * step * 0.3,
+          0.045,
+          fz - row.nz * dl * 0.5 + row.dz * step * 0.3,
+          -Math.PI / 2,
+        );
+        // Back garden: a pool or a tree now and then.
+        const bx = fx - row.nx * depth * 0.88;
+        const bz = fz - row.nz * depth * 0.88;
+        const extra = rng();
+        if (extra < 0.12) this.flat.add(new THREE.PlaneGeometry(0.9, 0.55), new THREE.Color(0x3fa7c9), bx, 0.05, bz, -Math.PI / 2);
+        else if (extra < 0.55) this.addTree(bx + row.dx * (rng() - 0.5) * step * 0.5, bz + row.dz * (rng() - 0.5) * step * 0.5, rng, 0.55);
       }
     }
+  }
+
+  private addPlaza(r: Area, rng: Rng): void {
+    const cx = (r.x0 + r.x1) / 2;
+    const cz = (r.z0 + r.z1) / 2;
+    this.flat.add(new THREE.PlaneGeometry(r.x1 - r.x0, r.z1 - r.z0), new THREE.Color(0x8d8a82), cx, 0.04, cz, -Math.PI / 2);
+    this.solid.add(new THREE.CylinderGeometry(0.9, 0.95, 0.18, 20), new THREE.Color(0x9a978f), cx, 0.09, cz); // fountain
+    this.flat.add(new THREE.CircleGeometry(0.8, 20), new THREE.Color(0x4aa3c8), cx, 0.19, cz, -Math.PI / 2);
+    for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+      this.addTree(cx + sx * (r.x1 - r.x0) * 0.32, cz + sz * (r.z1 - r.z0) * 0.32, rng, 0.6);
+    }
+  }
+
+  // Painted bays with parked cars in the usual paint colours.
+  private addParkingLot(r: Area, rng: Rng): void {
+    const line = new THREE.Color(0xbfc4ca);
+    this.flat.add(new THREE.PlaneGeometry(r.x1 - r.x0, r.z1 - r.z0), new THREE.Color(0x2b3036), (r.x0 + r.x1) / 2, 0.04, (r.z0 + r.z1) / 2, -Math.PI / 2);
+    const bay = 0.4; // ~2.8 m
+    const rowDepth = 0.75;
+    const paints = [0xe9e9ea, 0x1b1c1f, 0xa9aeb5, 0x5b6068, 0x24467e, 0x9b1f1f];
+    for (let z = r.z0 + 0.3; z + rowDepth <= r.z1 - 0.2; z += rowDepth * 2 + 0.6) {
+      for (let x = r.x0 + 0.3; x + bay <= r.x1 - 0.3; x += bay) {
+        this.flat.add(new THREE.PlaneGeometry(0.025, rowDepth), line, x, 0.05, z + rowDepth / 2, -Math.PI / 2);
+        if (rng() < 0.6) {
+          const car = new THREE.Color(paints[Math.floor(rng() * paints.length)]);
+          this.solid.add(new THREE.BoxGeometry(0.28, 0.2, 0.6), car, x + bay / 2, 0.12, z + rowDepth / 2);
+        }
+      }
+    }
+  }
+
+  // Concrete yard with stacks of shipping containers.
+  private addYard(r: Area, rng: Rng): void {
+    if (r.x1 - r.x0 < 1.5) return;
+    const cz = (r.z0 + r.z1) / 2;
+    this.flat.add(new THREE.PlaneGeometry(r.x1 - r.x0, r.z1 - r.z0), new THREE.Color(0x6b6a66), (r.x0 + r.x1) / 2, 0.04, cz, -Math.PI / 2);
+    const colors = [0xb0412e, 0x2f6aa3, 0x3b7d4a, 0xc58b2b, 0x8a8f96];
+    const cw = 0.36; // 2.5 m wide, 12 m long
+    for (let x = r.x0 + 0.4; x + cw < r.x1 - 0.2; x += cw + 0.1) {
+      if (rng() < 0.3) continue;
+      const stack = 1 + Math.floor(rng() * 3);
+      for (let k = 0; k < stack; k++) {
+        const c = new THREE.Color(colors[Math.floor(rng() * colors.length)]);
+        this.solid.add(new THREE.BoxGeometry(cw, 0.36, 1.7), c, x + cw / 2, 0.18 + 0.37 * k, cz - (r.z1 - r.z0) * 0.2);
+      }
+    }
+  }
+
+  // Lawn with crossing footpaths and trees; large parks also get a pond and a loop path.
+  private addPark(r: Rect, rng: Rng, large: boolean): void {
+    const w = r.x1 - r.x0;
+    const d = r.z1 - r.z0;
+    const cx = (r.x0 + r.x1) / 2;
+    const cz = (r.z0 + r.z1) / 2;
+    const path = new THREE.Color(0xa59b84);
+    this.flat.add(new THREE.PlaneGeometry(w, 0.35), path, cx, 0.045, cz, -Math.PI / 2);
+    this.flat.add(new THREE.PlaneGeometry(0.35, d), path, cx, 0.046, cz, -Math.PI / 2);
+    let pond: { x: number; z: number; r: number } | null = null;
+    if (large) {
+      pond = { x: cx + w * 0.22, z: cz - d * 0.2, r: Math.min(w, d) * 0.14 };
+      const water = new THREE.CircleGeometry(pond.r, 28);
+      water.scale(1.5, 1, 1);
+      this.flat.add(water, new THREE.Color(0x3d7fa6), pond.x, 0.05, pond.z, -Math.PI / 2);
+      const loop = Math.min(w, d) * 0.36;
+      this.flat.add(new THREE.RingGeometry(loop, loop + 0.3, 48), path, cx, 0.047, cz, -Math.PI / 2);
+    }
+    const count = Math.round((w * d) / (large ? 9 : 12));
+    for (let i = 0; i < count; i++) {
+      const x = r.x0 + rng() * w;
+      const z = r.z0 + rng() * d;
+      if (Math.abs(x - cx) < 0.5 || Math.abs(z - cz) < 0.5) continue; // keep the paths clear
+      if (pond && Math.hypot((x - pond.x) / 1.5, z - pond.z) < pond.r + 0.6) continue;
+      this.addTree(x, z, rng, 0.8 + 0.4 * rng());
+    }
+  }
+
+  // A big-box shopping centre with a large car park and trees along the edge.
+  private addMall(r: Rect, rng: Rng): void {
+    const w = r.x1 - r.x0;
+    const d = r.z1 - r.z0;
+    const cx = (r.x0 + r.x1) / 2;
+    this.addParkingLot({ x0: r.x0, x1: r.x1, z0: r.z0 + d * 0.48, z1: r.z1 }, rng);
+    const bw = w * 0.82;
+    const bd = d * 0.38;
+    const bz = r.z0 + d * 0.06 + bd / 2;
+    this.solid.add(new THREE.BoxGeometry(bw, 2 * FLOOR, bd), new THREE.Color(0xc9c2b4), cx, FLOOR, bz);
+    this.solid.add(new THREE.BoxGeometry(bw * 0.3, 2.6 * FLOOR, bd * 0.5), new THREE.Color(0x7d8b99), cx, 1.3 * FLOOR, bz + bd * 0.3); // entrance hall
+    for (let k = 0; k < 4; k++) {
+      this.solid.add(new THREE.BoxGeometry(bw * 0.12, 0.3, bd * 0.2), new THREE.Color(0x5b6570), cx - bw * 0.3 + k * bw * 0.2, 2 * FLOOR + 0.15, bz - bd * 0.1); // roof plant
+    }
+    for (let x = r.x0 + 0.5; x < r.x1; x += 2.2) this.addTree(x, r.z1 - 0.3, rng, 0.6);
+  }
+
+  // Rows of trees along some streets: a third of local streets and half the arterials.
+  private buildStreetTrees(rng: Rng): void {
+    const net = this.sim.grid.net;
+    const spots: [number, number][] = [];
+    for (const link of net.links) {
+      if (link.from > link.to || rng() > (link.arterial ? 0.5 : 0.33)) continue;
+      const a = net.nodes[link.from];
+      const b = net.nodes[link.to];
+      const ax = this.wx(a.x);
+      const az = this.wz(a.y);
+      const len = Math.hypot(this.wx(b.x) - ax, this.wz(b.y) - az);
+      const ux = (this.wx(b.x) - ax) / len;
+      const uz = (this.wz(b.y) - az) / len;
+      const off = (link.arterial ? 0.8 : 0.65) + 0.35;
+      for (let t = 2.4; t < len - 2.4; t += 2.2) {
+        if (Math.abs(t - len / 2) < 0.8) continue; // the street lamp
+        for (const side of [-1, 1]) spots.push([ax + ux * t - uz * off * side, az + uz * t + ux * off * side]);
+      }
+    }
+    const paint = (g: THREE.BufferGeometry, c: THREE.Color) => {
+      const arr = new Float32Array(g.attributes.position.count * 3);
+      for (let i = 0; i < arr.length; i += 3) arr.set([c.r, c.g, c.b], i);
+      return g.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+    };
+    const trunk = paint(new THREE.CylinderGeometry(0.06, 0.08, 0.8, 5).translate(0, 0.4, 0), new THREE.Color(0x4a3a2a));
+    const crown = paint(new THREE.SphereGeometry(0.42, 7, 5).translate(0, 1.05, 0), new THREE.Color(1, 1, 1));
+    const mesh = new THREE.InstancedMesh(
+      mergeGeometries([trunk, crown])!,
+      new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, flatShading: true }),
+      spots.length,
+    );
+    const m = new THREE.Matrix4();
+    const col = new THREE.Color();
+    spots.forEach(([x, z], i) => {
+      const s = 0.8 + 0.4 * rng();
+      mesh.setMatrixAt(i, m.makeScale(s, s, s).setPosition(x, 0.25, z));
+      mesh.setColorAt(i, col.setHex(0x3a6b34).multiplyScalar(0.75 + 0.5 * rng()));
+    });
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    this.scene.add(mesh);
   }
 
   // Windowed walls from y0 to y0 + h, capped with a slightly wider parapet roof.
@@ -550,17 +881,12 @@ export class View3D {
     }
   }
 
-  private addTrees(cx: number, cz: number, size: number, rng: Rng): void {
-    const count = 6 + Math.floor(rng() * 5);
-    for (let i = 0; i < count; i++) this.addTree(cx + (rng() - 0.5) * size * 0.85, cz + (rng() - 0.5) * size * 0.85, rng);
-  }
-
-  private addTree(x: number, z: number, rng: Rng): void {
-    const h = 2 + rng() * 1.6;
+  private addTree(x: number, z: number, rng: Rng, scale = 1): void {
+    const h = (2 + rng() * 1.6) * scale;
     const leafColor = new THREE.Color(0x2e5c3a).multiplyScalar(0.8 + 0.4 * rng());
     this.solid.add(new THREE.CylinderGeometry(0.15, 0.18, h * 0.5, 6), new THREE.Color(0x3a2a1a), x, h * 0.25, z);
-    if (rng() > 0.5) this.solid.add(new THREE.ConeGeometry(0.9, h, 7), leafColor, x, h * 0.9, z);
-    else this.solid.add(new THREE.SphereGeometry(0.85 + 0.3 * rng(), 7, 5), leafColor, x, h * 0.7, z);
+    if (rng() > 0.5) this.solid.add(new THREE.ConeGeometry(0.9 * scale, h, 7), leafColor, x, h * 0.9, z);
+    else this.solid.add(new THREE.SphereGeometry((0.85 + 0.3 * rng()) * scale, 7, 5), leafColor, x, h * 0.7, z);
   }
 
   // One instanced mesh per vehicle type (see vehicles.ts), plus a matching mesh for its
@@ -576,30 +902,28 @@ export class View3D {
       lights.instanceMatrix = body.instanceMatrix; // same poses as the bodies
       const brake = new THREE.InstancedMesh(geo.brake, this.brakeMat, MAX_CARS);
       brake.instanceMatrix = body.instanceMatrix;
-      for (const m of [body, lights, brake]) {
+      const left = new THREE.InstancedMesh(geo.indicatorL, this.brakeMat, MAX_CARS);
+      left.instanceMatrix = body.instanceMatrix;
+      const right = new THREE.InstancedMesh(geo.indicatorR, this.brakeMat, MAX_CARS);
+      right.instanceMatrix = body.instanceMatrix;
+      for (const m of [body, lights, brake, left, right]) {
         m.count = 0;
         m.frustumCulled = false;
         this.scene.add(m);
       }
       this.carLights.push(lights);
-      this.fleet.set(kind, { body, lights, brake, n: 0 });
+      this.fleet.set(kind, { body, lights, brake, left, right, n: 0 });
     }
   }
 
-  // A point inside the zone's block near one of its corner nodes, where its buildings are.
-  // Trips start and end at intersections; this is the lot a car pulls out of or into.
-  private lotPoint(node: number, zoneId: number): THREE.Vector2 {
-    if (this.nodeZones.length === 0) {
-      this.nodeZones = this.sim.grid.net.nodes.map(() => []);
-      for (const z of this.sim.zones) for (const n of z.accessNodes) this.nodeZones[n].push(z.id);
-    }
-    const zones = this.nodeZones[node];
-    const z = this.sim.zones[zones.includes(zoneId) ? zoneId : zones[0]];
-    const n = this.sim.grid.net.nodes[node];
-    return new THREE.Vector2(n.x + (z.cx - n.x) * LOT_DEPTH, n.y + (z.cy - n.y) * LOT_DEPTH);
+  // A driveway beside a lane: the point `along` metres down the lane, moved DRIVEWAY_M to the
+  // right (y-down), into the block whose buildings face that street.
+  private driveway(laneId: number, along: number): { x: number; y: number; hx: number; hy: number } {
+    const p = this.sim.traffic.lanes[laneId].geom.pose(along);
+    return { x: p.x - p.hy * DRIVEWAY_M, y: p.y + p.hx * DRIVEWAY_M, hx: p.hx, hy: p.hy };
   }
 
-  private placeCar(kind: VehicleKind, trip: Trip, x: number, y: number, hx: number, hy: number, lift: number, scale: number, braking: boolean): void {
+  private placeCar(kind: VehicleKind, trip: Trip, x: number, y: number, hx: number, hy: number, lift: number, scale: number, braking: boolean, turn: Turn = null): void {
     const f = this.fleet.get(kind)!;
     if (f.n >= MAX_CARS) return;
     this.tmp.position.set(this.wx(x), lift, this.wz(y));
@@ -609,69 +933,103 @@ export class View3D {
     f.body.setMatrixAt(f.n, this.tmp.matrix);
     f.body.setColorAt(f.n, vehiclePaint(trip, kind, this.tmpColor));
     f.brake.setColorAt(f.n, braking ? BRAKE_ON : BRAKE_OFF);
+    f.left.setColorAt(f.n, this.blinkOn && turn === 'left' ? INDICATOR_ON : BRAKE_OFF);
+    f.right.setColorAt(f.n, this.blinkOn && turn === 'right' ? INDICATOR_ON : BRAKE_OFF);
     f.n++;
+  }
+
+  // Which way a car is about to turn: on a turning connector, or approaching one.
+  private turnAhead(veh: Vehicle): Turn {
+    const traffic = this.sim.traffic;
+    if (veh.conn) return veh.conn.kind === 'through' ? null : veh.conn.kind;
+    if (veh.ri === veh.route.length - 1) return null;
+    const lane = traffic.lanes[veh.route[veh.ri]];
+    if (lane.geom.length - veh.pos > INDICATE_M) return null;
+    const kind = traffic.connector(veh.route[veh.ri], veh.route[veh.ri + 1]).kind;
+    return kind === 'through' ? null : kind;
+  }
+
+  // Side of the heading a point lies on (y-down: positive cross product is the right).
+  private sideOf(px: number, py: number, hx: number, hy: number, tx: number, ty: number): Turn {
+    return hx * (ty - py) - hy * (tx - px) > 0 ? 'right' : 'left';
   }
 
   private syncCars(): void {
     const traffic = this.sim.traffic;
     const now = this.sim.time;
+    this.blinkOn = performance.now() % 700 < 380; // real time, so the blink rate ignores sim speed
     for (const f of this.fleet.values()) f.n = 0;
     for (const veh of traffic.vehicles) {
       const kind = veh.trip.kind ?? 'sedan';
       const p = traffic.pose(veh);
       const age = now - veh.departTime;
       if (age >= 0 && age < DEPART_S) {
-        // Pulling out: blend from the origin lot onto the road, joining the car's real position.
-        const lot = this.lotPoint(veh.trip.originNode, veh.trip.originZone);
+        // Pulling out of a driveway beside the street: straight out to the kerb, then turning
+        // to join the car's real position on the road.
+        const lane = traffic.lanes[veh.route[0]];
+        const d = this.driveway(lane.link.id, DEPART_FRAC * lane.geom.length - veh.len / 2);
+        const lot = new THREE.Vector2(d.x, d.y);
         const road = new THREE.Vector2(p.x, p.y);
-        const c = new THREE.Vector2(p.x - p.hx * 10, p.y - p.hy * 10);
+        const c = new THREE.Vector2(d.x + d.hy * (DRIVEWAY_M - 1), d.y - d.hx * (DRIVEWAY_M - 1));
         const s = ease(age / DEPART_S);
         bezier(lot, c, road, s, this.bp, this.bd);
-        this.placeCar(kind, veh.trip, this.bp.x, this.bp.y, this.bd.x, this.bd.y, 0.08 + 0.18 * s, 0.6 + 0.4 * s, false);
+        // Indicates towards the road it is pulling onto.
+        const turn = s < 0.7 ? this.sideOf(this.bp.x, this.bp.y, this.bd.x, this.bd.y, p.x + p.hx * 20, p.y + p.hy * 20) : null;
+        this.placeCar(kind, veh.trip, this.bp.x, this.bp.y, this.bd.x, this.bd.y, 0.08 + 0.18 * s, 0.6 + 0.4 * s, false, turn);
       } else {
         // On the road surface; brake lights while slowing down or held at a stop.
-        this.placeCar(kind, veh.trip, p.x, p.y, p.hx, p.hy, 0.26, 1, veh.acc < -0.8 || veh.v < 0.5);
+        this.placeCar(kind, veh.trip, p.x, p.y, p.hx, p.hy, 0.26, 1, veh.acc < -0.8 || veh.v < 0.5, this.turnAhead(veh));
       }
     }
     // Cars that reached their destination this frame turn off into their lot.
     for (const veh of this.lastVehicles) {
       if (traffic.vehicles.has(veh) || veh.ri !== veh.route.length - 1 || veh.stoppedFor >= 180) continue; // still driving, or removed by the gridlock guard
       const p = traffic.pose(veh);
+      // Turning off the street into a driveway beside it.
       const p0 = new THREE.Vector2(p.x, p.y);
-      const p2 = this.lotPoint(veh.trip.destNode, veh.trip.destZone);
-      const c = new THREE.Vector2(p.x + p.hx * 10, p.y + p.hy * 10);
+      const p2 = new THREE.Vector2(p.x + p.hx * 6 - p.hy * DRIVEWAY_M, p.y + p.hy * 6 + p.hx * DRIVEWAY_M);
+      const c = new THREE.Vector2(p.x + p.hx * 6, p.y + p.hy * 6);
       const dist = p0.distanceTo(c) + c.distanceTo(p2);
-      this.parking.push({ trip: veh.trip, kind: veh.trip.kind ?? 'sedan', p0, c, p2, start: now, dur: dist / PARK_SPEED });
+      const turn = this.sideOf(p.x, p.y, p.hx, p.hy, p2.x, p2.y);
+      this.parking.push({ trip: veh.trip, kind: veh.trip.kind ?? 'sedan', p0, c, p2, start: now, dur: dist / PARK_SPEED, turn });
     }
     this.lastVehicles = new Set(traffic.vehicles);
     this.parking = this.parking.filter((pk) => now - pk.start < pk.dur && now >= pk.start);
     for (const pk of this.parking) {
       const s = ease((now - pk.start) / pk.dur);
       bezier(pk.p0, pk.c, pk.p2, s, this.bp, this.bd);
-      this.placeCar(pk.kind, pk.trip, this.bp.x, this.bp.y, this.bd.x, this.bd.y, 0.26 - 0.18 * s, 1 - 0.4 * s, true);
+      this.placeCar(pk.kind, pk.trip, this.bp.x, this.bp.y, this.bd.x, this.bd.y, 0.26 - 0.18 * s, 1 - 0.4 * s, true, s < 0.6 ? pk.turn : null);
     }
     for (const f of this.fleet.values()) {
       f.body.count = f.n;
       f.lights.count = f.n;
       f.brake.count = f.n;
+      f.left.count = f.n;
+      f.right.count = f.n;
       f.body.instanceMatrix.needsUpdate = true;
       if (f.body.instanceColor) f.body.instanceColor.needsUpdate = true;
-      if (f.brake.instanceColor) f.brake.instanceColor.needsUpdate = true;
+      for (const m of [f.brake, f.left, f.right]) if (m.instanceColor) m.instanceColor.needsUpdate = true;
     }
   }
 
-  // Signal heads on every approach to junctions on an arterial. Poles and housings are static;
-  // the lamps are one instanced mesh recoloured each frame.
+  // Signal heads on every approach to a signalised junction, stop signs at all-way stops.
+  // Poles, housings and signs are static; the lamps are one instanced mesh recoloured on change.
   private buildSignals(): void {
     const net = this.sim.grid.net;
+    const traffic = this.sim.traffic;
     const pole = new THREE.Color(0x30343a);
     const housing = new THREE.Color(0x15181c);
+    const stopRed = new THREE.Color(0xb3191c);
+    const white = new THREE.Color(0xf2f2f2);
     const lampPos: THREE.Vector3[] = [];
     for (let node = 0; node < net.nodes.length; node++) {
-      const ins = net.inLinks[node];
-      if (ins.length < 3 || !ins.some((id) => net.links[id].arterial)) continue;
+      const signalised = traffic.signals?.isSignalised(node) ?? false;
+      if (!signalised && !traffic.isStopSign(node)) continue;
       const c = net.nodes[node];
-      for (const id of ins) {
+      for (const id of net.inLinks[node]) {
+        // At a T-junction only the street that ends there has a stop sign.
+        const stop = !signalised && traffic.mustStop(id);
+        if (!signalised && !stop) continue;
         const link = net.links[id];
         const a = net.nodes[link.from];
         const dx = (c.x - a.x) / link.length;
@@ -682,16 +1040,29 @@ export class View3D {
         const py = c.y - dy * (JUNCTION_RADIUS + 1) + dx * (half + 1.2);
         const x = this.wx(px);
         const z = this.wz(py);
+        // Stop line across the approach lane.
+        const lx = this.wx(c.x - dx * JUNCTION_RADIUS - dy * (half / 2));
+        const lz = this.wz(c.y - dy * JUNCTION_RADIUS + dx * (half / 2));
+        const line = new THREE.PlaneGeometry(0.06, half * WORLD_PER_M * 0.95).rotateX(-Math.PI / 2);
+        this.solid.add(line, white, lx, 0.27, lz, 0, -Math.atan2(dy, dx));
+        if (stop) {
+          this.solid.add(new THREE.CylinderGeometry(0.02, 0.02, 0.5, 5), pole, x, 0.25, z);
+          // Octagon facing the oncoming cars.
+          const sign = new THREE.CylinderGeometry(0.11, 0.11, 0.015, 8).rotateX(Math.PI / 2).rotateZ(Math.PI / 8);
+          this.solid.add(sign, stopRed, x - dx * 0.02, 0.52, z - dy * 0.02, 0, Math.atan2(dx, dy));
+          continue;
+        }
         this.solid.add(new THREE.CylinderGeometry(0.035, 0.045, 1.3, 6), pole, x, 0.65, z);
-        this.solid.add(new THREE.BoxGeometry(0.13, 0.32, 0.13), housing, x, 1.36, z);
-        // Lamps face the oncoming cars.
+        this.solid.add(new THREE.BoxGeometry(0.13, 0.46, 0.13), housing, x, 1.42, z);
+        // Lamps face the oncoming cars: red, yellow, green from the top.
         const fx = x - dx * 0.07;
         const fz = z - dy * 0.07;
-        lampPos.push(new THREE.Vector3(fx, 1.44, fz), new THREE.Vector3(fx, 1.28, fz));
-        this.signals.push({ lane: id, node, arterial: link.arterial });
+        lampPos.push(new THREE.Vector3(fx, 1.57, fz), new THREE.Vector3(fx, 1.42, fz), new THREE.Vector3(fx, 1.27, fz));
+        this.signals.push({ lane: id, light: null });
       }
     }
-    this.signalLamps = new THREE.InstancedMesh(new THREE.SphereGeometry(0.058, 8, 6), new THREE.MeshBasicMaterial(), lampPos.length);
+    this.signalLamps = new THREE.InstancedMesh(new THREE.SphereGeometry(0.058, 8, 6), new THREE.MeshBasicMaterial(), Math.max(1, lampPos.length));
+    this.signalLamps.count = lampPos.length;
     const m = new THREE.Matrix4();
     lampPos.forEach((p, i) => {
       this.signalLamps.setMatrixAt(i, m.makeTranslation(p.x, p.y, p.z));
@@ -701,26 +1072,19 @@ export class View3D {
   }
 
   private syncSignals(): void {
-    const traffic = this.sim.traffic;
+    const plans = this.sim.traffic.signals;
+    if (!plans) return;
+    let changed = false;
     this.signals.forEach((sg, i) => {
-      const box = traffic.boxes[sg.node];
-      let green = false;
-      for (const h of box.holders) {
-        if (h.route[h.ri] === sg.lane) {
-          green = true;
-          break;
-        }
-      }
-      if (!green) {
-        // Nobody from here in the junction: red if a car waits; if none, arterials rest on green.
-        const front = traffic.lanes[sg.lane].vehicles[0];
-        const waiting = front !== undefined && !front.granted && front.requestSince >= 0;
-        green = !waiting && box.holders.size === 0 && sg.arterial;
-      }
-      this.signalLamps.setColorAt(2 * i, green ? SIGNAL.redOff : SIGNAL.red);
-      this.signalLamps.setColorAt(2 * i + 1, green ? SIGNAL.green : SIGNAL.greenOff);
+      const light = plans.light(sg.lane, this.sim.time);
+      if (light === sg.light) return;
+      sg.light = light;
+      changed = true;
+      this.signalLamps.setColorAt(3 * i, light === 'red' ? SIGNAL.red : SIGNAL.redOff);
+      this.signalLamps.setColorAt(3 * i + 1, light === 'yellow' ? SIGNAL.yellow : SIGNAL.yellowOff);
+      this.signalLamps.setColorAt(3 * i + 2, light === 'green' ? SIGNAL.green : SIGNAL.greenOff);
     });
-    this.signalLamps.instanceColor!.needsUpdate = true;
+    if (changed) this.signalLamps.instanceColor!.needsUpdate = true;
   }
 
   // Street tint follows the slower direction's mean speed relative to the limit.
@@ -838,11 +1202,11 @@ export class View3D {
     this.raycaster.setFromCamera(ndc, this.camera);
     const hit = new THREE.Vector3();
     if (!this.raycaster.ray.intersectPlane(this.ground, hit)) return null;
-    const { cols, rows, spacing } = this.sim.grid.opts;
-    const c = Math.round((hit.x / WORLD_PER_M + this.sim.grid.width / 2) / spacing);
-    const r = Math.round((hit.z / WORLD_PER_M + this.sim.grid.height / 2) / spacing);
-    if (c < 0 || r < 0 || c >= cols || r >= rows) return null;
-    return this.sim.grid.nodeAt(r, c);
+    const x = hit.x / WORLD_PER_M + this.sim.grid.width / 2;
+    const y = hit.z / WORLD_PER_M + this.sim.grid.height / 2;
+    const margin = this.sim.grid.opts.spacing / 2;
+    if (x < -margin || y < -margin || x > this.sim.grid.width + margin || y > this.sim.grid.height + margin) return null;
+    return nearestJunction(this.sim.grid.net, x, y);
   }
 
   private buildTags(): void {
@@ -870,7 +1234,7 @@ export class View3D {
     el.style.transform = `translate(${sx.toFixed(1)}px, ${sy.toFixed(1)}px) translate(-50%, -100%)`;
   }
 
-  // Start/destination labels on the pins, and a live distance/ETA label over the probe car.
+  // Start/destination labels on the pins, and a live distance/ETA label under the probe car.
   private syncTags(): void {
     const [from, to] = this.pinNodes;
     [this.tags.start, this.tags.end].forEach((el, k) => {
@@ -898,8 +1262,24 @@ export class View3D {
     const clock = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
     const text = `PROBE · ${(metres / 1000).toFixed(1)} km left · ETA ${clock(eta)} · ${clock(this.sim.time - veh.departTime)} elapsed`;
     if (this.tags.car.textContent !== text) this.tags.car.textContent = text;
+    // Under the car on screen: anchored below the lowest corner of its footprint.
     const p = traffic.pose(veh);
-    this.placeTag(this.tags.car, this.wx(p.x), 1.4, this.wz(p.y));
+    const half = veh.len / 2;
+    const side = CAR_WIDTH / 2;
+    let lowest = -Infinity;
+    let onScreen = true;
+    for (const [a, b] of [[half, side], [half, -side], [-half, side], [-half, -side]]) {
+      const v = this.tagV.set(this.wx(p.x + p.hx * a - p.hy * b), 0.26, this.wz(p.y + p.hy * a + p.hx * b)).project(this.camera);
+      if (v.z >= 1 || Math.abs(v.x) > 1.05 || Math.abs(v.y) > 1.05) onScreen = false;
+      lowest = Math.max(lowest, ((1 - v.y) / 2) * this.container.clientHeight);
+    }
+    const c = this.tagV.set(this.wx(p.x), 0.26, this.wz(p.y)).project(this.camera);
+    const el = this.tags.car;
+    el.hidden = !onScreen;
+    if (!onScreen) return;
+    const sx = this.container.offsetLeft + ((c.x + 1) / 2) * this.container.clientWidth;
+    const sy = this.container.offsetTop + lowest + 14;
+    el.style.transform = `translate(${sx.toFixed(1)}px, ${sy.toFixed(1)}px) translate(-50%, 0)`;
   }
 
   setProbePins(from: number | null, to: number | null): void {
@@ -918,6 +1298,9 @@ export class View3D {
     this.followTrip = tripId;
     this.followVeh = null;
     this.followSeen = false;
+    // Orbit about the car only: no panning away from it, no drift after a drag.
+    this.controls.enablePan = tripId === null;
+    this.controls.enableDamping = tripId === null;
   }
 
   get following(): boolean {
@@ -940,17 +1323,29 @@ export class View3D {
     }
     const p = this.sim.traffic.pose(this.followVeh);
     const target = new THREE.Vector3(this.wx(p.x), 0.3, this.wz(p.y));
+    const behind = Math.atan2(-p.hx, -p.hy); // azimuth of the point behind the car (world x, z)
+    const c = this.chase;
+    const now = performance.now();
+    const dt = Math.min(0.1, (now - (c.frame || now)) / 1000);
+    c.frame = now;
     if (!this.followSeen) {
-      // Swing in close, keeping the current viewing direction.
-      const dir = this.camera.position.clone().sub(this.controls.target).normalize();
-      this.controls.target.copy(target);
-      this.camera.position.copy(target).addScaledVector(dir, 28);
+      c.heading = behind;
+      c.look = 0;
+      c.pitch = 1.05;
+      c.dist = 16;
       this.followSeen = true;
+    }
+    if (c.dragging) {
+      // The user is orbiting: carry the camera along with the car and leave the angle to them.
+      this.camera.position.add(target.clone().sub(this.controls.target));
+      this.controls.target.copy(target);
       return;
     }
-    const delta = target.sub(this.controls.target).multiplyScalar(0.15);
-    this.controls.target.add(delta);
-    this.camera.position.add(delta);
+    // Turn with the car smoothly, so junction turns sweep rather than snap.
+    c.heading = wrapAngle(c.heading + wrapAngle(behind - c.heading) * Math.min(1, 4 * dt));
+    if (now - c.released > 1500) c.look *= 1 - Math.min(1, 2 * dt);
+    this.controls.target.copy(target);
+    this.camera.position.setFromSpherical(new THREE.Spherical(c.dist, c.pitch, c.heading + c.look)).add(target);
   }
 
   // Sky and lights follow the sim clock: windows, street lamps and headlights come on at dusk.

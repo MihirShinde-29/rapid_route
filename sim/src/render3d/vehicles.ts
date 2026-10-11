@@ -23,7 +23,13 @@ export function vehicleGeometry(
   kind: VehicleKind,
   worldPerM: number,
   W: number,
-): { body: THREE.BufferGeometry; lights: THREE.BufferGeometry; brake: THREE.BufferGeometry } {
+): {
+  body: THREE.BufferGeometry;
+  lights: THREE.BufferGeometry;
+  brake: THREE.BufferGeometry;
+  indicatorL: THREE.BufferGeometry;
+  indicatorR: THREE.BufferGeometry;
+} {
   const b = new StaticBatch();
   const len = VEHICLE_SPECS[kind].length * worldPerM;
   let lightY = 0.11;
@@ -99,7 +105,13 @@ export function vehicleGeometry(
   // Brake lights: slightly larger than the tail lights, switched per vehicle by instance colour.
   const k = new StaticBatch();
   for (const sx of [-1, 1]) k.add(box(0.02, 0.04, W * 0.27), BODY, -len / 2 - 0.009, lightY, sx * W * 0.3);
-  return { body: b.geometry(), lights, brake: k.geometry() };
+  // Turn indicators at the four corners (+z is the car's right), switched like the brake lights.
+  const indicator = (side: number) => {
+    const g = new StaticBatch();
+    for (const end of [-1, 1]) g.add(box(0.03, 0.035, W * 0.14), BODY, end * (len / 2 + 0.006), lightY + 0.012, side * W * 0.44);
+    return g.geometry();
+  };
+  return { body: b.geometry(), lights, brake: k.geometry(), indicatorL: indicator(-1), indicatorR: indicator(1) };
 }
 
 // Common real-world paint colours with rough market shares.

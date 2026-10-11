@@ -5,15 +5,17 @@ export interface GridOptions {
   rows: number;
   spacing: number; // m between intersections
   arterialEvery: number; // every Nth row/column is an arterial
+  suburbRing: number; // blocks of low-density suburb around the city core
   localSpeed: number; // m/s
   arterialSpeed: number; // m/s
 }
 
 export const DEFAULT_GRID: GridOptions = {
-  cols: 13,
-  rows: 9,
+  cols: 27, // 16x12-block core plus 5 blocks of suburb on each side
+  rows: 23,
   spacing: 100,
   arterialEvery: 4,
+  suburbRing: 5,
   localSpeed: 11, // ~40 km/h
   arterialSpeed: 17, // ~60 km/h
 };
@@ -35,7 +37,9 @@ export interface Grid {
 }
 
 export function buildGrid(opts: GridOptions = DEFAULT_GRID): Grid {
-  const { cols, rows, spacing, arterialEvery } = opts;
+  const { cols, rows, spacing, arterialEvery, suburbRing } = opts;
+  // Arterials are counted from the core's edge so the core keeps its layout.
+  const isArterial = (k: number) => (((k - suburbRing) % arterialEvery) + arterialEvery) % arterialEvery === 0;
   const net = new Network();
   const nodeAt = (r: number, c: number) => r * cols + c;
   for (let r = 0; r < rows; r++) {
@@ -50,8 +54,8 @@ export function buildGrid(opts: GridOptions = DEFAULT_GRID): Grid {
   };
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      if (c < cols - 1) addStreet(nodeAt(r, c), nodeAt(r, c + 1), r % arterialEvery === 0);
-      if (r < rows - 1) addStreet(nodeAt(r, c), nodeAt(r + 1, c), c % arterialEvery === 0);
+      if (c < cols - 1) addStreet(nodeAt(r, c), nodeAt(r, c + 1), isArterial(r));
+      if (r < rows - 1) addStreet(nodeAt(r, c), nodeAt(r + 1, c), isArterial(c));
     }
   }
 

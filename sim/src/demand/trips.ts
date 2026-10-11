@@ -2,6 +2,7 @@ import { pick, poisson, sampleCdf, type Rng } from '../core/rng';
 import { periodAt, volumeFactor, HOUR, type Period } from '../core/time';
 import { gravityOd } from './od';
 import type { Zone } from './zones';
+import { vehicleKindFor, type VehicleKind } from '../traffic/vehicleTypes';
 
 export interface Trip {
   id: number;
@@ -10,6 +11,7 @@ export interface Trip {
   originNode: number;
   destNode: number;
   departTime: number; // s since midnight
+  kind?: VehicleKind; // unset means a standard 4.5 m car
 }
 
 export interface TripGenOptions {
@@ -51,13 +53,15 @@ export class TripGenerator {
       const originNode = pick(this.rng, o.accessNodes);
       // Adjacent zones share corners; avoid zero-length trips.
       const destChoices = d.accessNodes.filter((x) => x !== originNode);
+      const id = this.nextId++;
       trips.push({
-        id: this.nextId++,
+        id,
         originZone: o.id,
         destZone: d.id,
         originNode,
         destNode: pick(this.rng, destChoices),
         departTime: t,
+        kind: vehicleKindFor(id, o.type, d.type),
       });
     }
     return trips;

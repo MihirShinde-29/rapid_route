@@ -1,11 +1,11 @@
 import type { Link, Network } from '../network/network';
 import type { Trip } from '../demand/trips';
 import { compatible, Connector, LaneGeom, type Pose } from './geometry';
+import { VEHICLE_SPECS } from './vehicleTypes';
 
 // Intelligent Driver Model parameters (uncalibrated defaults; calibration is post-MVP).
 export const IDM = { a: 1.5, b: 2.0, T: 1.2, s0: 2.0, delta: 4, bMax: 9 };
-export const VEHICLE_LENGTH = 4.5; // m
-const SLOT = VEHICLE_LENGTH + IDM.s0; // space reserved on an exit lane per granted car
+export const VEHICLE_LENGTH = 4.5; // m, for trips without a vehicle type
 const TURN_SPEED = 7; // m/s through a turning connector
 const STARVE_S = 8; // after this wait an approach overrides arterial priority
 const TRAVEL_TIME_ALPHA = 0.2; // smoothing for measured link travel times
@@ -25,6 +25,8 @@ export interface Vehicle {
   stoppedFor: number;
   departTime: number;
   enteredLane: number; // sim time it entered its current lane
+  len: number; // m, bumper to bumper
+  accel: number; // IDM maximum acceleration
 }
 
 interface Lane {
@@ -47,6 +49,10 @@ export class TrafficModel {
   readonly vehicles = new Set<Vehicle>();
   private connectors = new Map<number, Connector>();
   private onConnector = new Map<Connector, Vehicle[]>();
+  // Only lanes and connectors with cars on them are visited each step; most of a big
+  // network is empty at any moment. Entries are added on entry and pruned once empty.
+  private activeLanes = new Set<Lane>();
+  private activeConns = new Set<Connector>();
   private backlog: { trip: Trip; route: number[] }[] = [];
   private forcedSpeeds = new Map<number, number>();
   private nextId = 0;
@@ -148,9 +154,10 @@ export class TrafficModel {
     for (const item of this.backlog) {
       const lane = this.lanes[item.route[0]];
       const tail = lane.vehicles[lane.vehicles.length - 1];
-      const room = tail ? tail.pos - VEHICLE_LENGTH : lane.geom.length;
+      const room = tail ? tail.pos - tail.len : lane.geom.length;
+      const spec = item.trip.kind ? VEHICLE_SPECS[item.trip.kind] : { length: VEHICLE_LENGTH, accel: IDM.a };
       // Cars arriving from the junction also land at the lane start, so wait for them.
-      if (lane.reserved > 0 || room < VEHICLE_LENGTH + IDM.s0 + 1) {
+      if (lane.reserved > 0 || room < spec.length + IDM.s0 + 1) {
         still.push(item);
         continue;
       }
@@ -160,16 +167,19 @@ export class TrafficModel {
         route: item.route,
         ri: 0,
         conn: null,
-        pos: VEHICLE_LENGTH,
-        v: Math.min(0.5 * this.desiredSpeed(lane.link), Math.max(0, (room - VEHICLE_LENGTH - IDM.s0) / IDM.T)),
+        pos: spec.length,
+        v: Math.min(0.5 * this.desiredSpeed(lane.link), Math.max(0, (room - spec.length - IDM.s0) / IDM.T)),
         acc: 0,
         granted: false,
         requestSince: -1,
         stoppedFor: 0,
         departTime: t,
         enteredLane: t,
+        len: spec.length,
+        accel: spec.accel,
       };
       lane.vehicles.push(v);
+      this.activeLanes.add(lane);
       this.vehicles.add(v);
     }
     this.backlog = still;
@@ -180,7 +190,7 @@ export class TrafficModel {
   // Priority: any approach waiting > STARVE_S, then arterials, then longest wait.
   private grantRightOfWay(t: number): void {
     const requests = new Map<number, Vehicle[]>();
-    for (const lane of this.lanes) {
+    for (const lane of this.activeLanes) {
       const f = lane.vehicles[0];
       if (!f || f.granted || f.ri === f.route.length - 1) continue;
       const dist = lane.geom.length - f.pos;
@@ -219,7 +229,7 @@ export class TrafficModel {
         f.granted = true;
         f.requestSince = -1;
         box.holders.add(f);
-        out.reserved += SLOT;
+        out.reserved += this.slot(f);
       }
     }
   }
@@ -228,18 +238,23 @@ export class TrafficModel {
   private exitHasRoom(v: Vehicle): boolean {
     const out = this.lanes[v.route[v.ri + 1]];
     const tail = out.vehicles[out.vehicles.length - 1];
-    return (tail ? tail.pos - VEHICLE_LENGTH : out.geom.length) - out.reserved >= SLOT;
+    return (tail ? tail.pos - tail.len : out.geom.length) - out.reserved >= this.slot(v);
   }
 
-  private idm(v: number, v0: number, gap: number, dv: number): number {
+  // Space reserved on an exit lane for a granted vehicle.
+  private slot(v: Vehicle): number {
+    return v.len + IDM.s0;
+  }
+
+  private idm(v: number, v0: number, gap: number, dv: number, a: number): number {
     if (gap <= 0.05) return -IDM.bMax;
-    const sStar = IDM.s0 + Math.max(0, v * IDM.T + (v * dv) / (2 * Math.sqrt(IDM.a * IDM.b)));
-    const acc = IDM.a * (1 - (v / v0) ** IDM.delta - (sStar / gap) ** 2);
+    const sStar = IDM.s0 + Math.max(0, v * IDM.T + (v * dv) / (2 * Math.sqrt(a * IDM.b)));
+    const acc = a * (1 - (v / v0) ** IDM.delta - (sStar / gap) ** 2);
     return Math.max(-IDM.bMax, acc);
   }
 
   private computeAccelerations(): void {
-    for (const lane of this.lanes) {
+    for (const lane of this.activeLanes) {
       const vs = lane.vehicles;
       for (let k = 0; k < vs.length; k++) {
         const veh = vs[k];
@@ -248,7 +263,7 @@ export class TrafficModel {
         let dv = 0;
         if (k > 0) {
           const lead = vs[k - 1];
-          gap = lead.pos - VEHICLE_LENGTH - veh.pos;
+          gap = lead.pos - lead.len - veh.pos;
           dv = veh.v - lead.v;
         } else if (veh.ri < veh.route.length - 1) {
           const remain = lane.geom.length - veh.pos;
@@ -261,15 +276,16 @@ export class TrafficModel {
             [gap, dv] = this.gapAhead(veh, remain, conn);
             const le = lane.lastExited;
             if (le && le !== veh && le.conn && le.conn !== conn && le.conn.inLink === lane.link.id) {
-              const g = remain + le.pos - VEHICLE_LENGTH;
+              const g = remain + le.pos - le.len;
               if (g < gap) [gap, dv] = [g, veh.v - le.v];
             }
           }
         }
-        veh.acc = this.idm(veh.v, v0, gap, dv);
+        veh.acc = this.idm(veh.v, v0, gap, dv, veh.accel);
       }
     }
-    for (const [conn, vs] of this.onConnector) {
+    for (const conn of this.activeConns) {
+      const vs = this.onConnector.get(conn)!;
       // Junctions are crossed at normal speed; an incident cap applies once on the next street,
       // so slow traffic never sits inside the box.
       const v0 = conn.turn ? TURN_SPEED : this.net.links[conn.outLink].speedLimit;
@@ -278,17 +294,17 @@ export class TrafficModel {
         let gap = Infinity;
         let dv = 0;
         if (k > 0) {
-          gap = vs[k - 1].pos - VEHICLE_LENGTH - veh.pos;
+          gap = vs[k - 1].pos - vs[k - 1].len - veh.pos;
           dv = veh.v - vs[k - 1].v;
         } else {
           const out = this.lanes[conn.outLink];
           const tail = out.vehicles[out.vehicles.length - 1];
           if (tail) {
-            gap = conn.length - veh.pos + tail.pos - VEHICLE_LENGTH;
+            gap = conn.length - veh.pos + tail.pos - tail.len;
             dv = veh.v - tail.v;
           }
         }
-        veh.acc = this.idm(veh.v, v0, gap, dv);
+        veh.acc = this.idm(veh.v, v0, gap, dv, veh.accel);
       }
     }
   }
@@ -297,10 +313,10 @@ export class TrafficModel {
   private gapAhead(veh: Vehicle, remain: number, conn: Connector): [number, number] {
     const onConn = this.onConnector.get(conn)!;
     const cTail = onConn[onConn.length - 1];
-    if (cTail) return [remain + cTail.pos - VEHICLE_LENGTH, veh.v - cTail.v];
+    if (cTail) return [remain + cTail.pos - cTail.len, veh.v - cTail.v];
     const out = this.lanes[conn.outLink];
     const tail = out.vehicles[out.vehicles.length - 1];
-    if (tail) return [remain + conn.length + tail.pos - VEHICLE_LENGTH, veh.v - tail.v];
+    if (tail) return [remain + conn.length + tail.pos - tail.len, veh.v - tail.v];
     return [Infinity, 0];
   }
 
@@ -316,7 +332,7 @@ export class TrafficModel {
       }
     }
     // Hard guarantees: no car passes the one ahead or an uncleared stop line.
-    for (const lane of this.lanes) {
+    for (const lane of this.activeLanes) {
       const vs = lane.vehicles;
       if (vs.length === 0) continue;
       const f = vs[0];
@@ -326,12 +342,12 @@ export class TrafficModel {
       }
       this.clampFollowers(vs);
     }
-    for (const vs of this.onConnector.values()) this.clampFollowers(vs);
+    for (const conn of this.activeConns) this.clampFollowers(this.onConnector.get(conn)!);
   }
 
   private clampFollowers(vs: Vehicle[]): void {
     for (let k = 1; k < vs.length; k++) {
-      const maxPos = vs[k - 1].pos - VEHICLE_LENGTH;
+      const maxPos = vs[k - 1].pos - vs[k - 1].len;
       if (vs[k].pos > maxPos) {
         vs[k].pos = maxPos;
         vs[k].v = Math.min(vs[k].v, vs[k - 1].v);
@@ -340,7 +356,7 @@ export class TrafficModel {
   }
 
   private advanceSegments(t: number): void {
-    for (const lane of this.lanes) {
+    for (const lane of this.activeLanes) {
       const vs = lane.vehicles;
       while (vs.length > 0 && vs[0].pos >= lane.geom.length) {
         const veh = vs.shift()!;
@@ -355,10 +371,13 @@ export class TrafficModel {
         veh.pos -= lane.geom.length;
         veh.conn = conn;
         this.onConnector.get(conn)!.push(veh);
+        this.activeConns.add(conn);
         lane.lastExited = veh;
       }
+      if (vs.length === 0) this.activeLanes.delete(lane);
     }
-    for (const [conn, vs] of this.onConnector) {
+    for (const conn of this.activeConns) {
+      const vs = this.onConnector.get(conn)!;
       while (vs.length > 0 && vs[0].pos >= conn.length) {
         const veh = vs.shift()!;
         const out = this.lanes[conn.outLink];
@@ -367,8 +386,10 @@ export class TrafficModel {
         veh.ri++;
         veh.enteredLane = t;
         out.vehicles.push(veh);
+        this.activeLanes.add(out);
         this.release(veh, out);
       }
+      if (vs.length === 0) this.activeConns.delete(conn);
     }
   }
 
@@ -376,7 +397,8 @@ export class TrafficModel {
   private release(veh: Vehicle, out: Lane): void {
     if (!veh.granted) return;
     veh.granted = false;
-    out.reserved -= SLOT;
+    out.reserved -= this.slot(veh);
+    if (out.reserved < 1e-6) out.reserved = 0; // mixed vehicle lengths leave float residue
     const box = this.boxes[out.link.from];
     box.holders.delete(veh);
   }
@@ -396,7 +418,7 @@ export class TrafficModel {
 
   // Centre-of-car pose for rendering.
   pose(veh: Vehicle): Pose {
-    const centre = veh.pos - VEHICLE_LENGTH / 2;
+    const centre = veh.pos - veh.len / 2;
     if (veh.conn) {
       if (centre >= 0) return veh.conn.pose(centre);
       return this.lanes[veh.conn.inLink].geom.pose(this.lanes[veh.conn.inLink].geom.length + centre);
@@ -409,7 +431,7 @@ export class TrafficModel {
     const errors: string[] = [];
     const checkOrder = (vs: Vehicle[], where: string) => {
       for (let k = 1; k < vs.length; k++) {
-        const gap = vs[k - 1].pos - VEHICLE_LENGTH - vs[k].pos;
+        const gap = vs[k - 1].pos - vs[k - 1].len - vs[k].pos;
         if (gap < -1e-6) errors.push(`overlap on ${where}: gap ${gap.toFixed(2)} m`);
       }
     };

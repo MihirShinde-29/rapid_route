@@ -32,7 +32,7 @@ export const DEFAULT_CONFIG: SimConfig = {
   seed: 549,
   grid: DEFAULT_GRID,
   startHour: 6,
-  peakTripsPerHour: 9000, // ~390 cars at peak, no gridlock removals (see traffic.test.ts)
+  peakTripsPerHour: 15000, // ~500 mixed vehicles at the AM peak, no gridlock removals (see traffic.test.ts)
   beta: 0.02,
 };
 
@@ -62,6 +62,8 @@ export class Simulation {
   constructor(readonly config: SimConfig = DEFAULT_CONFIG) {
     const rng = mulberry32(config.seed);
     this.grid = buildGrid(config.grid);
+    this.probeFrom = this.grid.nodeAt(Math.floor(this.grid.opts.rows / 2), 1);
+    this.probeTo = this.grid.nodeAt(Math.floor(this.grid.opts.rows / 2), this.grid.opts.cols - 2);
     this.zones = generateZones(this.grid, rng);
     this.cost = zoneCostMatrix(this.grid.net, this.zones);
     this.trips = new TripGenerator(this.zones, this.cost, rng, {
@@ -104,11 +106,15 @@ export class Simulation {
     return this.recent.length;
   }
 
-  spawnProbeTrip(): RouteDecision {
-    const from = this.grid.nodeAt(Math.floor(this.grid.opts.rows / 2), 1);
-    const to = this.grid.nodeAt(Math.floor(this.grid.opts.rows / 2), this.grid.opts.cols - 2);
+  // Probe start and end nodes. Default: across the middle of the map; the UI can pick others.
+  probeFrom: number;
+  probeTo: number;
+
+  spawnProbeTrip(from = this.probeFrom, to = this.probeTo): RouteDecision {
+    this.probeFrom = from;
+    this.probeTo = to;
     const trip: Trip = {
-      id: this.probeId++, originZone: 0, destZone: 1, originNode: from, destNode: to, departTime: this.time,
+      id: this.probeId++, originZone: 0, destZone: 1, originNode: from, destNode: to, departTime: this.time, kind: 'sedan',
     };
     const decision = this.assignTrip(trip, 'probe');
     this.probeDecision = decision;
@@ -118,10 +124,9 @@ export class Simulation {
     return decision;
   }
 
+  // Jams the shortest path between the current probe start and end.
   toggleProbeJam(): boolean {
-    const from = this.grid.nodeAt(Math.floor(this.grid.opts.rows / 2), 1);
-    const to = this.grid.nodeAt(Math.floor(this.grid.opts.rows / 2), this.grid.opts.cols - 2);
-    const shorter = this.distanceRouter.routeWithCost(from, to);
+    const shorter = this.distanceRouter.routeWithCost(this.probeFrom, this.probeTo);
     this.probeJammed = !this.probeJammed;
     this.traffic.clearForcedSpeeds();
     if (this.probeJammed) for (const id of shorter.links) this.traffic.setForcedSpeed(id, this.grid.net.links[id].speedLimit * 0.12);

@@ -155,9 +155,15 @@ let acc = 0;
 let last = performance.now();
 let lastSidebar = -Infinity;
 
+// Performance readout (top right of the map), smoothed over ~1 s.
+const perf = { fps: 60, simMs: 0, drawMs: 0 };
+const smooth = (prev: number, next: number) => prev + 0.05 * (next - prev);
+
 function frame(now: number): void {
   const realDt = Math.min(0.1, (now - last) / 1000);
+  if (now > last) perf.fps = smooth(perf.fps, 1000 / (now - last));
   last = now;
+  const simStart = performance.now();
   const warming = sim.time < warmUntil;
   $('warmup').hidden = !warming;
   if (warming) {
@@ -172,10 +178,16 @@ function frame(now: number): void {
     }
     if (steps === MAX_STEPS_PER_FRAME) acc = 0; // fell behind; drop time rather than spiral
   }
+  const drawStart = performance.now();
+  perf.simMs = smooth(perf.simMs, drawStart - simStart);
   view.render(now);
+  perf.drawMs = smooth(perf.drawMs, performance.now() - drawStart);
   if (now - lastSidebar > SIDEBAR_MS) {
     lastSidebar = now;
     updateSidebar();
+    $('perf').textContent =
+      `${perf.fps.toFixed(0)} fps · sim ${perf.simMs.toFixed(1)} ms · draw ${perf.drawMs.toFixed(1)} ms · ` +
+      `${view.renderer.info.render.calls} draw calls · ${sim.traffic.vehicles.size} cars`;
   }
   requestAnimationFrame(frame);
 }

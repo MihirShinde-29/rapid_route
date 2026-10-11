@@ -64,6 +64,11 @@
         position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 2; font-family: var(--font-mono); font-size: 11px;
         color: var(--text); background: rgba(6, 9, 13, 0.75); border: 1px solid var(--line); border-radius: 4px; padding: 6px 10px;
       }
+      .perf {
+        position: absolute; right: 12px; top: 12px; z-index: 2; font-family: var(--font-mono); font-size: 10px;
+        color: rgba(220, 228, 234, 0.65); background: rgba(6, 9, 13, 0.55);
+        border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 4px; padding: 6px 9px; pointer-events: none;
+      }
       .hint {
         position: absolute; left: 12px; bottom: 12px; z-index: 2; font-family: var(--font-mono); font-size: 10px;
         color: rgba(220, 228, 234, 0.65); background: rgba(6, 9, 13, 0.55);
@@ -147,6 +152,7 @@
       <div class="map-wrap">
         <div id="three-container" role="img" aria-label="3D city: cars follow IDM and junction rules; buildings follow zone density; arcs show new trips"></div>
         <div class="warmup" id="warmup" hidden>Fast-forwarding to start time…</div>
+        <div class="perf" id="perf" aria-live="off"></div>
         <div class="hint">DRAG to orbit · SCROLL to zoom · RIGHT-DRAG or SHIFT+DRAG to pan</div>
       </div>
       <aside>

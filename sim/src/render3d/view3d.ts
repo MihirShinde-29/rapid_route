@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { mulberry32, type Rng } from '../core/rng';
 import type { Simulation } from '../sim';
 import type { Trip } from '../demand/trips';
@@ -26,10 +27,42 @@ const ARC_POINTS = 13;
 const ARC_LIFE_MS = 1200;
 
 interface Arc {
-  line: THREE.Line;
-  positions: Float32Array;
-  material: THREE.LineBasicMaterial;
+  rgb: [number, number, number];
   born: number;
+}
+
+const SEGS_PER_ARC = ARC_POINTS - 1;
+const VERTS_PER_ARC = SEGS_PER_ARC * 2;
+
+// Collects static geometry so a whole class of objects (all buildings, all plates...)
+// is one draw call. Each part keeps its own colour as a vertex attribute.
+class StaticBatch {
+  private parts: THREE.BufferGeometry[] = [];
+  private vertices = 0;
+
+  // Returns the index of the first vertex this part occupies in the merged geometry.
+  add(geo: THREE.BufferGeometry, color: THREE.Color, x: number, y: number, z: number, rotX = 0, rotY = 0): number {
+    geo.applyMatrix4(new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(rotX, rotY, 0)).setPosition(x, y, z));
+    const n = geo.attributes.position.count;
+    const c = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) c.set([color.r, color.g, color.b], i * 3);
+    geo.setAttribute('color', new THREE.BufferAttribute(c, 3));
+    const start = this.vertices;
+    this.vertices += n;
+    this.parts.push(geo);
+    return start;
+  }
+
+  build(material: THREE.Material, cast: boolean, receive: boolean): THREE.Mesh {
+    const merged = mergeGeometries(this.parts)!;
+    for (const g of this.parts) g.dispose();
+    this.parts = [];
+    this.vertices = 0;
+    const mesh = new THREE.Mesh(merged, material);
+    mesh.castShadow = cast;
+    mesh.receiveShadow = receive;
+    return mesh;
+  }
 }
 
 // Three.js view of the sim, styled after prototypes/dispatch_3d.html.
@@ -41,8 +74,12 @@ export class View3D {
   private controls: OrbitControls;
   private arcs: Arc[] = [];
   private nextArc = 0;
+  private arcLines!: THREE.LineSegments;
   private cars!: THREE.InstancedMesh;
-  private streets: { links: number[]; arterial: boolean; mat: THREE.MeshStandardMaterial }[] = [];
+  private streets: { links: number[]; arterial: boolean; firstVertex: number; vertexCount: number }[] = [];
+  private roads!: THREE.Mesh;
+  private flat = new StaticBatch(); // plates, intersections: receive shadows only
+  private solid = new StaticBatch(); // buildings, stacks, trees: cast and receive
   private lastCongestion = -Infinity;
   private tmp = new THREE.Object3D();
   private tmpColor = new THREE.Color();
@@ -80,6 +117,8 @@ export class View3D {
     this.buildGround();
     this.buildRoads();
     this.buildZones(mulberry32(sim.config.seed + 1));
+    this.scene.add(this.flat.build(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95 }), false, true));
+    this.scene.add(this.solid.build(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.75 }), true, true));
     this.buildArcPool();
     this.buildCars();
     this.routeHighlight = new THREE.LineSegments(
@@ -141,7 +180,9 @@ export class View3D {
 
   private buildRoads(): void {
     const { net } = this.sim.grid;
-    const stripeMat = new THREE.MeshBasicMaterial({ color: 0x5a6672 });
+    const roads = new StaticBatch();
+    const stripes = new StaticBatch();
+    const stripeColor = new THREE.Color(0x5a6672);
     for (const link of net.links) {
       if (link.from > link.to) continue; // one mesh per two-way street
       const a = net.nodes[link.from];
@@ -152,32 +193,23 @@ export class View3D {
       const z1 = this.wz(b.y);
       const len = Math.hypot(x1 - x0, z1 - z0);
       const angle = -Math.atan2(z1 - z0, x1 - x0);
-      // Own material per street so it can be tinted by congestion.
-      const mat = new THREE.MeshStandardMaterial({
-        color: link.arterial ? ROAD_COLORS.arterial : ROAD_COLORS.local,
-        roughness: 0.9,
-      });
+      // Each street keeps its vertex range so congestion can recolour it in place.
       const back = net.outLinks[link.to].find((id) => net.links[id].to === link.from)!;
-      this.streets.push({ links: [link.id, back], arterial: link.arterial, mat });
-      const road = new THREE.Mesh(new THREE.BoxGeometry(len, 0.25, link.arterial ? 1.6 : 1.3), mat);
-      road.position.set((x0 + x1) / 2, 0.13, (z0 + z1) / 2);
-      road.rotation.y = angle;
-      road.receiveShadow = true;
-      this.scene.add(road);
+      const geo = new THREE.BoxGeometry(len, 0.25, link.arterial ? 1.6 : 1.3);
+      const vertexCount = geo.attributes.position.count;
+      const color = new THREE.Color(link.arterial ? ROAD_COLORS.arterial : ROAD_COLORS.local);
+      const firstVertex = roads.add(geo, color, (x0 + x1) / 2, 0.13, (z0 + z1) / 2, 0, angle);
+      this.streets.push({ links: [link.id, back], arterial: link.arterial, firstVertex, vertexCount });
       if (link.arterial) {
-        const stripe = new THREE.Mesh(new THREE.BoxGeometry(len - 2.6, 0.02, 0.06), stripeMat);
-        stripe.position.set((x0 + x1) / 2, 0.27, (z0 + z1) / 2);
-        stripe.rotation.y = angle;
-        this.scene.add(stripe);
+        stripes.add(new THREE.BoxGeometry(len - 2.6, 0.02, 0.06), stripeColor, (x0 + x1) / 2, 0.27, (z0 + z1) / 2, 0, angle);
       }
     }
-    const nodeMat = new THREE.MeshStandardMaterial({ color: 0x232f3a, roughness: 0.9 });
-    const nodeGeo = new THREE.CylinderGeometry(1.3, 1.3, 0.26, 16);
+    this.roads = roads.build(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9 }), false, true);
+    this.scene.add(this.roads);
+    this.scene.add(stripes.build(new THREE.MeshBasicMaterial({ vertexColors: true }), false, false));
+    const nodeColor = new THREE.Color(0x232f3a);
     for (const n of net.nodes) {
-      const m = new THREE.Mesh(nodeGeo, nodeMat);
-      m.position.set(this.wx(n.x), 0.13, this.wz(n.y));
-      m.receiveShadow = true;
-      this.scene.add(m);
+      this.flat.add(new THREE.CylinderGeometry(1.3, 1.3, 0.26, 16), nodeColor, this.wx(n.x), 0.13, this.wz(n.y));
     }
   }
 
@@ -188,17 +220,8 @@ export class View3D {
       const cx = this.wx(z.cx);
       const cz = this.wz(z.cy);
       const tint = new THREE.Color(ZONE_HEX[z.type]);
-      const plate = new THREE.Mesh(
-        new THREE.PlaneGeometry(size, size),
-        new THREE.MeshStandardMaterial({
-          color: z.type === 'park' ? 0x152a1c : new THREE.Color(0x0f161e).lerp(tint, 0.22),
-          roughness: 1,
-        }),
-      );
-      plate.rotation.x = -Math.PI / 2;
-      plate.position.set(cx, 0.03, cz);
-      plate.receiveShadow = true;
-      this.scene.add(plate);
+      const plateColor = z.type === 'park' ? new THREE.Color(0x152a1c) : new THREE.Color(0x0f161e).lerp(tint, 0.22);
+      this.flat.add(new THREE.PlaneGeometry(size, size), plateColor, cx, 0.03, cz, -Math.PI / 2);
       if (z.type === 'park') this.addTrees(cx, cz, size, rng);
       else this.addBuildings(z, cx, cz, size, tint, rng);
     }
@@ -224,48 +247,28 @@ export class View3D {
         }
         const grey = 0.35 + (0.45 + 0.4 * rng()) * 0.25;
         const color = new THREE.Color(grey * 0.9, grey * 0.95, grey * 1.05).lerp(tint, 0.18);
-        const lit = rng() > 0.45;
-        const mesh = new THREE.Mesh(
-          new THREE.BoxGeometry(footprint, h, footprint),
-          new THREE.MeshStandardMaterial({
-            color,
-            roughness: 0.75,
-            emissive: lit ? new THREE.Color(0.12, 0.09, 0.03) : new THREE.Color(0, 0, 0),
-            emissiveIntensity: lit ? 0.6 : 0,
-          }),
-        );
-        mesh.position.set(cx - size / 2 + cell * (i + 0.5), h / 2, cz - size / 2 + cell * (j + 0.5));
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        this.scene.add(mesh);
+        if (rng() > 0.45) color.add(new THREE.Color(0.072, 0.054, 0.018)); // warm lit windows
+        const bx = cx - size / 2 + cell * (i + 0.5);
+        const bz = cz - size / 2 + cell * (j + 0.5);
+        this.solid.add(new THREE.BoxGeometry(footprint, h, footprint), color, bx, h / 2, bz);
         if (z.type === 'industrial' && rng() > 0.6) {
-          const stack = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.3, 0.38, h + 4, 8),
-            new THREE.MeshStandardMaterial({ color: 0x4a5560, roughness: 0.7 }),
-          );
-          stack.position.set(mesh.position.x + footprint * 0.3, (h + 4) / 2, mesh.position.z + footprint * 0.3);
-          stack.castShadow = true;
-          this.scene.add(stack);
+          const stackColor = new THREE.Color(0x4a5560);
+          this.solid.add(new THREE.CylinderGeometry(0.3, 0.38, h + 4, 8), stackColor, bx + footprint * 0.3, (h + 4) / 2, bz + footprint * 0.3);
         }
       }
     }
   }
 
   private addTrees(cx: number, cz: number, size: number, rng: Rng): void {
-    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x3a2a1a });
-    const leafMat = new THREE.MeshStandardMaterial({ color: 0x2e5c3a, roughness: 1 });
+    const trunkColor = new THREE.Color(0x3a2a1a);
+    const leafColor = new THREE.Color(0x2e5c3a);
     const count = 6 + Math.floor(rng() * 5);
     for (let i = 0; i < count; i++) {
       const x = cx + (rng() - 0.5) * size * 0.85;
       const z = cz + (rng() - 0.5) * size * 0.85;
       const h = 2 + rng() * 1.6;
-      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.18, h * 0.4, 6), trunkMat);
-      trunk.position.set(x, h * 0.2, z);
-      trunk.castShadow = true;
-      const cone = new THREE.Mesh(new THREE.ConeGeometry(0.9, h, 7), leafMat);
-      cone.position.set(x, h * 0.9, z);
-      cone.castShadow = true;
-      this.scene.add(trunk, cone);
+      this.solid.add(new THREE.CylinderGeometry(0.15, 0.18, h * 0.4, 6), trunkColor, x, h * 0.2, z);
+      this.solid.add(new THREE.ConeGeometry(0.9, h, 7), leafColor, x, h * 0.9, z);
     }
   }
 
@@ -304,14 +307,19 @@ export class View3D {
   private syncCongestion(): void {
     const traffic = this.sim.traffic;
     const net = this.sim.grid.net;
+    const colors = this.roads.geometry.attributes.color as THREE.BufferAttribute;
     for (const st of this.streets) {
       let ratio = 1;
       for (const id of st.links) {
         if (traffic.lanes[id].vehicles.length > 0 || traffic.isForcedJammed(id)) ratio = Math.min(ratio, traffic.linkMeanSpeed(id) / net.links[id].speedLimit);
       }
       const color = ratio < 0.3 ? ROAD_COLORS.jammed : ratio < 0.6 ? ROAD_COLORS.slow : st.arterial ? ROAD_COLORS.arterial : ROAD_COLORS.local;
-      st.mat.color.setHex(color);
+      this.tmpColor.setHex(color);
+      for (let v = st.firstVertex; v < st.firstVertex + st.vertexCount; v++) {
+        colors.setXYZ(v, this.tmpColor.r, this.tmpColor.g, this.tmpColor.b);
+      }
     }
+    colors.needsUpdate = true;
   }
 
   // Highlight the most recently assigned route so the cost proof is visible
@@ -352,19 +360,19 @@ export class View3D {
     this.proofCar.visible = true;
   }
 
-  // Fixed pool of OD arcs, reused round-robin so busy peaks allocate nothing.
+  // Fixed pool of OD arcs in one line batch, reused round-robin so busy peaks allocate
+  // nothing. Additive blending: fading an arc's colour to black fades it out.
   private buildArcPool(): void {
-    for (let k = 0; k < ARC_POOL; k++) {
-      const positions = new Float32Array(ARC_POINTS * 3);
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      const material = new THREE.LineBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
-      const line = new THREE.Line(geo, material);
-      line.visible = false;
-      line.frustumCulled = false;
-      this.scene.add(line);
-      this.arcs.push({ line, positions, material, born: -Infinity });
-    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(ARC_POOL * VERTS_PER_ARC * 3), 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(ARC_POOL * VERTS_PER_ARC * 3), 3));
+    this.arcLines = new THREE.LineSegments(
+      geo,
+      new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }),
+    );
+    this.arcLines.frustumCulled = false;
+    this.scene.add(this.arcLines);
+    for (let k = 0; k < ARC_POOL; k++) this.arcs.push({ rgb: [0, 0, 0], born: -Infinity });
   }
 
   addTrips(trips: Trip[], now: number): void {
@@ -372,36 +380,43 @@ export class View3D {
     for (const t of trips) {
       const o = this.sim.zones[t.originZone];
       const d = this.sim.zones[t.destZone];
-      const arc = this.arcs[this.nextArc];
+      const k = this.nextArc;
+      const arc = this.arcs[k];
       this.nextArc = (this.nextArc + 1) % ARC_POOL;
+      const pos = this.arcLines.geometry.attributes.position as THREE.BufferAttribute;
       const x0 = this.wx(o.cx);
       const z0 = this.wz(o.cy);
       const x1 = this.wx(d.cx);
       const z1 = this.wz(d.cy);
       const lift = 3 + 0.25 * Math.hypot(x1 - x0, z1 - z0);
-      for (let p = 0; p < ARC_POINTS; p++) {
-        const s = p / (ARC_POINTS - 1);
-        arc.positions[p * 3] = x0 + (x1 - x0) * s;
-        arc.positions[p * 3 + 1] = 0.5 + lift * 4 * s * (1 - s);
-        arc.positions[p * 3 + 2] = z0 + (z1 - z0) * s;
+      const setPoint = (v: number, s: number) =>
+        pos.setXYZ(v, x0 + (x1 - x0) * s, 0.5 + lift * 4 * s * (1 - s), z0 + (z1 - z0) * s);
+      for (let seg = 0; seg < SEGS_PER_ARC; seg++) {
+        const v = k * VERTS_PER_ARC + seg * 2;
+        setPoint(v, seg / SEGS_PER_ARC);
+        setPoint(v + 1, (seg + 1) / SEGS_PER_ARC);
       }
-      arc.line.geometry.attributes.position.needsUpdate = true;
-      arc.material.color.setHex(ZONE_HEX[o.type]);
+      pos.needsUpdate = true;
+      const c = new THREE.Color(ZONE_HEX[o.type]);
+      arc.rgb = [c.r, c.g, c.b];
       arc.born = now;
-      arc.line.visible = true;
     }
   }
 
   render(now: number): void {
-    for (const arc of this.arcs) {
-      if (!arc.line.visible) continue;
+    const arcColors = this.arcLines.geometry.attributes.color as THREE.BufferAttribute;
+    let arcsChanged = false;
+    this.arcs.forEach((arc, k) => {
+      if (arc.born === -Infinity) return;
       const age = now - arc.born;
-      if (age >= ARC_LIFE_MS || !this.showDesireLines) {
-        arc.line.visible = false;
-        continue;
+      const fade = age >= ARC_LIFE_MS || !this.showDesireLines ? 0 : 0.7 * (1 - age / ARC_LIFE_MS);
+      if (fade === 0) arc.born = -Infinity;
+      for (let v = k * VERTS_PER_ARC; v < (k + 1) * VERTS_PER_ARC; v++) {
+        arcColors.setXYZ(v, arc.rgb[0] * fade, arc.rgb[1] * fade, arc.rgb[2] * fade);
       }
-      arc.material.opacity = 0.7 * (1 - age / ARC_LIFE_MS);
-    }
+      arcsChanged = true;
+    });
+    if (arcsChanged) arcColors.needsUpdate = true;
     this.syncCars();
     this.syncRouteHighlight();
     this.syncProofCar();

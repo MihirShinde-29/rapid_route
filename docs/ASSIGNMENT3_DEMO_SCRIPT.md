@@ -33,7 +33,7 @@ Point to the traffic count, mean trip time, and the evidence checklist. The safe
 
 ### 1:20-2:00 - Controlled longer-but-faster route proof
 
-Click `Jam short route`, then click `Probe trip`. If the panel reaches `PROOF`, pause the simulation so the screen is readable. Say: “At departure, the router compares a shorter distance-based candidate with the current congestion-aware route. The jam button works like an incident on the shorter route: cars on it really slow to a crawl, so the selected route is longer but has a lower live travel time.”
+Click `Jam short route`, then click `Probe trip` and press Enter to send the probe on the default cross-town route (or click a start and a destination on the map). The camera follows the probe car. If the panel reaches `PROOF`, pause the simulation so the screen is readable. Say: “At departure, the router compares a shorter distance-based candidate with the current congestion-aware route. The jam button works like an incident on the shorter route: cars on it really slow to a crawl, so the selected route is longer but has a lower live travel time.”
 
 If asked: the same longer-but-faster choice also happens on its own at the morning peak (hundreds of trips between 07:30 and 08:30 in testing); the button just makes it reproducible on camera.
 
@@ -41,14 +41,14 @@ Read the two costs and distances from the route panel. Point to the yellow route
 
 ### 2:00-2:30 - Stress test and limits
 
-Resume briefly or leave the stress-test state visible. Say: “At the morning peak the city carries roughly 350 to 450 cars at once with no gridlock removals. The current MVP intentionally excludes emergency dispatch, multi-modal traffic, calibrated lane-changing, adaptive signals, and 3D polish; those are final-roadmap items.”
+Resume briefly or leave the stress-test state visible. Say: “At the morning peak the city carries about 500 vehicles at once (cars, SUVs, vans and trucks of different lengths) across a 26 by 22 block city (a 16 by 12 block core plus its suburbs), with no gridlock removals. The current MVP intentionally excludes emergency dispatch, multi-modal traffic, calibrated lane-changing, and adaptive signals; those are final-roadmap items.”
 
 End with a screenshot showing the traffic count, zero gridlock removals, the proof route, and the completed evidence checklist.
 
 ## Screenshots to save
 
 1. AM demand state: OD matrix, peak label, top OD pairs.
-2. Stress state: 350+ cars, trips generated, zero gridlock removals.
+2. Stress state: 450+ vehicles, trips generated, zero gridlock removals.
 3. Route proof: `PROOF`, longer route distance/link count, lower selected live cost, and yellow overlay.
 4. Test terminal: `18 passed` from `npm test` (includes junction right-of-way tests).
 

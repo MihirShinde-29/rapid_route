@@ -27,7 +27,7 @@ Point to the `AM 06-10` label, `Target trips/h now`, generated trips, and the to
 
 ### 0:50-1:20 - Car-following and junction safety
 
-Set the simulation to `60x`. Say: “Cars use IDM-style car-following. They maintain spacing, slow behind a lead vehicle, and wait at shared junctions instead of entering conflicting movements.”
+Set the simulation to `60x`. Say: “Cars use IDM-style car-following. They maintain spacing, slow behind a lead vehicle, and wait at shared junctions instead of entering conflicting movements. Where arterials meet, and at every downtown junction, timed signals run green, yellow and all-red for each direction, and cars only enter on green, or on yellow when they are too close to stop; right turns on red are allowed after stopping. Suburban crossroads are all-way stops; at T-junctions only the street that ends has a stop sign.”
 
 Point to the traffic count, mean trip time, and the evidence checklist. The safety line should say `no overlaps / no gridlock`; the gridlock counter should remain 0.
 
@@ -41,16 +41,16 @@ Read the two costs and distances from the route panel. Point to the yellow route
 
 ### 2:00-2:30 - Stress test and limits
 
-Resume briefly or leave the stress-test state visible. Say: “At the morning peak the city carries about 500 vehicles at once (cars, SUVs, vans and trucks of different lengths) across a 26 by 22 block city (a 16 by 12 block core plus its suburbs), with no gridlock removals. The current MVP intentionally excludes emergency dispatch, multi-modal traffic, calibrated lane-changing, and adaptive signals; those are final-roadmap items.”
+Resume briefly or leave the stress-test state visible. Say: “At the morning peak the city carries about 700 vehicles at once (cars, SUVs, vans and trucks of different lengths) across a 26 by 22 block city (a 16 by 12 block core plus suburbs with uneven blocks, cul-de-sacs, parks and a shopping centre), with no gridlock removals. The current MVP intentionally excludes emergency dispatch, multi-modal traffic, calibrated lane-changing, and adaptive (traffic-responsive) signals; those are final-roadmap items.”
 
 End with a screenshot showing the traffic count, zero gridlock removals, the proof route, and the completed evidence checklist.
 
 ## Screenshots to save
 
 1. AM demand state: OD matrix, peak label, top OD pairs.
-2. Stress state: 450+ vehicles, trips generated, zero gridlock removals.
+2. Stress state: 650+ vehicles, trips generated, zero gridlock removals.
 3. Route proof: `PROOF`, longer route distance/link count, lower selected live cost, and yellow overlay.
-4. Test terminal: `18 passed` from `npm test` (includes junction right-of-way tests).
+4. Test terminal: `22 passed` from `npm test` (includes junction right-of-way, signal and stop-sign tests).
 
 ## Important explanation
 

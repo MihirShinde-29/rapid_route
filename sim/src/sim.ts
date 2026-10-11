@@ -32,7 +32,7 @@ export const DEFAULT_CONFIG: SimConfig = {
   seed: 549,
   grid: DEFAULT_GRID,
   startHour: 6,
-  peakTripsPerHour: 9000, // ~200 cars at peak in the MVP stress test
+  peakTripsPerHour: 9000, // ~390 cars at peak, no gridlock removals (see traffic.test.ts)
   beta: 0.02,
 };
 

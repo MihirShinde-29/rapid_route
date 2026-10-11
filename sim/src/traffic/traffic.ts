@@ -8,6 +8,7 @@ export const VEHICLE_LENGTH = 4.5; // m
 const SLOT = VEHICLE_LENGTH + IDM.s0; // space reserved on an exit lane per granted car
 const TURN_SPEED = 7; // m/s through a turning connector
 const STARVE_S = 8; // after this wait an approach overrides arterial priority
+const TRAVEL_TIME_ALPHA = 0.2; // smoothing for measured link travel times
 const GRIDLOCK_S = 180; // a car stopped this long is treated as gridlocked, removed and counted
 
 export interface Vehicle {
@@ -23,6 +24,7 @@ export interface Vehicle {
   requestSince: number; // sim time it started requesting, -1 if not
   stoppedFor: number;
   departTime: number;
+  enteredLane: number; // sim time it entered its current lane
 }
 
 interface Lane {
@@ -31,6 +33,7 @@ interface Lane {
   vehicles: Vehicle[]; // front first
   lastExited: Vehicle | null; // most recent car to enter a connector from this lane
   reserved: number; // m promised to cars granted into this lane
+  travelTime: number; // smoothed measured time to cross this lane, incl. junction wait (s)
 }
 
 // Junction box: cars holding right-of-way; their movements are pairwise compatible.
@@ -47,6 +50,7 @@ export class TrafficModel {
   private backlog: { trip: Trip; route: number[] }[] = [];
   private forcedSpeeds = new Map<number, number>();
   private nextId = 0;
+  private now = 0;
 
   arrived = 0;
   removedGridlock = 0;
@@ -59,6 +63,7 @@ export class TrafficModel {
       vehicles: [],
       lastExited: null,
       reserved: 0,
+      travelTime: link.length / link.speedLimit,
     }));
     this.boxes = net.nodes.map(() => ({ holders: new Set<Vehicle>() }));
     for (const inLane of this.lanes) {
@@ -97,11 +102,22 @@ export class TrafficModel {
     return this.arrived > 0 ? this.travelTimeSum / this.arrived : 0;
   }
 
-  // Interface for routing: mean speed on a link, free-flow if empty.
+  // Interface for routing: effective speed = link length / expected travel time.
+  // Travel time is measured from cars that crossed the link (smoothed), so one car
+  // pausing at a stop line does not make a link look jammed. If the front car has
+  // already been on the link longer than that, its wait counts, so a growing jam
+  // shows up before anyone gets through.
   linkMeanSpeed(linkId: number): number {
     const lane = this.lanes[linkId];
-    const observed = lane.vehicles.length === 0 ? lane.link.speedLimit : lane.vehicles.reduce((sum, v) => sum + v.v, 0) / lane.vehicles.length;
-    return Math.min(observed, this.forcedSpeeds.get(linkId) ?? Infinity);
+    const freeFlow = lane.link.length / lane.link.speedLimit;
+    const front = lane.vehicles[0];
+    const expected = Math.max(freeFlow, lane.travelTime, front ? this.now - front.enteredLane : 0);
+    return Math.min(lane.link.length / expected, this.forcedSpeeds.get(linkId) ?? Infinity);
+  }
+
+  // Speed limit, or the incident cap if one is set, so a jammed link really slows cars.
+  private desiredSpeed(link: Link): number {
+    return Math.min(link.speedLimit, this.forcedSpeeds.get(link.id) ?? Infinity);
   }
 
   setForcedSpeed(linkId: number, speed: number): void {
@@ -117,6 +133,7 @@ export class TrafficModel {
   }
 
   step(t: number, dt: number): void {
+    this.now = t;
     this.insertBacklog(t);
     this.grantRightOfWay(t);
     this.computeAccelerations();
@@ -144,12 +161,13 @@ export class TrafficModel {
         ri: 0,
         conn: null,
         pos: VEHICLE_LENGTH,
-        v: Math.min(0.5 * lane.link.speedLimit, Math.max(0, (room - VEHICLE_LENGTH - IDM.s0) / IDM.T)),
+        v: Math.min(0.5 * this.desiredSpeed(lane.link), Math.max(0, (room - VEHICLE_LENGTH - IDM.s0) / IDM.T)),
         acc: 0,
         granted: false,
         requestSince: -1,
         stoppedFor: 0,
         departTime: t,
+        enteredLane: t,
       };
       lane.vehicles.push(v);
       this.vehicles.add(v);
@@ -191,18 +209,26 @@ export class TrafficModel {
         let ok = true;
         for (const h of box.holders) if (!compatible(m, this.movement(h))) ok = false;
         if (!ok) continue;
-        // Let the box drain if a conflicting approach has waited too long.
-        if (reqs.some((r) => r !== f && !r.granted && starving(r) && !starving(f) && !compatible(m, this.movement(r)))) continue;
+        // Let the box drain if a conflicting approach has waited too long, but only for a car
+        // that could actually go: one stuck behind a full exit must not hold up cross traffic.
+        const blocker = (r: Vehicle) =>
+          r !== f && !r.granted && starving(r) && !starving(f) && this.exitHasRoom(r) && !compatible(m, this.movement(r));
+        if (reqs.some(blocker)) continue;
+        if (!this.exitHasRoom(f)) continue;
         const out = this.lanes[f.route[f.ri + 1]];
-        const tail = out.vehicles[out.vehicles.length - 1];
-        const free = (tail ? tail.pos - VEHICLE_LENGTH : out.geom.length) - out.reserved;
-        if (free < SLOT) continue;
         f.granted = true;
         f.requestSince = -1;
         box.holders.add(f);
         out.reserved += SLOT;
       }
     }
+  }
+
+  // Room for one more car on the lane after the junction, counting cars already granted into it.
+  private exitHasRoom(v: Vehicle): boolean {
+    const out = this.lanes[v.route[v.ri + 1]];
+    const tail = out.vehicles[out.vehicles.length - 1];
+    return (tail ? tail.pos - VEHICLE_LENGTH : out.geom.length) - out.reserved >= SLOT;
   }
 
   private idm(v: number, v0: number, gap: number, dv: number): number {
@@ -217,7 +243,7 @@ export class TrafficModel {
       const vs = lane.vehicles;
       for (let k = 0; k < vs.length; k++) {
         const veh = vs[k];
-        let v0 = lane.link.speedLimit;
+        let v0 = this.desiredSpeed(lane.link);
         let gap = Infinity;
         let dv = 0;
         if (k > 0) {
@@ -244,6 +270,8 @@ export class TrafficModel {
       }
     }
     for (const [conn, vs] of this.onConnector) {
+      // Junctions are crossed at normal speed; an incident cap applies once on the next street,
+      // so slow traffic never sits inside the box.
       const v0 = conn.turn ? TURN_SPEED : this.net.links[conn.outLink].speedLimit;
       for (let k = 0; k < vs.length; k++) {
         const veh = vs[k];
@@ -316,6 +344,7 @@ export class TrafficModel {
       const vs = lane.vehicles;
       while (vs.length > 0 && vs[0].pos >= lane.geom.length) {
         const veh = vs.shift()!;
+        lane.travelTime += TRAVEL_TIME_ALPHA * (t - veh.enteredLane - lane.travelTime);
         if (veh.ri === veh.route.length - 1) {
           this.arrived++;
           this.travelTimeSum += t - veh.departTime;
@@ -336,6 +365,7 @@ export class TrafficModel {
         veh.pos -= conn.length;
         veh.conn = null;
         veh.ri++;
+        veh.enteredLane = t;
         out.vehicles.push(veh);
         this.release(veh, out);
       }

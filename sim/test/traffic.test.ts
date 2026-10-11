@@ -32,6 +32,27 @@ describe('traffic', () => {
     expect(maxV).toBeGreaterThan(0.8 * grid.net.links[route[0]].speedLimit);
   });
 
+  it('an incident speed cap slows the cars on that link, not just the router', () => {
+    const grid = buildGrid({ ...buildGrid().opts, cols: 3, rows: 1 });
+    const model = new TrafficModel(grid.net);
+    const route = new Router(grid.net).route(0, 2);
+    model.setForcedSpeed(route[0], 3);
+    model.enqueue({ id: 0, originZone: 0, destZone: 0, originNode: 0, destNode: 2, departTime: 0 }, route);
+    let maxOnCapped = 0;
+    let maxAfter = 0;
+    for (let t = 0; t < 120 && model.arrived === 0; t += 0.1) {
+      model.step(t, 0.1);
+      for (const v of model.vehicles) {
+        if (v.conn) continue;
+        if (v.route[v.ri] === route[0]) maxOnCapped = Math.max(maxOnCapped, v.v);
+        else maxAfter = Math.max(maxAfter, v.v);
+      }
+    }
+    expect(model.arrived).toBe(1);
+    expect(maxOnCapped).toBeLessThanOrEqual(3.01);
+    expect(maxAfter).toBeGreaterThan(6); // speeds back up once past the incident
+  });
+
   it('morning peak: no overlaps, junction rules hold, cars arrive', () => {
     const sim = new Simulation({ ...DEFAULT_CONFIG, startHour: 6.5 });
     const end = sim.time + 2 * HOUR;
@@ -47,7 +68,7 @@ describe('traffic', () => {
       `peak vehicles ${peakVehicles}, arrived ${t.arrived}, mean trip ${t.meanTravelTime.toFixed(0)} s, ` +
         `backlog ${t.waitingToDepart}, gridlock removals ${t.removedGridlock}`,
     );
-    expect(peakVehicles).toBeGreaterThan(150);
+    expect(peakVehicles).toBeGreaterThan(250); // MVP: a few hundred cars
     expect(t.arrived).toBeGreaterThan(0.8 * sim.totalTrips);
     expect(t.removedGridlock).toBeLessThan(0.01 * sim.totalTrips);
   }, 60_000);

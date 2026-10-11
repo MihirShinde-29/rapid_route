@@ -84,16 +84,24 @@ export class OdHeatmap {
       ctx.fillRect(0, BAND + 2 + a * this.cell, BAND, this.cell); // origin strip (left)
       ctx.fillRect(BAND + 2 + a * this.cell, 0, this.cell, BAND); // destination strip (top)
     }
+    // One pixel per OD pair, then scaled into place: hundreds of zones means far more
+    // cells than screen pixels, so per-cell fillRect would be slow and blurry anyway.
     const nZ = sim.zones.length;
+    const img = new ImageData(n, n);
     for (let a = 0; a < n; a++) {
       for (let b = 0; b < n; b++) {
         const v = shares[this.order[a] * nZ + this.order[b]];
         const t = max > 0 ? Math.sqrt(v / max) : 0;
-        const c = LOW.map((lo, k) => Math.round(lo + (HIGH[k] - lo) * t));
-        ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
-        ctx.fillRect(BAND + 2 + b * this.cell, BAND + 2 + a * this.cell, this.cell, this.cell);
+        const i = (a * n + b) * 4;
+        for (let k = 0; k < 3; k++) img.data[i + k] = Math.round(LOW[k] + (HIGH[k] - LOW[k]) * t);
+        img.data[i + 3] = 255;
       }
     }
+    const off = document.createElement('canvas');
+    off.width = off.height = n;
+    off.getContext('2d')!.putImageData(img, 0, 0);
+    ctx.imageSmoothingEnabled = n > size; // downsampling: average; upsampling: crisp cells
+    ctx.drawImage(off, BAND + 2, BAND + 2, n * this.cell, n * this.cell);
   }
 
   private hover(e: PointerEvent): void {

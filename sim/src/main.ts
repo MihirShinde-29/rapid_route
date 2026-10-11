@@ -3,6 +3,7 @@ import { View3D } from './render3d/view3d';
 import { OdHeatmap, zoneLabel } from './render3d/odHeatmap';
 import { formatClock, periodAt, HOUR, type Period } from './core/time';
 import type { ZoneType } from './demand/zones';
+import { VEHICLE_KINDS, VEHICLE_SPECS, type VehicleKind } from './traffic/vehicleTypes';
 
 // ?start=7.75 opens at 07:45 with the previous 30 sim minutes already run,
 // so the roads are loaded instead of empty (useful for demos).
@@ -46,16 +47,93 @@ arcsBtn.onclick = () => {
   view.showDesireLines = !view.showDesireLines;
   arcsBtn.setAttribute('aria-pressed', String(view.showDesireLines));
 };
-probeBtn.onclick = () => {
-  const d = sim.spawnProbeTrip();
+// Probe trip: click Probe trip, then click a start and a destination on the map (Enter uses
+// the default cross-town pair). The camera follows the probe car until it arrives.
+const DEFAULT_PROBE: [number, number] = [sim.probeFrom, sim.probeTo];
+let probeMode: 'idle' | 'start' | 'end' = 'idle';
+let probeStart = -1;
+let hintTimer = 0;
+const mapEl = $('three-container');
+function setPickHint(text: string | null, clearAfterMs = 0): void {
+  const el = $('pickHint');
+  el.hidden = text === null;
+  if (text !== null) el.textContent = text;
+  clearTimeout(hintTimer);
+  if (text !== null && clearAfterMs > 0) hintTimer = window.setTimeout(() => setPickHint(null), clearAfterMs);
+}
+function endPicking(): void {
+  probeMode = 'idle';
+  probeBtn.textContent = 'Probe trip';
+  probeBtn.removeAttribute('aria-pressed');
+  mapEl.style.cursor = '';
+}
+function launchProbe(from: number, to: number): void {
+  endPicking();
+  const d = sim.spawnProbeTrip(from, to);
+  view.setProbePins(from, to);
+  view.follow(d.tripId);
   $('routeLog').textContent = `PROBE trip #${d.tripId} assigned at ${formatClock(sim.time)}. Watch its route and costs.`;
+  setPickHint('Following the probe car · drag to look around · Esc to stop following');
   updateSidebar();
+}
+view.onFollowEnd = () => {
+  view.setProbePins(null, null);
+  setPickHint('Probe car arrived', 3000);
 };
+probeBtn.onclick = () => {
+  if (probeMode !== 'idle') {
+    endPicking();
+    view.setProbePins(null, null);
+    setPickHint(null);
+    return;
+  }
+  view.follow(null);
+  view.setProbePins(null, null);
+  probeMode = 'start';
+  probeBtn.textContent = 'Cancel probe';
+  probeBtn.setAttribute('aria-pressed', 'true');
+  mapEl.style.cursor = 'crosshair';
+  setPickHint('Click a start point on the map · Enter for the default route · Esc to cancel');
+};
+// A click (not an orbit drag) picks the nearest intersection.
+let downAt: [number, number] | null = null;
+mapEl.addEventListener('pointerdown', (e) => {
+  downAt = e.button === 0 ? [e.clientX, e.clientY] : null;
+});
+mapEl.addEventListener('pointerup', (e) => {
+  if (!downAt || probeMode === 'idle') return;
+  const moved = Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]);
+  downAt = null;
+  if (moved > 5) return;
+  const node = view.pickNode(e.clientX, e.clientY);
+  if (node === null) return;
+  if (probeMode === 'start') {
+    probeStart = node;
+    view.setProbePins(node, null);
+    probeMode = 'end';
+    setPickHint('Now click the destination · Esc to cancel');
+  } else if (node !== probeStart) {
+    launchProbe(probeStart, node);
+  }
+});
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    if (probeMode !== 'idle') {
+      endPicking();
+      view.setProbePins(null, null);
+    } else if (view.following) {
+      view.follow(null);
+    }
+    setPickHint(null);
+  } else if (e.key === 'Enter' && probeMode !== 'idle') {
+    launchProbe(...DEFAULT_PROBE);
+  }
+});
 jamBtn.onclick = () => {
   const active = sim.toggleProbeJam();
   jamBtn.textContent = active ? 'Remove short-route jam' : 'Jam short route';
   $('routeMechanism').textContent = active
-    ? 'Controlled jam active on the shorter candidate. Click Probe trip to test a new departure against it.'
+    ? 'Controlled jam active on the shortest route between the last probe start and destination. Send a probe trip between them to test it.'
     : 'Controlled jam removed. New trips use observed traffic only.';
 };
 $('reset').onclick = () => location.reload();
@@ -132,6 +210,17 @@ function updateSidebar(): void {
     );
   }
 
+  const onRoad = new Map<VehicleKind, number>();
+  for (const v of traffic.vehicles) {
+    const kind = v.trip.kind ?? 'sedan';
+    onRoad.set(kind, (onRoad.get(kind) ?? 0) + 1);
+  }
+  $('vehicleTypes').replaceChildren(
+    ...VEHICLE_KINDS.map((k) =>
+      listItem('var(--text-dim)', `${k} · ${VEHICLE_SPECS[k].length} m`, (onRoad.get(k) ?? 0).toLocaleString()),
+    ),
+  );
+
   const types: ZoneType[] = ['residential', 'commercial', 'industrial', 'park'];
   $('zoneTypes').replaceChildren(
     ...types.map((t) => {
@@ -160,7 +249,7 @@ const perf = { fps: 60, simMs: 0, drawMs: 0 };
 const smooth = (prev: number, next: number) => prev + 0.05 * (next - prev);
 
 function frame(now: number): void {
-  const realDt = Math.min(0.1, (now - last) / 1000);
+  const realDt = Math.max(0, Math.min(0.1, (now - last) / 1000)); // rAF time can precede setup time
   if (now > last) perf.fps = smooth(perf.fps, 1000 / (now - last));
   last = now;
   const simStart = performance.now();

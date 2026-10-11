@@ -61,8 +61,21 @@
       #three-container { position: absolute; inset: 0; touch-action: none; }
       #three-container canvas { display: block; width: 100%; height: 100%; }
       .warmup {
-        position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 2; font-family: var(--font-mono); font-size: 11px;
+        position: absolute; top: 48px; left: 50%; transform: translateX(-50%); z-index: 2; font-family: var(--font-mono); font-size: 11px;
         color: var(--text); background: rgba(6, 9, 13, 0.75); border: 1px solid var(--line); border-radius: 4px; padding: 6px 10px;
+      }
+      .tag {
+        position: absolute; left: 0; top: 0; z-index: 2; pointer-events: none; white-space: nowrap;
+        font-family: var(--font-mono); font-size: 10.5px; color: var(--text); background: rgba(6, 9, 13, 0.85);
+        border: 1px solid var(--line); border-radius: 4px; padding: 3px 7px; margin-top: -6px;
+      }
+      .tag-start { border-color: #3ddc84; }
+      .tag-end { border-color: #ff5a5a; }
+      .tag-car { border-color: #ffd166; }
+      .pick {
+        position: absolute; bottom: 48px; left: 50%; transform: translateX(-50%); z-index: 2; font-family: var(--font-mono); font-size: 11px;
+        color: var(--text); background: rgba(6, 9, 13, 0.8); border: 1px solid var(--accent); border-radius: 4px; padding: 6px 10px;
+        max-width: calc(100% - 32px); text-align: center; pointer-events: none;
       }
       .perf {
         position: absolute; right: 12px; top: 12px; z-index: 2; font-family: var(--font-mono); font-size: 10px;
@@ -152,6 +165,7 @@
       <div class="map-wrap">
         <div id="three-container" role="img" aria-label="3D city: cars follow IDM and junction rules; buildings follow zone density; arcs show new trips"></div>
         <div class="warmup" id="warmup" hidden>Fast-forwarding to start time…</div>
+        <div class="pick" id="pickHint" role="status" hidden></div>
         <div class="perf" id="perf" aria-live="off"></div>
         <div class="hint">DRAG to orbit · SCROLL to zoom · RIGHT-DRAG or SHIFT+DRAG to pan</div>
       </div>
@@ -186,6 +200,11 @@
         <section class="panel">
           <h2>Top OD pairs this period</h2>
           <ul class="list" id="topPairs"></ul>
+        </section>
+        <section class="panel">
+          <h2>Vehicles on the road · length</h2>
+          <ul class="list" id="vehicleTypes"></ul>
+          <div class="note">Lengths and acceleration are used by the traffic model. Trips to or from industrial zones are mostly trucks and vans; some downtown trips are taxis. Red tail lights mean braking.</div>
         </section>
         <section class="panel">
           <h2>Zones · trips out / in</h2>

@@ -1,6 +1,6 @@
 import { mulberry32 } from './core/rng';
 import { HOUR } from './core/time';
-import { buildGrid, DEFAULT_GRID, type Grid, type GridOptions } from './network/grid';
+import { buildGrid, DEFAULT_GRID, nearestJunction, type Grid, type GridOptions } from './network/grid';
 import { generateZones, type Zone } from './demand/zones';
 import { zoneCostMatrix } from './demand/od';
 import { TripGenerator, type Trip } from './demand/trips';
@@ -32,7 +32,7 @@ export const DEFAULT_CONFIG: SimConfig = {
   seed: 549,
   grid: DEFAULT_GRID,
   startHour: 6,
-  peakTripsPerHour: 15000, // ~500 mixed vehicles at the AM peak, no gridlock removals (see traffic.test.ts)
+  peakTripsPerHour: 13000, // ~715 mixed vehicles at the AM peak, no gridlock removals (see traffic.test.ts)
   beta: 0.02,
 };
 
@@ -62,15 +62,24 @@ export class Simulation {
   constructor(readonly config: SimConfig = DEFAULT_CONFIG) {
     const rng = mulberry32(config.seed);
     this.grid = buildGrid(config.grid);
-    this.probeFrom = this.grid.nodeAt(Math.floor(this.grid.opts.rows / 2), 1);
-    this.probeTo = this.grid.nodeAt(Math.floor(this.grid.opts.rows / 2), this.grid.opts.cols - 2);
+    // Default probe: across the middle of the map, from the west suburbs to the east ones.
+    const mid = this.grid.net.nodes[this.grid.nodeAt(Math.floor(this.grid.opts.rows / 2), 1)].y;
+    this.probeFrom = nearestJunction(this.grid.net, this.grid.net.nodes[this.grid.nodeAt(0, 1)].x, mid);
+    this.probeTo = nearestJunction(this.grid.net, this.grid.net.nodes[this.grid.nodeAt(0, this.grid.opts.cols - 2)].x, mid);
     this.zones = generateZones(this.grid, rng);
     this.cost = zoneCostMatrix(this.grid.net, this.zones);
     this.trips = new TripGenerator(this.zones, this.cost, rng, {
       peakTripsPerHour: config.peakTripsPerHour,
       beta: config.beta,
     });
-    this.traffic = new TrafficModel(this.grid.net);
+    // Downtown (the commercial centre and the blocks around it) has signals at every junction.
+    const { rows, cols, suburbRing: ring } = this.grid.opts;
+    const downtown = (node: number) => {
+      const r = Math.floor(node / cols);
+      const c = node % cols;
+      return r >= ring && r <= rows - 1 - ring && c >= ring && c <= cols - 1 - ring;
+    };
+    this.traffic = new TrafficModel(this.grid.net, { downtown });
     // Route at departure using current mean link speed. Empty links naturally
     // fall back to their speed limit through TrafficModel.linkMeanSpeed().
     this.router = new Router(this.grid.net, (link) => link.length / Math.max(1, this.traffic.linkMeanSpeed(link.id)));

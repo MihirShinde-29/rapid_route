@@ -2,12 +2,19 @@ import type { Link, Network } from '../network/network';
 import type { Trip } from '../demand/trips';
 import { compatible, Connector, LaneGeom, type Pose } from './geometry';
 import { VEHICLE_SPECS } from './vehicleTypes';
+import { SignalPlans } from './signals';
 
 // Intelligent Driver Model parameters (uncalibrated defaults; calibration is post-MVP).
 export const IDM = { a: 1.5, b: 2.0, T: 1.2, s0: 2.0, delta: 4, bMax: 9 };
 export const VEHICLE_LENGTH = 4.5; // m, for trips without a vehicle type
 const TURN_SPEED = 7; // m/s through a turning connector
 const STARVE_S = 8; // after this wait an approach overrides arterial priority
+const STOP_LINE_ZONE = 4; // m; a car this close to the line at walking pace counts as stopped
+// Driveways are mid-block: cars join their first street and leave their last one part way
+// along it, beside the buildings, not at the junctions.
+export const DEPART_FRAC = 0.35;
+export const ARRIVE_FRAC = 0.65;
+const ARRIVE_SPEED = 5; // m/s, slowing to turn into the driveway
 const TRAVEL_TIME_ALPHA = 0.2; // smoothing for measured link travel times
 const GRIDLOCK_S = 180; // a car stopped this long is treated as gridlocked, removed and counted
 
@@ -57,12 +64,22 @@ export class TrafficModel {
   private forcedSpeeds = new Map<number, number>();
   private nextId = 0;
   private now = 0;
+  // Timed signals at arterial junctions and all-way stops at local ones; null keeps plain give-way
+  // rules everywhere (used by the junction tests).
+  readonly signals: SignalPlans | null;
+  // Approaches that must stop at the line: every approach to an all-way stop, and at a
+  // T-junction only the street that ends there (the through street has priority).
+  private stopApproach: Uint8Array;
 
   arrived = 0;
   removedGridlock = 0;
   private travelTimeSum = 0;
 
-  constructor(private net: Network) {
+  constructor(
+    private net: Network,
+    opts: { signals?: boolean; downtown?: (node: number) => boolean } = {},
+  ) {
+    this.signals = opts.signals === false ? null : new SignalPlans(net, opts.downtown);
     this.lanes = net.links.map((link) => ({
       link,
       geom: new LaneGeom(net, link),
@@ -79,6 +96,16 @@ export class TrafficModel {
         const c = new Connector(inLane.link.id, outId, inLane.geom, out.geom);
         this.connectors.set(this.key(inLane.link.id, outId), c);
         this.onConnector.set(c, []);
+      }
+    }
+    this.stopApproach = new Uint8Array(net.links.length);
+    if (this.signals) {
+      for (const link of net.links) {
+        const node = link.to;
+        const ins = net.inLinks[node].length;
+        if (this.signals.isSignalised(node) || ins < 3) continue;
+        const through = net.outLinks[node].some((o) => this.connectors.get(this.key(link.id, o))?.kind === 'through');
+        this.stopApproach[link.id] = ins >= 4 || !through ? 1 : 0;
       }
     }
   }
@@ -148,16 +175,25 @@ export class TrafficModel {
     this.gridlockGuard(dt);
   }
 
-  // Cars enter at the start of their first lane once there is room.
+  // Cars pull out of a driveway part way along their first lane once there is a gap: room
+  // ahead, and enough room behind for the next car to slow down for them.
   private insertBacklog(t: number): void {
     const still: { trip: Trip; route: number[] }[] = [];
     for (const item of this.backlog) {
       const lane = this.lanes[item.route[0]];
-      const tail = lane.vehicles[lane.vehicles.length - 1];
-      const room = tail ? tail.pos - tail.len : lane.geom.length;
       const spec = item.trip.kind ? VEHICLE_SPECS[item.trip.kind] : { length: VEHICLE_LENGTH, accel: IDM.a };
-      // Cars arriving from the junction also land at the lane start, so wait for them.
-      if (lane.reserved > 0 || room < spec.length + IDM.s0 + 1) {
+      const vs = lane.vehicles;
+      const pos = Math.max(spec.length, DEPART_FRAC * lane.geom.length);
+      let k = 0;
+      while (k < vs.length && vs[k].pos >= pos) k++;
+      const lead = vs[k - 1];
+      const follow = vs[k];
+      const aheadOk = !lead || lead.pos - lead.len - pos >= IDM.s0 + 2;
+      // With nobody behind, still leave room for cars already granted into this lane.
+      const behindOk = follow
+        ? pos - spec.length - follow.pos >= IDM.s0 + 3 + 1.5 * follow.v * IDM.T
+        : pos - spec.length >= lane.reserved + IDM.s0;
+      if (!aheadOk || !behindOk) {
         still.push(item);
         continue;
       }
@@ -167,8 +203,8 @@ export class TrafficModel {
         route: item.route,
         ri: 0,
         conn: null,
-        pos: spec.length,
-        v: Math.min(0.5 * this.desiredSpeed(lane.link), Math.max(0, (room - spec.length - IDM.s0) / IDM.T)),
+        pos,
+        v: 0,
         acc: 0,
         granted: false,
         requestSince: -1,
@@ -178,7 +214,7 @@ export class TrafficModel {
         len: spec.length,
         accel: spec.accel,
       };
-      lane.vehicles.push(v);
+      vs.splice(k, 0, v);
       this.activeLanes.add(lane);
       this.vehicles.add(v);
     }
@@ -195,22 +231,30 @@ export class TrafficModel {
       if (!f || f.granted || f.ri === f.route.length - 1) continue;
       const dist = lane.geom.length - f.pos;
       if (dist > Math.max(25, (f.v * f.v) / (2 * IDM.b) + 10)) continue;
-      if (f.requestSince < 0) f.requestSince = t;
       const node = lane.link.to;
+      // Stop sign: come to a halt at the line before asking to go.
+      if (this.stopApproach[lane.link.id] && !(dist < STOP_LINE_ZONE && f.v < 0.5)) continue;
+      if (f.requestSince < 0) f.requestSince = t;
       if (!requests.has(node)) requests.set(node, []);
       requests.get(node)!.push(f);
     }
 
     for (const [node, reqs] of requests) {
       const box = this.boxes[node];
+      if (this.signals?.isSignalised(node)) {
+        this.grantSignalised(t, box, reqs);
+        continue;
+      }
       const starving = (v: Vehicle) => t - v.requestSince > STARVE_S;
       const inLink = (v: Vehicle) => v.route[v.ri];
       reqs.sort((a, b) => {
         const sa = starving(a) ? 0 : 1;
         const sb = starving(b) ? 0 : 1;
         if (sa !== sb) return sa - sb;
-        const aa = this.net.links[inLink(a)].arterial ? 0 : 1;
-        const ab = this.net.links[inLink(b)].arterial ? 0 : 1;
+        // Arterials first, then streets without a stop sign, then stop-sign approaches.
+        const rank = (v: Vehicle) => (this.net.links[inLink(v)].arterial ? 0 : this.stopApproach[inLink(v)] ? 2 : 1);
+        const aa = rank(a);
+        const ab = rank(b);
         if (sa === 1 && aa !== ab) return aa - ab;
         return a.requestSince - b.requestSince;
       });
@@ -231,6 +275,52 @@ export class TrafficModel {
         box.holders.add(f);
         out.reserved += this.slot(f);
       }
+    }
+  }
+
+  // True if any approach to this junction has a stop sign.
+  isStopSign(node: number): boolean {
+    return this.net.inLinks[node].some((id) => this.stopApproach[id] === 1);
+  }
+
+  mustStop(linkId: number): boolean {
+    return this.stopApproach[linkId] === 1;
+  }
+
+  // At a signal: go on green if the car reaches the line before the light turns red; on yellow
+  // only if it is too close to stop comfortably; on red, right turns only, after stopping, and
+  // only when no car with a green or yellow light wants a conflicting movement.
+  private grantSignalised(t: number, box: Box, reqs: Vehicle[]): void {
+    const signals = this.signals!;
+    const go: Vehicle[] = [];
+    const rightOnRed: Vehicle[] = [];
+    for (const f of reqs) {
+      const lane = this.lanes[f.route[f.ri]];
+      const dist = lane.geom.length - f.pos;
+      const light = signals.light(lane.link.id, t);
+      if (light === 'green') {
+        if (dist / Math.max(f.v, 3) <= signals.timeLeft(lane.link.id, t)) go.push(f);
+      } else if (light === 'yellow') {
+        if (f.v > 2 && (f.v * f.v) / (2 * IDM.b) > dist - 1) go.push(f); // a moving car past the point of stopping
+      } else if (this.movement(f).kind === 'right' && dist < STOP_LINE_ZONE && f.v < 0.5) {
+        rightOnRed.push(f);
+      }
+    }
+    go.sort((a, b) => a.requestSince - b.requestSince);
+    const grant = (f: Vehicle) => {
+      const m = this.movement(f);
+      for (const h of box.holders) if (!compatible(m, this.movement(h))) return;
+      if (!this.exitHasRoom(f)) return;
+      f.granted = true;
+      f.requestSince = -1;
+      box.holders.add(f);
+      this.lanes[f.route[f.ri + 1]].reserved += this.slot(f);
+    };
+    for (const f of go) grant(f);
+    for (const f of rightOnRed) {
+      const m = this.movement(f);
+      if (go.some((g) => !g.granted && !compatible(m, this.movement(g)))) continue;
+      grant(f);
     }
   }
 
@@ -261,6 +351,11 @@ export class TrafficModel {
         let v0 = this.desiredSpeed(lane.link);
         let gap = Infinity;
         let dv = 0;
+        if (veh.ri === veh.route.length - 1) {
+          // Slow down to turn into the destination driveway.
+          const toDrive = Math.max(0, ARRIVE_FRAC * lane.geom.length - veh.pos);
+          v0 = Math.min(v0, Math.sqrt(ARRIVE_SPEED ** 2 + 2 * IDM.b * toDrive));
+        }
         if (k > 0) {
           const lead = vs[k - 1];
           gap = lead.pos - lead.len - veh.pos;
@@ -358,6 +453,15 @@ export class TrafficModel {
   private advanceSegments(t: number): void {
     for (const lane of this.activeLanes) {
       const vs = lane.vehicles;
+      // Arrivals turn off into their driveway part way along the last street.
+      for (let k = vs.length - 1; k >= 0; k--) {
+        const veh = vs[k];
+        if (veh.ri !== veh.route.length - 1 || veh.pos < ARRIVE_FRAC * lane.geom.length) continue;
+        vs.splice(k, 1);
+        this.arrived++;
+        this.travelTimeSum += t - veh.departTime;
+        this.vehicles.delete(veh);
+      }
       while (vs.length > 0 && vs[0].pos >= lane.geom.length) {
         const veh = vs.shift()!;
         lane.travelTime += TRAVEL_TIME_ALPHA * (t - veh.enteredLane - lane.travelTime);

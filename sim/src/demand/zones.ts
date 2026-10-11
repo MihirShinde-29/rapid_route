@@ -72,7 +72,7 @@ export function generateZones(grid: Grid, rng: Rng): Zone[] {
       id,
       type,
       density: Math.min(1, Math.max(0.15, density)),
-      accessNodes: [...b.corners],
+      accessNodes: b.corners.filter((n) => grid.net.outLinks[n].length > 0), // superblock centres have no streets
       cx: pts.reduce((s, p) => s + p.x, 0) / 4,
       cy: pts.reduce((s, p) => s + p.y, 0) / 4,
     };
@@ -89,6 +89,13 @@ export function generateZones(grid: Grid, rng: Rng): Zone[] {
       z.density = 0;
     }
   };
+  // Superblocks: parks, and a suburban shopping centre that draws trips like a small downtown.
+  for (const sb of grid.superblocks) {
+    for (const id of sb.blocks) {
+      zones[id].type = sb.kind === 'park' ? 'park' : 'commercial';
+      zones[id].density = sb.kind === 'park' ? 0 : 0.55;
+    }
+  }
   const core = zones.filter((z) => z.type === 'residential' && inCore(z));
   const suburb = zones.filter((z) => z.type === 'residential' && !inCore(z));
   addParks(core, Math.max(2, Math.round((coreCols * coreRows) / 48)));

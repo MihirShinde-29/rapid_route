@@ -28,7 +28,8 @@ describe('network', () => {
     const k = grid.opts.suburbRing; // first arterial row and column, at the core's edge
     const d = shortestCosts(grid.net, grid.nodeAt(k, k));
     // Along that arterial row (17 m/s): 8 blocks
-    expect(d[grid.nodeAt(k, k + 8)]).toBeCloseTo((8 * grid.opts.spacing) / 17, 6);
+    const metres = grid.net.nodes[grid.nodeAt(k, k + 8)].x - grid.net.nodes[grid.nodeAt(k, k)].x;
+    expect(d[grid.nodeAt(k, k + 8)]).toBeCloseTo(metres / 17, 6);
   });
 });
 

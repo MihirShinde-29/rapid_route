@@ -39,18 +39,21 @@ If asked: the same longer-but-faster choice also happens on its own at the morni
 
 Read the two costs and distances from the route panel. Point to the yellow route on the map and the `PROOF` message. This is the key acceptance screenshot.
 
-### 2:00-2:30 - Stress test and limits
+### 2:00-2:45 - Stress test and limits
 
-Resume briefly or leave the stress-test state visible. Say: “At the morning peak the city carries about 700 vehicles at once (cars, SUVs, vans and trucks of different lengths) across a 26 by 22 block city (a 16 by 12 block core plus suburbs with uneven blocks, cul-de-sacs, parks and a shopping centre), with no gridlock removals. The current MVP intentionally excludes emergency dispatch, multi-modal traffic, calibrated lane-changing, and adaptive (traffic-responsive) signals; those are final-roadmap items.”
+Point to the performance line at the top right of the 3D view (fps, sim ms, draw ms, cars). Say: "At the morning peak the city carries about 700 vehicles at once (cars, SUVs, vans and trucks) across a 26 by 22 block city, with no gridlock removals, at this frame rate."
 
-End with a screenshot showing the traffic count, zero gridlock removals, the proof route, and the completed evidence checklist.
+Then open a second tab with `?start=8&demand=1.3` (30% more peak demand than the stable setting). Switch to 300x and say: "Past about 13,000 trips per hour the downtown junctions saturate. Queues spill back, the gridlock counter starts rising, and the simulation cost per frame grows." Point to the gridlock counter, the red roads and the fps / sim ms numbers.
+
+Close with: "Emergency dispatch, multi-modal traffic, lane changing and adaptive signals are not in the MVP; dispatch is the next layer for the final."
 
 ## Screenshots to save
 
 1. AM demand state: OD matrix, peak label, top OD pairs.
-2. Stress state: 650+ vehicles, trips generated, zero gridlock removals.
-3. Route proof: `PROOF`, longer route distance/link count, lower selected live cost, and yellow overlay.
-4. Test terminal: `22 passed` from `npm test` (includes junction right-of-way, signal and stop-sign tests).
+2. Stress state: 650+ vehicles, trips generated, zero gridlock removals, and the fps line.
+3. Limit state: `?demand=1.3` with the gridlock counter above zero.
+4. Route proof: `PROOF`, longer route distance/link count, lower selected live cost, and yellow overlay.
+5. Test terminal: `22 passed` from `npm test` (includes junction right-of-way, signal and stop-sign tests).
 
 ## Important explanation
 

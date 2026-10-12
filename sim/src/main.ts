@@ -10,7 +10,14 @@ import { VEHICLE_KINDS, VEHICLE_SPECS, type VehicleKind } from './traffic/vehicl
 const WARMUP_H = 0.5;
 const startParam = new URLSearchParams(location.search).get('start');
 const startHour = startParam !== null && Number(startParam) >= WARMUP_H && Number(startParam) < 24 ? Number(startParam) : null;
-const sim = new Simulation({ ...DEFAULT_CONFIG, startHour: startHour !== null ? startHour - WARMUP_H : DEFAULT_CONFIG.startHour });
+// ?demand=1.2 scales peak demand, for stress tests past the stable setting.
+const demandParam = Number(new URLSearchParams(location.search).get('demand'));
+const demand = demandParam > 0 && demandParam <= 3 ? demandParam : 1;
+const sim = new Simulation({
+  ...DEFAULT_CONFIG,
+  startHour: startHour !== null ? startHour - WARMUP_H : DEFAULT_CONFIG.startHour,
+  peakTripsPerHour: DEFAULT_CONFIG.peakTripsPerHour * demand,
+});
 const warmUntil = startHour !== null ? startHour * HOUR : -Infinity;
 const WARMUP_STEPS_PER_FRAME = 600;
 const $ = (id: string) => document.getElementById(id)!;

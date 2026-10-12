@@ -14,25 +14,29 @@ Live demo: https://mihirshinde-29.github.io/rapid_route/ (add `?start=8` to open
 - `presentation/`: project approval presentation (PDF)
 
 ## Prototype status
-Both prototypes implement A* routing, live congestion, and road closures with live rerouting for a small emergency fleet.
-They do not yet include the zone/density demand model, OD matrix, car-following microsimulation, junction rules,
-or cost-based route assignment. Those are the planned MVP work for the mid-term.
+The early prototypes implement A* routing, live congestion and road closures with rerouting for a small emergency fleet.
+They were proofs of logic only; the MVP lives in `sim/`.
 
-## Simulation (`sim/`, MVP work in progress)
+## Simulation (`sim/`, the Assignment 3 MVP)
 TypeScript + Vite + Three.js. The sim core has no DOM access and runs headless in tests; `render3d/` (styled after the 3D prototype) only reads state.
 ```
 cd sim
 npm install
 npm run dev     # open the printed localhost URL
-npm test
+npm test        # 22 tests: demand, car-following, junctions, signals, routing
+npm run build   # type-check and build a static site into sim/dist
 ```
 Needs Node 20+. Vite is pinned to 6 / Vitest to 3 because newer releases need a newer Node.
 
 Open `http://localhost:5173/?start=8` to open at 08:00 with the morning peak already loaded.
+Add `&demand=1.2` to scale peak demand for a stress test (1 is the stable setting, 13,000 trips/h).
+
+The live build at the link above is redeployed by GitHub Actions on every push to `main` (`.github/workflows/pages.yml`).
 
 Done so far: zones with density, a production-constrained gravity OD matrix per time-of-day period, Poisson trip
-generation with AM/PM peaks, IDM car-following, junction right-of-way, A* route assignment using live mean link speeds,
-and a 3D view (buildings follow zone density, roads tint by congestion, OD arcs and heatmap). The app compares the
+generation with AM/PM peaks, IDM car-following, junction right-of-way with
+fixed-time signals (yellow and all-red) and stop signs, A* route assignment using live mean link speeds,
+and a 3D view of an irregular city with parks and a mall (buildings follow zone density, roads tint by congestion, OD arcs and heatmap). The app compares the
 selected live route against a shorter distance-based candidate using current travel times. When a longer route is faster,
 it is retained as the proof route, highlighted in yellow, and labeled in the sidebar.
 Work split: `docs/MVP_WORK_SPLIT.md`.

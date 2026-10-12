@@ -4,72 +4,76 @@
 <meta charset="utf-8">
 <title>Dispatch Assignment 3 Report</title>
 <style>
-  @page { size: Letter; margin: 0.6in 0.7in; }
-  body { font-family: "Segoe UI", Arial, sans-serif; font-size: 10pt; line-height: 1.38; color: #1d2733; margin: 0; }
-  h1 { font-size: 22pt; text-align: center; margin: 0 0 2px; color: #1d2733; }
-  .sub { color: #1f9d6b; text-align: center; font-size: 11pt; margin: 0 0 14px; }
-  h2 { font-size: 12pt; margin: 14px 0 5px; color: #1d2733; border-bottom: 1px solid #d9e2e8; padding-bottom: 2px; }
-  p { margin: 0 0 6px; }
-  ul { margin: 0 0 6px; padding-left: 18px; }
+  @page { size: Letter; margin: 0.55in 0.65in; }
+  body { font-family: "Segoe UI", Arial, sans-serif; font-size: 9.6pt; line-height: 1.34; color: #1d2733; margin: 0; }
+  h1 { font-size: 20pt; text-align: center; margin: 0 0 2px; }
+  .sub { color: #1f9d6b; text-align: center; font-size: 10.5pt; margin: 0 0 10px; }
+  h2 { font-size: 11.5pt; margin: 11px 0 4px; border-bottom: 1px solid #d9e2e8; padding-bottom: 2px; }
+  h3 { font-size: 10pt; margin: 7px 0 3px; }
+  p { margin: 0 0 5px; }
+  ul { margin: 0 0 5px; padding-left: 18px; }
   li { margin: 0 0 2px; }
-  table { width: 100%; border-collapse: collapse; margin: 4px 0 6px; font-size: 9.2pt; }
-  th, td { border: 1px solid #d9e2e8; padding: 4px 7px; text-align: left; vertical-align: top; }
+  table { width: 100%; border-collapse: collapse; margin: 3px 0 5px; font-size: 9pt; }
+  th, td { border: 1px solid #d9e2e8; padding: 3px 6px; text-align: left; vertical-align: top; }
   th { background: #eef5f2; }
   td:first-child { width: 30%; font-weight: 600; }
-  .num td:first-child { width: 45%; font-weight: 400; }
-  .num td:last-child { font-weight: 600; }
   a { color: #1565c0; }
-  .foot { color: #7a8794; font-size: 8.5pt; margin-top: 10px; }
+  code { font-size: 8.8pt; }
 </style>
 </head>
 <body>
 <h1>Dispatch</h1>
 <p class="sub">Assignment 3: MVP Implementation &amp; Demo Report | Group Rapid Route (Mihir Shinde, Ananya)</p>
 
-<h2>What was implemented</h2>
-<p>The approved traffic slice runs as a TypeScript + Vite + Three.js browser simulation. Zone density drives a gravity OD matrix and peak-hour trip generation. Vehicles use IDM car-following and junction right-of-way rules. Arterial and downtown junctions have fixed-time signals; other junctions use stop signs. Each trip picks its route at departure with A* over live link travel times, so a longer but less congested route can win.</p>
+<p>Our Assignment 2 MVP was the traffic core: zone-density demand with an OD matrix and peak hours, car-following agents with safe gaps and junction right-of-way, and cost-based routing that can prefer a longer but faster path. All of it is built and runs in the browser (TypeScript, Vite, Three.js). The simulation core has no DOM access and is covered by 22 automated tests.</p>
 
-<h2>Plan vs. reality</h2>
+<h2>Plan vs. Reality</h2>
+<h3>Made it in</h3>
 <table>
-  <tr><th>Assignment 2 requirement</th><th>Assignment 3 result</th></tr>
-  <tr><td>Zone density, OD matrix, peak hour</td><td>Done. Building heights follow zone density. The sidebar shows the OD heatmap, the time period (AM/PM peak), top OD pairs, the trip rate and generated trips.</td></tr>
-  <tr><td>A few hundred cars with safe gaps</td><td>Done, beyond target. About 700 vehicles at the AM peak (cars, SUVs, vans and trucks of different lengths and acceleration) with no overlaps and no gridlock removals.</td></tr>
-  <tr><td>Junction right-of-way, no overlaps</td><td>Done. Compatible movements share a junction, conflicting ones wait, and exit reservations stop cars blocking the box. Added since the plan: timed signals with yellow and all-red, right on red after stopping, all-way stops at suburban crossroads, and at T-junctions a stop sign only on the street that ends.</td></tr>
-  <tr><td>Route choosing a longer, less congested path, both costs logged</td><td>Done. The route panel shows the chosen route's live cost next to the shorter candidate's, with distances and link counts. The proof route is drawn in yellow.</td></tr>
-  <tr><td>Cut from MVP</td><td>Emergency dispatch, lane changing, calibrated driver behaviour, adaptive signals, GIS and multimodal traffic remain final-roadmap items.</td></tr>
+  <tr><th>Assignment 2 MVP item</th><th>Result</th></tr>
+  <tr><td>Zone density, OD matrix, peak and off-peak</td><td>Each zone has a density; a gravity OD matrix per time period (night, AM peak, midday, PM peak, evening) drives Poisson trip generation. Building heights follow density. The sidebar shows the OD heatmap, top OD pairs, the period and trips/h.</td></tr>
+  <tr><td>A few hundred cars, safe gaps, no overlaps or ghost cars</td><td>About 700 vehicles at the AM peak (cars, SUVs, vans, trucks of different lengths) using IDM car-following. Tests check that no two vehicles overlap; the gridlock counter stays at 0.</td></tr>
+  <tr><td>Junction right-of-way, no collisions or freezing</td><td>Only compatible movements share a junction, and cars cannot enter unless the exit has room. Junctions on arterials and downtown have fixed-time signals (green, 3 s yellow, 2 s all-red, right on red after stopping); suburban crossroads are all-way stops; at T-junctions only the ending street stops.</td></tr>
+  <tr><td>Route picks a longer, less congested path, both costs logged</td><td>A* over live link travel times at departure. The route panel shows the chosen route's cost next to the shorter route's, with distances; the route is drawn in yellow. Probe example: 2,790 m chosen (estimated 312 s) over a jammed 2,581 m route (estimated 1,931 s).</td></tr>
 </table>
-
-<h2>City and traffic model</h2>
+<h3>Cut or changed</h3>
 <ul>
-  <li><b>City:</b> 26 × 22 blocks, a 16 × 12 downtown core with suburbs around it. Arterials every 4th street (2 lanes, 60 km/h), local streets 40 km/h. Blocks vary in size and suburban streets are slightly crooked, with cul-de-sacs, T-junctions, a central park, two smaller parks and a shopping centre.</li>
-  <li><b>Signals:</b> two-phase fixed timing, 60 s cycle (32 s / 18 s arterial and local green, or 25 s / 25 s), 3 s yellow, 2 s all-red, with offsets that form a green wave along arterials. A car enters on yellow only if it is moving and cannot stop.</li>
-  <li><b>Trips:</b> cars pull out of and into driveways in the middle of the block, not at junctions.</li>
-  <li><b>View:</b> brake lights, turn signals, a chase camera that follows the probe car (drag to look around), and speeds from 1× to 300×.</li>
+  <li><b>Stack:</b> the spec planned plain JavaScript on a 2D canvas, with Three.js as a fallback. We used TypeScript and Three.js instead, because our approved prototype was already 3D in Three.js.</li>
+  <li><b>Junction control:</b> the plan was fixed right-of-way rules, which are still used. We added fixed-time signals and stop signs on top so junctions behave like real ones; downtown signals also let the city carry more traffic without gridlock. Adaptive signals are still cut.</li>
+  <li><b>Pulled forward:</b> two Could-haves, a non-grid street network (uneven blocks, cul-de-sacs, parks, a mall) and some 3D polish (day and night, brake lights, turn signals, a chase camera for the probe car).</li>
+  <li><b>Still simplified:</b> IDM uses textbook parameters, not calibrated ones, and there is no lane changing. Routes are fixed at departure, so a car does not reroute mid-trip; the probe's actual time (510 s) was longer than its estimate (312 s) for this reason.</li>
+  <li><b>Deferred as planned:</b> emergency incidents and dispatch, GIS import, multimodal traffic. The Swarm &amp; Boids pillar is only partly shown: car-following is a local-rule agent model, and boids-style yielding to emergency vehicles comes with dispatch.</li>
 </ul>
 
-<h2>Results</h2>
-<table class="num">
-  <tr><td>Peak demand setting</td><td>13,000 trips/h</td></tr>
-  <tr><td>Vehicles on the road at the AM / PM peak</td><td>about 700 / about 700 (697–725 across runs)</td></tr>
-  <tr><td>Gridlock removals, invariant errors</td><td>0, 0</td></tr>
-  <tr><td>Probe: chosen route vs. jammed shorter route</td><td>2,790 m (est. 312 s, actual 510 s) vs. 2,581 m (est. 1,931 s)</td></tr>
-  <tr><td>Automated tests (<code>npm test</code>)</td><td>22 passed, including right-of-way, signal, all-way stop and T-junction tests</td></tr>
+<h2>Performance and Stress Test</h2>
+<table>
+  <tr><td>Target (Assignment 2)</td><td>60 FPS with a few hundred vehicles and about 200 road segments</td></tr>
+  <tr><td>Measured</td><td>[FPS] FPS at the AM peak with about 700 vehicles on about 1,100 street segments (2,194 directed links), five times the planned network. One simulation step at the peak takes 0.24 ms on the CPU, so the 60× speed setting (10 steps per frame) costs about 2.4 ms per frame.</td></tr>
+  <tr><td>Limit</td><td>The traffic model, not the frame rate, is the limit. At 13,000 trips/h (the default) the peak holds 697 vehicles with 0 gridlock removals. At 1.15× demand it reaches 893 vehicles with the first 2 removals; at 1.3× it reaches 1,236 vehicles, 16 removals and growing queues, while a step still costs only 0.37 ms. The stress test in the video opens the live build with <code>?demand=</code> above 1 to show this.</td></tr>
 </table>
-<p><b>Limits found:</b> at 14,000 trips/h the AM peak gridlocks, so 13,000 is the stable setting. Routes are fixed at departure; cars already driving do not reroute, which is why the probe's actual time is longer than its estimate. Signals do not react to queues.</p>
 
-<h2>AI utility</h2>
-<p>AI coding tools sped up the data structures, routing, rendering, tests and documentation. We reviewed every change, tuned demand and signal timing by running the simulation, and checked results against the tests. No LLM or network API runs in the simulation; it uses classical algorithms only.</p>
+<h2>AI Utility</h2>
+<p>The spec listed Claude and ChatGPT for scaffolding the traffic model and for mockups; no AI-generated assets and no runtime AI were planned, and none are used (the simulation is classical algorithms only).</p>
+<ul>
+  <li><b>Saved time:</b> the first versions of the data structures, A*, the Three.js rendering (instanced cars, merged city geometry), the sidebar and the tests came together in days instead of weeks. AI was also quick at writing tests that reproduce a bug.</li>
+  <li><b>Cost time:</b> traffic behaviour needed our own testing. Examples: a yellow-light rule let stopped cars drive into the junction; signal tests first used more demand than a junction can carry, so they failed for the wrong reason; raising demand caused gridlock that took a design change (downtown signals, more even block sizes) to fix; an automated edit once overwrote part of a source file. Tuning demand and signal timing meant running the simulation many times and reading the numbers ourselves.</li>
+  <li><b>Overall:</b> clearly faster than without AI, but the time went into checking and tuning rather than writing code.</li>
+</ul>
 
-<h2>Demo and next steps</h2>
-<p>The video shows AM demand and the OD matrix, the busy city at 60× with zero gridlock removals, signals and stop signs at work, and the probe trip taking the longer, faster route (the <i>Jam short route</i> button makes this reproducible; it also happens on its own at the morning peak). Next: emergency incidents, nearest-available dispatch, emergency vehicle routing with other traffic yielding, and response-time metrics.</p>
+<h2>Roadmap to Final</h2>
+<ul>
+  <li>Incidents that spawn on the map (and can be placed by the user), plus road closures.</li>
+  <li>Dispatch of the nearest available matching unit (ambulance, fire, police), with live rerouting around closures and congestion.</li>
+  <li>Traffic yielding to emergency vehicles with boids-style local rules (the second pillar).</li>
+  <li>Mutual-aid fallback, response-time and calls-handled metrics, and a fleet and incident panel.</li>
+  <li>If time allows: rerouting mid-trip, multi-unit incidents and adaptive signals.</li>
+</ul>
 
 <h2>Links</h2>
 <table>
-  <tr><td>Playable web build</td><td><a href="https://mihirshinde-29.github.io/rapid_route/?start=8">mihirshinde-29.github.io/rapid_route</a> (opens at the morning peak)</td></tr>
+  <tr><td>Playable web build</td><td><a href="https://mihirshinde-29.github.io/rapid_route/?start=8">mihirshinde-29.github.io/rapid_route</a> (<code>?start=8</code> opens at the morning peak; any modern desktop browser)</td></tr>
   <tr><td>Video</td><td>[ADD VIDEO LINK]</td></tr>
-  <tr><td>Source</td><td><a href="https://github.com/MihirShinde-29/rapid_route">github.com/MihirShinde-29/rapid_route</a></td></tr>
-  <tr><td>Run locally</td><td>From <code>sim/</code>: <code>npm install</code>, <code>npm test</code>, <code>npm run dev</code></td></tr>
+  <tr><td>Source code</td><td><a href="https://github.com/MihirShinde-29/rapid_route">github.com/MihirShinde-29/rapid_route</a>; build steps are in README.md (<code>cd sim</code>, <code>npm install</code>, <code>npm run dev</code>)</td></tr>
 </table>
-<p class="foot">Recording script and screenshot checklist: docs/ASSIGNMENT3_DEMO_SCRIPT.md</p>
 </body>
 </html>

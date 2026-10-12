@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dispatch Assignment 3 Report</title>
+<style>
+  @page { size: Letter; margin: 0.6in 0.7in; }
+  body { font-family: "Segoe UI", Arial, sans-serif; font-size: 10pt; line-height: 1.38; color: #1d2733; margin: 0; }
+  h1 { font-size: 22pt; text-align: center; margin: 0 0 2px; color: #1d2733; }
+  .sub { color: #1f9d6b; text-align: center; font-size: 11pt; margin: 0 0 14px; }
+  h2 { font-size: 12pt; margin: 14px 0 5px; color: #1d2733; border-bottom: 1px solid #d9e2e8; padding-bottom: 2px; }
+  p { margin: 0 0 6px; }
+  ul { margin: 0 0 6px; padding-left: 18px; }
+  li { margin: 0 0 2px; }
+  table { width: 100%; border-collapse: collapse; margin: 4px 0 6px; font-size: 9.2pt; }
+  th, td { border: 1px solid #d9e2e8; padding: 4px 7px; text-align: left; vertical-align: top; }
+  th { background: #eef5f2; }
+  td:first-child { width: 30%; font-weight: 600; }
+  .num td:first-child { width: 45%; font-weight: 400; }
+  .num td:last-child { font-weight: 600; }
+  a { color: #1565c0; }
+  .foot { color: #7a8794; font-size: 8.5pt; margin-top: 10px; }
+</style>
+</head>
+<body>
+<h1>Dispatch</h1>
+<p class="sub">Assignment 3: MVP Implementation &amp; Demo Report | Group Rapid Route (Mihir Shinde, Ananya)</p>
+
+<h2>What was implemented</h2>
+<p>The approved traffic slice runs as a TypeScript + Vite + Three.js browser simulation. Zone density drives a gravity OD matrix and peak-hour trip generation. Vehicles use IDM car-following and junction right-of-way rules. Arterial and downtown junctions have fixed-time signals; other junctions use stop signs. Each trip picks its route at departure with A* over live link travel times, so a longer but less congested route can win.</p>
+
+<h2>Plan vs. reality</h2>
+<table>
+  <tr><th>Assignment 2 requirement</th><th>Assignment 3 result</th></tr>
+  <tr><td>Zone density, OD matrix, peak hour</td><td>Done. Building heights follow zone density. The sidebar shows the OD heatmap, the time period (AM/PM peak), top OD pairs, the trip rate and generated trips.</td></tr>
+  <tr><td>A few hundred cars with safe gaps</td><td>Done, beyond target. About 700 vehicles at the AM peak (cars, SUVs, vans and trucks of different lengths and acceleration) with no overlaps and no gridlock removals.</td></tr>
+  <tr><td>Junction right-of-way, no overlaps</td><td>Done. Compatible movements share a junction, conflicting ones wait, and exit reservations stop cars blocking the box. Added since the plan: timed signals with yellow and all-red, right on red after stopping, all-way stops at suburban crossroads, and at T-junctions a stop sign only on the street that ends.</td></tr>
+  <tr><td>Route choosing a longer, less congested path, both costs logged</td><td>Done. The route panel shows the chosen route's live cost next to the shorter candidate's, with distances and link counts. The proof route is drawn in yellow.</td></tr>
+  <tr><td>Cut from MVP</td><td>Emergency dispatch, lane changing, calibrated driver behaviour, adaptive signals, GIS and multimodal traffic remain final-roadmap items.</td></tr>
+</table>
+
+<h2>City and traffic model</h2>
+<ul>
+  <li><b>City:</b> 26 × 22 blocks, a 16 × 12 downtown core with suburbs around it. Arterials every 4th street (2 lanes, 60 km/h), local streets 40 km/h. Blocks vary in size and suburban streets are slightly crooked, with cul-de-sacs, T-junctions, a central park, two smaller parks and a shopping centre.</li>
+  <li><b>Signals:</b> two-phase fixed timing, 60 s cycle (32 s / 18 s arterial and local green, or 25 s / 25 s), 3 s yellow, 2 s all-red, with offsets that form a green wave along arterials. A car enters on yellow only if it is moving and cannot stop.</li>
+  <li><b>Trips:</b> cars pull out of and into driveways in the middle of the block, not at junctions.</li>
+  <li><b>View:</b> brake lights, turn signals, a chase camera that follows the probe car (drag to look around), and speeds from 1× to 300×.</li>
+</ul>
+
+<h2>Results</h2>
+<table class="num">
+  <tr><td>Peak demand setting</td><td>13,000 trips/h</td></tr>
+  <tr><td>Vehicles on the road at the AM / PM peak</td><td>about 700 / about 700 (697–725 across runs)</td></tr>
+  <tr><td>Gridlock removals, invariant errors</td><td>0, 0</td></tr>
+  <tr><td>Probe: chosen route vs. jammed shorter route</td><td>2,790 m (est. 312 s, actual 510 s) vs. 2,581 m (est. 1,931 s)</td></tr>
+  <tr><td>Automated tests (<code>npm test</code>)</td><td>22 passed, including right-of-way, signal, all-way stop and T-junction tests</td></tr>
+</table>
+<p><b>Limits found:</b> at 14,000 trips/h the AM peak gridlocks, so 13,000 is the stable setting. Routes are fixed at departure; cars already driving do not reroute, which is why the probe's actual time is longer than its estimate. Signals do not react to queues.</p>
+
+<h2>AI utility</h2>
+<p>AI coding tools sped up the data structures, routing, rendering, tests and documentation. We reviewed every change, tuned demand and signal timing by running the simulation, and checked results against the tests. No LLM or network API runs in the simulation; it uses classical algorithms only.</p>
+
+<h2>Demo and next steps</h2>
+<p>The video shows AM demand and the OD matrix, the busy city at 60× with zero gridlock removals, signals and stop signs at work, and the probe trip taking the longer, faster route (the <i>Jam short route</i> button makes this reproducible; it also happens on its own at the morning peak). Next: emergency incidents, nearest-available dispatch, emergency vehicle routing with other traffic yielding, and response-time metrics.</p>
+
+<h2>Links</h2>
+<table>
+  <tr><td>Playable web build</td><td><a href="https://mihirshinde-29.github.io/rapid_route/?start=8">mihirshinde-29.github.io/rapid_route</a> (opens at the morning peak)</td></tr>
+  <tr><td>Video</td><td>[ADD VIDEO LINK]</td></tr>
+  <tr><td>Source</td><td><a href="https://github.com/MihirShinde-29/rapid_route">github.com/MihirShinde-29/rapid_route</a></td></tr>
+  <tr><td>Run locally</td><td>From <code>sim/</code>: <code>npm install</code>, <code>npm test</code>, <code>npm run dev</code></td></tr>
+</table>
+<p class="foot">Recording script and screenshot checklist: docs/ASSIGNMENT3_DEMO_SCRIPT.md</p>
+</body>
+</html>

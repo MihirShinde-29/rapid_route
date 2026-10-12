@@ -48,7 +48,7 @@
 <h2>Performance and Stress Test</h2>
 <table>
   <tr><td>Target (Assignment 2)</td><td>60 FPS with a few hundred vehicles and about 200 road segments</td></tr>
-  <tr><td>Measured</td><td>[FPS] FPS at the AM peak with about 700 vehicles on about 1,100 street segments (2,194 directed links), five times the planned network. One simulation step at the peak takes 0.24 ms on the CPU, so the 60× speed setting (10 steps per frame) costs about 2.4 ms per frame.</td></tr>
+  <tr><td>Measured</td><td>76 FPS in Chrome at the AM peak at 60× speed, with 649 vehicles on screen on about 1,100 street segments (2,194 directed links), five times the planned network. Each frame took 3.4 ms of simulation and 3.0 ms of drawing (47 draw calls), well inside the 16.7 ms a 60 FPS frame allows. Measured offline, one simulation step at the peak takes 0.24 ms.</td></tr>
   <tr><td>Limit</td><td>The traffic model, not the frame rate, is the limit. At 13,000 trips/h (the default) the peak holds 697 vehicles with 0 gridlock removals. At 1.15× demand it reaches 893 vehicles with the first 2 removals; at 1.3× it reaches 1,236 vehicles, 16 removals and growing queues, while a step still costs only 0.37 ms. The stress test in the video opens the live build with <code>?demand=</code> above 1 to show this.</td></tr>
 </table>
 

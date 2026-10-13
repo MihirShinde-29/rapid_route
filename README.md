@@ -5,6 +5,8 @@ Pillars: Pathfinding & Navigation, Swarm & Boids Modeling
 
 Live demo: https://mihirshinde-29.github.io/rapid_route/ (add `?start=8` to open at the morning peak)
 
+Assignment 3 video: https://www.youtube.com/watch?v=Ib8I2viWXsc
+
 ## Contents
 - `docs/`: Assignment 1 (PDF + editable DOCX) and Assignment 2 (PDF, includes the approval email as page 3)
 - `approval/`: approval request email (.eml) and screenshot of the approval thread (approved by Danrui Li, who is also the assigned mentor)

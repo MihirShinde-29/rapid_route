@@ -24,7 +24,8 @@ export class Router {
     return this.routeWithCost(from, to).links;
   }
 
-  routeWithCost(from: number, to: number): RouteResult {
+  // `skip`: links the route may not use (rerouting uses it to rule out U-turns).
+  routeWithCost(from: number, to: number, skip: readonly number[] = []): RouteResult {
     if (from === to) return { links: [], cost: 0 };
     const g = new Float64Array(this.net.nodes.length).fill(Infinity);
     const pred = new Int32Array(this.net.nodes.length).fill(-1);
@@ -39,6 +40,7 @@ export class Router {
       closed[u] = 1;
       if (u === to) break;
       for (const lid of this.net.outLinks[u]) {
+        if (skip.includes(lid)) continue;
         const link = this.net.links[lid];
         const next = g[u] + this.cost(link);
         if (next >= g[link.to]) continue;

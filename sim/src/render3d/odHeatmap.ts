@@ -1,36 +1,22 @@
 import type { Simulation } from '../sim';
 import type { Period } from '../core/time';
-import type { ZoneType } from '../demand/zones';
-
-const TYPE_ORDER: ZoneType[] = ['residential', 'commercial', 'industrial', 'park'];
-const TYPE_CSS: Record<ZoneType, string> = {
-  residential: '#3987e5',
-  commercial: '#d95926',
-  industrial: '#199e70',
-  park: '#4e5a65',
-};
-const TYPE_SHORT: Record<ZoneType, string> = {
-  residential: 'Res',
-  commercial: 'Com',
-  industrial: 'Ind',
-  park: 'Park',
-};
+import { DISTRICTS, districtShares } from '../demand/districts';
 
 // Sequential blue on the dark panel: near-zero recedes into the surface.
 const LOW = [0x0e, 0x14, 0x1c];
-const HIGH = [0xcd, 0xe2, 0xfb];
-const BAND = 5; // px, zone-type strip along each axis
+const HIGH = [0x6f, 0xa8, 0xf0];
+const LABEL_W = 30; // px, row labels on the left
+const LABEL_H = 16; // px, column labels on top
+const SHORT = DISTRICTS.map((d) => (d === 'Downtown' ? 'DT' : d));
+const K = DISTRICTS.length;
 
-export function zoneLabel(sim: Simulation, id: number): string {
-  const b = sim.grid.blocks[id];
-  return `${TYPE_SHORT[sim.zones[id].type]} ${b.r}·${b.c}`;
-}
-
-// Zones x zones OD share matrix for the current period, rows = origins.
+// District x district OD matrix, rows = origins. Colour: the model's share of trips for the
+// current period. Number: trips actually generated between the two districts in the last
+// sim hour, so the panel shows the demand model and the trips it produced side by side.
 export class OdHeatmap {
   private ctx: CanvasRenderingContext2D;
-  private order: number[];
   private shares: Float64Array | null = null;
+  private observed: Int32Array = new Int32Array(K * K);
   private period: Period | null = null;
   private cell = 1;
 
@@ -40,85 +26,79 @@ export class OdHeatmap {
     private sim: Simulation,
   ) {
     this.ctx = canvas.getContext('2d')!;
-    this.order = sim.zones
-      .map((z) => z.id)
-      .sort((a, b) => TYPE_ORDER.indexOf(sim.zones[a].type) - TYPE_ORDER.indexOf(sim.zones[b].type) || a - b);
     canvas.addEventListener('pointermove', (e) => this.hover(e));
     canvas.addEventListener('pointerleave', () => (this.tooltip.hidden = true));
   }
 
   update(period: Period): void {
-    if (period === this.period) return;
-    this.period = period;
-    this.shares = this.sim.trips.odShares(period);
+    if (period !== this.period) {
+      this.period = period;
+      this.shares = districtShares(this.sim.district, this.sim.trips.odShares(period));
+    }
+    this.observed = this.sim.observedDistrictOd();
     this.draw();
   }
 
   topPairs(k: number): { o: number; d: number; share: number }[] {
     if (!this.shares) return [];
-    const n = this.sim.zones.length;
-    const all: { o: number; d: number; share: number }[] = [];
-    this.shares.forEach((share, idx) => {
-      if (share > 0) all.push({ o: Math.floor(idx / n), d: idx % n, share });
-    });
-    return all.sort((a, b) => b.share - a.share).slice(0, k);
+    return Array.from(this.shares, (share, i) => ({ o: Math.floor(i / K), d: i % K, share }))
+      .sort((a, b) => b.share - a.share)
+      .slice(0, k);
   }
 
   private draw(): void {
-    const { canvas, ctx, sim } = this;
+    const { canvas, ctx } = this;
     const dpr = window.devicePixelRatio || 1;
     const size = canvas.clientWidth;
     canvas.width = size * dpr;
     canvas.height = size * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const n = this.order.length;
-    this.cell = (size - BAND - 2) / n;
-    const shares = this.shares!;
-    let max = 0;
-    for (const s of shares) max = Math.max(max, s);
-
     ctx.clearRect(0, 0, size, size);
-    for (let a = 0; a < n; a++) {
-      const zt = sim.zones[this.order[a]].type;
-      ctx.fillStyle = TYPE_CSS[zt];
-      ctx.fillRect(0, BAND + 2 + a * this.cell, BAND, this.cell); // origin strip (left)
-      ctx.fillRect(BAND + 2 + a * this.cell, 0, this.cell, BAND); // destination strip (top)
+    this.cell = Math.min((size - LABEL_W) / K, (size - LABEL_H) / K);
+    const c = this.cell;
+    const shares = this.shares!;
+    const max = Math.max(...shares);
+
+    ctx.font = '9px ui-monospace, Consolas, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(220, 228, 234, 0.6)';
+    for (let k = 0; k < K; k++) {
+      ctx.fillText(SHORT[k], LABEL_W + (k + 0.5) * c, LABEL_H / 2); // destinations across the top
+      ctx.fillText(SHORT[k], LABEL_W / 2, LABEL_H + (k + 0.5) * c); // origins down the side
     }
-    // One pixel per OD pair, then scaled into place: hundreds of zones means far more
-    // cells than screen pixels, so per-cell fillRect would be slow and blurry anyway.
-    const nZ = sim.zones.length;
-    const img = new ImageData(n, n);
-    for (let a = 0; a < n; a++) {
-      for (let b = 0; b < n; b++) {
-        const v = shares[this.order[a] * nZ + this.order[b]];
-        const t = max > 0 ? Math.sqrt(v / max) : 0;
-        const i = (a * n + b) * 4;
-        for (let k = 0; k < 3; k++) img.data[i + k] = Math.round(LOW[k] + (HIGH[k] - LOW[k]) * t);
-        img.data[i + 3] = 255;
+    for (let o = 0; o < K; o++) {
+      for (let d = 0; d < K; d++) {
+        // Square root so the many small flows stay visible next to downtown's large share.
+        const t = max > 0 ? Math.sqrt(shares[o * K + d] / max) : 0;
+        const rgb = LOW.map((lo, i) => Math.round(lo + (HIGH[i] - lo) * t));
+        const x = LABEL_W + d * c;
+        const y = LABEL_H + o * c;
+        ctx.fillStyle = `rgb(${rgb.join(',')})`;
+        ctx.fillRect(x + 0.5, y + 0.5, c - 1, c - 1);
+        const n = this.observed[o * K + d];
+        if (n === 0) continue;
+        ctx.fillStyle = t > 0.55 ? '#08131c' : 'rgba(230, 237, 243, 0.9)';
+        ctx.fillText(n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n), x + c / 2, y + c / 2 + 0.5);
       }
     }
-    const off = document.createElement('canvas');
-    off.width = off.height = n;
-    off.getContext('2d')!.putImageData(img, 0, 0);
-    ctx.imageSmoothingEnabled = n > size; // downsampling: average; upsampling: crisp cells
-    ctx.drawImage(off, BAND + 2, BAND + 2, n * this.cell, n * this.cell);
   }
 
   private hover(e: PointerEvent): void {
     if (!this.shares) return;
     const rect = this.canvas.getBoundingClientRect();
-    const col = Math.floor((e.clientX - rect.left - BAND - 2) / this.cell);
-    const row = Math.floor((e.clientY - rect.top - BAND - 2) / this.cell);
-    const n = this.order.length;
-    if (row < 0 || col < 0 || row >= n || col >= n) {
+    const col = Math.floor((e.clientX - rect.left - LABEL_W) / this.cell);
+    const row = Math.floor((e.clientY - rect.top - LABEL_H) / this.cell);
+    if (row < 0 || col < 0 || row >= K || col >= K) {
       this.tooltip.hidden = true;
       return;
     }
-    const o = this.order[row];
-    const d = this.order[col];
-    const share = this.shares[o * this.sim.zones.length + d];
-    const perHour = share * this.sim.trips.ratePerHour(this.sim.time);
-    this.tooltip.textContent = `${zoneLabel(this.sim, o)} → ${zoneLabel(this.sim, d)} · ${(share * 100).toFixed(2)}% · ≈${perHour.toFixed(0)} trips/h now`;
+    const i = row * K + col;
+    const total = this.observed.reduce((a, b) => a + b, 0);
+    const seen = this.observed[i];
+    this.tooltip.textContent =
+      `${DISTRICTS[row]} → ${DISTRICTS[col]} · model ${(this.shares[i] * 100).toFixed(1)}% · ` +
+      `last hour ${seen} trips (${total > 0 ? ((seen / total) * 100).toFixed(1) : '0'}%)`;
     this.tooltip.hidden = false;
   }
 }

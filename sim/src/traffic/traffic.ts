@@ -62,6 +62,9 @@ export class TrafficModel {
   private activeConns = new Set<Connector>();
   private backlog: { trip: Trip; route: number[] }[] = [];
   private forcedSpeeds = new Map<number, number>();
+  // Incidents placed by the user: a speed cap (accident, lane closure) or a closed street.
+  private incidentCaps = new Map<number, number>();
+  private closedLinks = new Set<number>();
   private nextId = 0;
   private now = 0;
   // Timed signals at arterial junctions and all-way stops at local ones; null keeps plain give-way
@@ -145,12 +148,64 @@ export class TrafficModel {
     const freeFlow = lane.link.length / lane.link.speedLimit;
     const front = lane.vehicles[0];
     const expected = Math.max(freeFlow, lane.travelTime, front ? this.now - front.enteredLane : 0);
-    return Math.min(lane.link.length / expected, this.forcedSpeeds.get(linkId) ?? Infinity);
+    return Math.min(lane.link.length / expected, this.capOf(linkId));
   }
 
   // Speed limit, or the incident cap if one is set, so a jammed link really slows cars.
   private desiredSpeed(link: Link): number {
-    return Math.min(link.speedLimit, this.forcedSpeeds.get(link.id) ?? Infinity);
+    return Math.min(link.speedLimit, this.capOf(link.id));
+  }
+
+  private capOf(linkId: number): number {
+    return Math.min(this.forcedSpeeds.get(linkId) ?? Infinity, this.incidentCaps.get(linkId) ?? Infinity);
+  }
+
+  // Cap speed on a link (accident, lane closure); null removes the cap.
+  setIncidentCap(linkId: number, speed: number | null): void {
+    if (speed === null) this.incidentCaps.delete(linkId);
+    else this.incidentCaps.set(linkId, Math.max(0.5, speed));
+  }
+
+  // A closed link takes no new cars; cars already on it drive out. Routing keeps traffic off it.
+  setClosed(linkId: number, closed: boolean): void {
+    if (closed) this.closedLinks.add(linkId);
+    else this.closedLinks.delete(linkId);
+  }
+
+  isClosed(linkId: number): boolean {
+    return this.closedLinks.has(linkId);
+  }
+
+  // Gives each car and waiting trip whose remaining route uses one of `links` a new route from
+  // its next junction. `plan(node, lastLink, skip)` returns links from `node` ending with the
+  // trip's last link (where its driveway is), not using `skip`, or null if there is none.
+  // The part of a route a car is committed to (its lane, and the next one once it holds the
+  // junction) never changes. Returns how many routes changed.
+  reroute(links: Set<number>, plan: (node: number, lastLink: number, skip: number[]) => number[] | null): number {
+    const revised = (route: number[], keep: number): number[] | null => {
+      if (keep >= route.length - 1 || !route.slice(keep + 1).some((id) => links.has(id))) return null;
+      const kept = this.net.links[route[keep]];
+      // No U-turns: never straight back down the kept link.
+      const back = this.net.outLinks[kept.to].find((id) => this.net.links[id].to === kept.from);
+      const tail = plan(kept.to, route[route.length - 1], back === undefined ? [] : [back]);
+      const same = tail !== null && tail.length === route.length - keep - 1 && tail.every((id, i) => id === route[keep + 1 + i]);
+      if (!tail || same) return null;
+      return [...route.slice(0, keep + 1), ...tail];
+    };
+    let changed = 0;
+    for (const veh of this.vehicles) {
+      const next = revised(veh.route, veh.conn || veh.granted ? veh.ri + 1 : veh.ri);
+      if (!next) continue;
+      veh.route = next;
+      changed++;
+    }
+    for (const item of this.backlog) {
+      const next = revised(item.route, 0);
+      if (!next) continue;
+      item.route = next;
+      changed++;
+    }
+    return changed;
   }
 
   setForcedSpeed(linkId: number, speed: number): void {
@@ -162,7 +217,7 @@ export class TrafficModel {
   }
 
   isForcedJammed(linkId: number): boolean {
-    return this.forcedSpeeds.has(linkId);
+    return this.forcedSpeeds.has(linkId) || this.incidentCaps.has(linkId) || this.closedLinks.has(linkId);
   }
 
   step(t: number, dt: number): void {

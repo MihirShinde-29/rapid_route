@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { mulberry32, type Rng } from '../core/rng';
-import type { Simulation } from '../sim';
+import type { Incident, IncidentKind, Simulation } from '../sim';
 import type { Trip } from '../demand/trips';
 import { DEPART_FRAC, type Vehicle } from '../traffic/traffic';
 import { JUNCTION_RADIUS } from '../traffic/geometry';
@@ -28,7 +28,9 @@ const WORLD_PER_M = 0.14; // 100 m block spacing -> 14 world units, as in the pr
 const BLOCK_INSET = 1.4;
 const MAX_CARS = 4000;
 const CAR_WIDTH = 2.2; // m, slightly wide so cars read at city zoom
-const ROAD_COLORS = { local: 0x262d35, arterial: 0x2e3640, slow: 0x9a6a2a, jammed: 0x9a3a2a };
+const ROAD_COLORS = { local: 0x262d35, arterial: 0x2e3640, slow: 0x9a6a2a, jammed: 0x9a3a2a, closed: 0x6a2448 };
+// Incident pins, seen from city zoom; close up the scene shows wrecks, cones or barriers.
+export const INCIDENT_HEX: Record<IncidentKind, number> = { accident: 0xff4d4d, lane: 0xffa53d, closure: 0xc04a8c };
 const LAMP_COLOR = 0xffc27a;
 const CONGESTION_REFRESH_MS = 500;
 const DEPART_S = 4; // sim s a new car takes to pull out of its lot onto the road
@@ -238,6 +240,9 @@ export class View3D {
   // after letting go the view swings back to face forward.
   private chase = { heading: 0, look: 0, pitch: 1.05, dist: 16, dragging: false, released: 0, frame: 0 };
   private raycaster = new THREE.Raycaster();
+  private incidentGroup = new THREE.Group();
+  private incidentKey = '';
+  private beacons: THREE.MeshBasicMaterial[] = [];
   private ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   onFollowEnd: (() => void) | null = null; // the followed vehicle reached its destination
   showDesireLines = true;
@@ -334,6 +339,8 @@ export class View3D {
       this.scene.add(pin);
       this.probePins.push(pin);
     }
+
+    this.scene.add(this.incidentGroup);
 
     this.resize();
     new ResizeObserver(() => this.resize()).observe(container);
@@ -1097,7 +1104,9 @@ export class View3D {
       for (const id of st.links) {
         if (traffic.lanes[id].vehicles.length > 0 || traffic.isForcedJammed(id)) ratio = Math.min(ratio, traffic.linkMeanSpeed(id) / net.links[id].speedLimit);
       }
-      const color = ratio < 0.3 ? ROAD_COLORS.jammed : ratio < 0.6 ? ROAD_COLORS.slow : st.arterial ? ROAD_COLORS.arterial : ROAD_COLORS.local;
+      const color = st.links.some((id) => traffic.isClosed(id))
+        ? ROAD_COLORS.closed
+        : ratio < 0.3 ? ROAD_COLORS.jammed : ratio < 0.6 ? ROAD_COLORS.slow : st.arterial ? ROAD_COLORS.arterial : ROAD_COLORS.local;
       this.tmpColor.setHex(color);
       for (let v = st.firstVertex; v < st.firstVertex + st.vertexCount; v++) {
         colors.setXYZ(v, this.tmpColor.r, this.tmpColor.g, this.tmpColor.b);
@@ -1195,8 +1204,8 @@ export class View3D {
     }
   }
 
-  // Nearest intersection under a screen point, or null if off the map.
-  pickNode(clientX: number, clientY: number): number | null {
+  // Ground point under a screen point in sim metres, or null if off the map.
+  private groundAt(clientX: number, clientY: number): { x: number; y: number } | null {
     const rect = this.renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
     this.raycaster.setFromCamera(ndc, this.camera);
@@ -1206,7 +1215,135 @@ export class View3D {
     const y = hit.z / WORLD_PER_M + this.sim.grid.height / 2;
     const margin = this.sim.grid.opts.spacing / 2;
     if (x < -margin || y < -margin || x > this.sim.grid.width + margin || y > this.sim.grid.height + margin) return null;
-    return nearestJunction(this.sim.grid.net, x, y);
+    return { x, y };
+  }
+
+  // Nearest intersection under a screen point, or null if off the map.
+  pickNode(clientX: number, clientY: number): number | null {
+    const p = this.groundAt(clientX, clientY);
+    return p ? nearestJunction(this.sim.grid.net, p.x, p.y) : null;
+  }
+
+  // Street under a screen point (one of its links), or null if none is within reach.
+  pickLink(clientX: number, clientY: number): number | null {
+    const p = this.groundAt(clientX, clientY);
+    if (!p) return null;
+    const { nodes, links } = this.sim.grid.net;
+    let best: number | null = null;
+    let bestD = 25; // m
+    for (const link of links) {
+      const a = nodes[link.from];
+      const b = nodes[link.to];
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy)));
+      const d = Math.hypot(a.x + t * dx - p.x, a.y + t * dy - p.y);
+      if (d < bestD) [best, bestD] = [link.id, d];
+    }
+    return best;
+  }
+
+  // Markers for the placed incidents; rebuilt when the set changes.
+  private syncIncidents(now: number): void {
+    const incidents = this.sim.incidents;
+    const key = incidents.map((i) => i.id).join(',');
+    if (key !== this.incidentKey) {
+      this.incidentKey = key;
+      for (const child of [...this.incidentGroup.children]) {
+        this.incidentGroup.remove(child);
+        child.traverse((o) => {
+          if (o instanceof THREE.Mesh) {
+            o.geometry.dispose();
+            (o.material as THREE.Material).dispose();
+          }
+        });
+      }
+      this.beacons = [];
+      for (const inc of incidents) this.incidentGroup.add(this.incidentMarker(inc));
+    }
+    // Beacons flash in real time, so they still read when paused.
+    const on = now % 800 < 400;
+    for (const m of this.beacons) m.color.setHex(on ? 0xfff1c2 : 0x6a4a10);
+  }
+
+  private incidentMarker(inc: Incident): THREE.Group {
+    const net = this.sim.grid.net;
+    const link = net.links[inc.links[0]];
+    const a = net.nodes[link.from];
+    const b = net.nodes[link.to];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    const g = new THREE.Group();
+    g.position.set(this.wx((a.x + b.x) / 2), 0.26, this.wz((a.y + b.y) / 2)); // on the road surface, like the cars
+    g.rotation.y = -Math.atan2(b.y - a.y, b.x - a.x);
+    // Scene details in metres: x along the street, z across it, origin at its middle.
+    const local = new THREE.Group();
+    local.scale.setScalar(WORLD_PER_M);
+    g.add(local);
+    const mat = (color: number) => new THREE.MeshStandardMaterial({ color, roughness: 0.6 });
+    const box = (w: number, h: number, d: number, color: number, x: number, y: number, z: number, rot = 0) => {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat(color));
+      m.position.set(x, y + h / 2, z);
+      m.rotation.y = rot;
+      local.add(m);
+    };
+    // Cones, beacons and wrecks are drawn 1.5x, like the slightly oversized cars, so they read.
+    const cone = (x: number, z: number) => {
+      const m = new THREE.Mesh(new THREE.ConeGeometry(0.6, 1.65, 10), mat(0xff7a1a));
+      m.position.set(x, 0.85, z);
+      local.add(m);
+    };
+    const beacon = (x: number, y: number, z: number) => {
+      const m = new THREE.MeshBasicMaterial({ color: 0xfff1c2 });
+      this.beacons.push(m);
+      const s = new THREE.Mesh(new THREE.SphereGeometry(0.9, 10, 8), m);
+      s.position.set(x, y, z);
+      local.add(s);
+    };
+    if (inc.kind === 'accident') {
+      // Two cars at an angle across the lane, with cones behind them.
+      box(6.7, 2.1, 2.9, 0xe8e8e8, -2, 0.2, 1.4, 0.5);
+      box(6.6, 2.1, 2.9, 0x8a1c1c, 4, 0.2, 2.6, -0.35);
+      beacon(-2, 3.4, 1.4);
+      for (const x of [-9, -12, -15]) cone(x, 1.6 - (x + 9) * 0.1);
+    } else if (inc.kind === 'lane') {
+      // A line of cones closing one lane each way, and a flashing arrow board.
+      for (let k = 0; k < 7; k++) {
+        const x = -len * 0.25 + (k * len * 0.5) / 6;
+        cone(x, 3.2);
+        cone(-x, -3.2);
+      }
+      box(0.3, 1.6, 2.2, 0x222222, -len * 0.25 - 4, 0.2, 3.2);
+      beacon(-len * 0.25 - 4, 2.4, 3.2);
+    } else {
+      // Red and white barriers across the street at both ends.
+      for (const x of [-len / 2 + 14, len / 2 - 14]) {
+        box(0.5, 0.45, 9, 0xd8d8d8, x, 0.7, 0);
+        box(0.5, 0.45, 9, 0xc82828, x, 1.15, 0);
+        for (const z of [-4.2, 4.2]) box(0.3, 1.6, 0.3, 0x444444, x, 0, z);
+      }
+    }
+    // A pin above, drawn over buildings so it reads from city zoom.
+    const pin = new THREE.Mesh(
+      mergeGeometries([new THREE.CylinderGeometry(0.1, 0.1, 5, 8).translate(0, 2.5, 0).toNonIndexed(), new THREE.OctahedronGeometry(1.1).translate(0, 6, 0)])!,
+      new THREE.MeshBasicMaterial({ color: INCIDENT_HEX[inc.kind], depthTest: false }),
+    );
+    pin.renderOrder = 10;
+    g.add(pin);
+    return g;
+  }
+
+  // Swing the camera over an incident's street, keeping the current viewing angle.
+  focusIncident(inc: Incident): void {
+    this.follow(null);
+    const net = this.sim.grid.net;
+    const link = net.links[inc.links[0]];
+    const a = net.nodes[link.from];
+    const b = net.nodes[link.to];
+    const target = new THREE.Vector3(this.wx((a.x + b.x) / 2), 0, this.wz((a.y + b.y) / 2));
+    // Steep and high enough to see the street between downtown towers.
+    const theta = new THREE.Spherical().setFromVector3(this.camera.position.clone().sub(this.controls.target)).theta;
+    this.controls.target.copy(target);
+    this.camera.position.setFromSpherical(new THREE.Spherical(55, 0.42, theta)).add(target);
   }
 
   private buildTags(): void {
@@ -1383,6 +1520,7 @@ export class View3D {
     this.syncProofCar();
     this.syncFollow();
     this.syncSignals();
+    this.syncIncidents(now);
     this.syncTags();
     if (now - this.lastCongestion > CONGESTION_REFRESH_MS) {
       this.lastCongestion = now;

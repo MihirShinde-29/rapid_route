@@ -25,7 +25,7 @@ TypeScript + Vite + Three.js. The sim core has no DOM access and runs headless i
 cd sim
 npm install
 npm run dev     # open the printed localhost URL
-npm test        # 22 tests: demand, car-following, junctions, signals, routing
+npm test        # 26 tests: demand, car-following, junctions, signals, routing, incidents
 npm run build   # type-check and build a static site into sim/dist
 ```
 Needs Node 20+. Vite is pinned to 6 / Vitest to 3 because newer releases need a newer Node.
@@ -44,5 +44,14 @@ it is retained as the proof route, highlighted in yellow, and labeled in the sid
 Work split: `docs/MVP_WORK_SPLIT.md`.
 
 Assignment 3 recording plan and evidence checklist: `docs/ASSIGNMENT3_DEMO_SCRIPT.md`.
+
+Incidents: pick Accident, Lane closure or Road closure in the toolbar, click `Place incident`, then click a street.
+An accident caps speed at 2.5 m/s and clears after 20 sim minutes, a lane closure caps it at 40% of the limit, and a road
+closure keeps all traffic off the street except trips that start or end on it. Cars already driving whose route uses the
+street are rerouted at their next junction when a faster way exists; new trips route around it. Click an incident in the
+sidebar to fly to it, or × to remove it.
+
+The OD matrix groups the zones into nine districts (downtown and eight suburban sectors). Cell colour is the model's
+share for the current period; the number is the trips actually generated between the two districts in the last sim hour.
 
 For a reproducible routing demo, click `Jam short route` and then `Probe trip`. The sidebar compares the selected live route with the shorter candidate and keeps the first longer-but-faster proof highlighted.

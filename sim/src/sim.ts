@@ -5,8 +5,10 @@ import { generateZones, type Zone } from './demand/zones';
 import { zoneCostMatrix } from './demand/od';
 import { TripGenerator, type Trip } from './demand/trips';
 import { Router, type RouteResult } from './routing/router';
-import { TrafficModel } from './traffic/traffic';
+import { TrafficModel, type Vehicle } from './traffic/traffic';
 import { blockDistricts, DISTRICTS } from './demand/districts';
+import { buildSites, type Site } from './city/sites';
+import type { EmergencyKind } from './traffic/vehicleTypes';
 
 // Perturbations the user can place on a street (both directions).
 export type IncidentKind = 'accident' | 'lane' | 'closure';
@@ -54,6 +56,15 @@ export const DEFAULT_CONFIG: SimConfig = {
 
 export const FIXED_DT = 0.1; // s; IDM step
 
+// A route between entrances. `route` starts with the link the trip leaves from; for a car on
+// the road that is its current link (plus the next one if it is committed to that junction).
+export interface TripPlan {
+  route: number[];
+  departPos: number; // m along route[0]
+  arrivePos: number; // m along the last link
+  eta: number; // s on live link costs; Infinity if unreachable
+}
+
 // Owns all sim state. No DOM access, so it runs headless in tests.
 export class Simulation {
   readonly grid: Grid;
@@ -78,6 +89,10 @@ export class Simulation {
   readonly district: Int8Array; // per zone
   readonly incidents: Incident[] = [];
   private incidentId = 1;
+  readonly sites: Site[];
+  private unitTripId = 2000000; // emergency trips, clear of generated and probe ids
+  // Stepped every tick after traffic (the dispatch centre plugs in here).
+  dispatch: { step(t: number): void } | null = null;
 
   constructor(readonly config: SimConfig = DEFAULT_CONFIG) {
     const rng = mulberry32(config.seed);
@@ -111,6 +126,7 @@ export class Simulation {
     this.produced = new Int32Array(this.zones.length);
     this.attracted = new Int32Array(this.zones.length);
     this.district = blockDistricts(this.grid);
+    this.sites = buildSites(this.grid, this.zones);
   }
 
   step(dt: number = FIXED_DT): Trip[] {
@@ -128,6 +144,7 @@ export class Simulation {
     }
     for (const inc of this.incidents.filter((i) => i.until !== null && this.time >= i.until)) this.removeIncident(inc.id);
     this.traffic.step(this.time, dt);
+    this.dispatch?.step(this.time);
     this.totalTrips += spawned.length;
     this.time += dt;
     let drop = 0;
@@ -137,6 +154,100 @@ export class Simulation {
       this.recentPairs.splice(0, drop);
     }
     return spawned;
+  }
+
+  // Trips that reached their destination in the last step (and those removed by the gridlock guard).
+  get arrivals(): Trip[] {
+    return this.traffic.arrivals;
+  }
+
+  get removals(): Trip[] {
+    return this.traffic.removals;
+  }
+
+  // Route from a site, or from a car where it is now, to a site's entrance, on live link costs.
+  planTrip(from: Site | Vehicle, to: Site): TripPlan {
+    const net = this.grid.net;
+    const lanes = this.traffic.lanes;
+    let start: number[];
+    let departPos: number;
+    if ('entrance' in from) {
+      start = [from.entrance.link];
+      departPos = from.entrance.pos;
+    } else {
+      const here = from.route[from.ri];
+      start = from.conn || from.granted ? [here, from.route[from.ri + 1]] : [here];
+      departPos = from.conn ? lanes[here].geom.length : from.pos;
+    }
+    const target = to.entrance.link;
+    const last = start[start.length - 1];
+    const posOnLast = start.length === 1 ? departPos : 0;
+    const reverse = (id: number) => {
+      const l = net.links[id];
+      return net.outLinks[l.to].find((o) => net.links[o].to === l.from);
+    };
+    let route: number[] | null = null;
+    if (last === target && to.entrance.pos > posOnLast + 5) route = start;
+    else {
+      // Links between `last` and `target`, with no U-turn at either end. When both ends meet at
+      // one junction but only by a U-turn, go round the block first.
+      const skip = [reverse(last), reverse(target)].filter((id): id is number => id !== undefined);
+      const a = net.links[last].to;
+      const b = net.links[target].from;
+      let best: { links: number[]; cost: number } = { links: [], cost: Infinity };
+      if (a !== b) best = this.router.routeWithCost(a, b, skip);
+      else if (target !== reverse(last)) best = { links: [], cost: 0 };
+      else {
+        for (const o of net.outLinks[a]) {
+          if (skip.includes(o)) continue;
+          const back = reverse(o);
+          const rest = this.router.routeWithCost(net.links[o].to, b, back === undefined ? skip : [...skip, back]);
+          const cost = this.router.pathCost([o]) + rest.cost;
+          if (cost < best.cost) best = { links: [o, ...rest.links], cost };
+        }
+      }
+      if (best.cost < Infinity) route = [...start, ...best.links, target];
+    }
+    if (!route) return { route: [], departPos, arrivePos: to.entrance.pos, eta: Infinity };
+    const len = (id: number) => lanes[id].geom.length;
+    const eta =
+      this.router.pathCost(route) -
+      this.router.pathCost([route[0]]) * Math.min(1, departPos / len(route[0])) -
+      this.router.pathCost([target]) * (1 - to.entrance.pos / len(target));
+    return { route, departPos, arrivePos: to.entrance.pos, eta: Math.max(0, eta) };
+  }
+
+  // Send an emergency unit from a site (its station, or a call it just finished) or from where it
+  // is on the road, to a site. Returns its trip, or null if there is no route.
+  sendUnit(kind: EmergencyKind, from: Site | Vehicle, to: Site, opts: { siren?: boolean } = {}): Trip | null {
+    const plan = this.planTrip(from, to);
+    if (plan.route.length === 0) return null;
+    const siren = opts.siren ?? true;
+    if (!('entrance' in from)) {
+      if (!this.traffic.redirect(from.trip.id, plan.route, plan.arrivePos)) return null;
+      from.trip.destZone = to.zone;
+      this.traffic.setSiren(from.trip.id, siren);
+      return from.trip;
+    }
+    const net = this.grid.net;
+    const trip: Trip = {
+      id: this.unitTripId++,
+      originZone: from.zone,
+      destZone: to.zone,
+      originNode: net.links[plan.route[0]].from,
+      destNode: net.links[plan.route[plan.route.length - 1]].to,
+      departTime: this.time,
+      kind,
+      departPos: plan.departPos,
+      arrivePos: plan.arrivePos,
+    };
+    this.traffic.enqueue(trip, plan.route, { siren });
+    return trip;
+  }
+
+  // Seconds from the nearest of `sources` (junctions) to every junction, on live link costs.
+  coverageTimes(sources: number[]): Float64Array {
+    return this.router.costsFrom(sources);
   }
 
   // Trips generated between each pair of districts over the trailing sim hour (row-major, 9 x 9).

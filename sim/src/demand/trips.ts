@@ -12,6 +12,9 @@ export interface Trip {
   destNode: number;
   departTime: number; // s since midnight
   kind?: VehicleKind; // unset means a standard 4.5 m car
+  // Driveway positions, m along the first and last lane. Unset: DEPART_FRAC / ARRIVE_FRAC of it.
+  departPos?: number;
+  arrivePos?: number;
 }
 
 export interface TripGenOptions {

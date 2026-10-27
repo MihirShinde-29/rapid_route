@@ -3,8 +3,12 @@ import type { ZoneType } from '../demand/zones';
 // Vehicle types. Length and acceleration feed the traffic model, so a truck takes more
 // road and pulls away more slowly than a hatchback.
 
-export type VehicleKind = 'hatchback' | 'sedan' | 'taxi' | 'suv' | 'pickup' | 'van' | 'truck';
-export const VEHICLE_KINDS: VehicleKind[] = ['hatchback', 'sedan', 'taxi', 'suv', 'pickup', 'van', 'truck'];
+export type EmergencyKind = 'ambulance' | 'fire' | 'police';
+export type VehicleKind = 'hatchback' | 'sedan' | 'taxi' | 'suv' | 'pickup' | 'van' | 'truck' | EmergencyKind;
+export const EMERGENCY_KINDS: EmergencyKind[] = ['ambulance', 'fire', 'police'];
+export const VEHICLE_KINDS: VehicleKind[] = ['hatchback', 'sedan', 'taxi', 'suv', 'pickup', 'van', 'truck', ...EMERGENCY_KINDS];
+export const isEmergency = (kind: VehicleKind | undefined): kind is EmergencyKind =>
+  kind === 'ambulance' || kind === 'fire' || kind === 'police';
 
 export interface VehicleSpec {
   length: number; // m, bumper to bumper
@@ -19,6 +23,9 @@ export const VEHICLE_SPECS: Record<VehicleKind, VehicleSpec> = {
   pickup: { length: 5.4, accel: 1.3 },
   van: { length: 5.5, accel: 1.2 },
   truck: { length: 8.5, accel: 0.9 },
+  ambulance: { length: 6.2, accel: 1.6 },
+  fire: { length: 9.5, accel: 1.1 },
+  police: { length: 4.9, accel: 2.0 },
 };
 
 // Stable per-trip pseudo-random number in [0, 1). Does not touch the sim RNG, so adding

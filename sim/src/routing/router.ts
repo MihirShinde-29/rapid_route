@@ -61,6 +61,30 @@ export class Router {
     return { links: links.reverse(), cost: g[to] };
   }
 
+  // Cost from the nearest of `sources` to every node (multi-source Dijkstra; Infinity if unreachable).
+  costsFrom(sources: readonly number[]): Float64Array {
+    const g = new Float64Array(this.net.nodes.length).fill(Infinity);
+    const heap = new MinHeap<number>();
+    for (const s of sources) {
+      g[s] = 0;
+      heap.push(s, 0);
+    }
+    const closed = new Uint8Array(this.net.nodes.length);
+    while (heap.size > 0) {
+      const u = heap.pop()!;
+      if (closed[u]) continue;
+      closed[u] = 1;
+      for (const lid of this.net.outLinks[u]) {
+        const link = this.net.links[lid];
+        const next = g[u] + this.cost(link);
+        if (next >= g[link.to]) continue;
+        g[link.to] = next;
+        heap.push(link.to, next);
+      }
+    }
+    return g;
+  }
+
   pathCost(links: number[]): number {
     return links.reduce((sum, id) => sum + this.cost(this.net.links[id]), 0);
   }

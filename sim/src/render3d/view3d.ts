@@ -974,7 +974,7 @@ export class View3D {
         // Pulling out of a driveway beside the street: straight out to the kerb, then turning
         // to join the car's real position on the road.
         const lane = traffic.lanes[veh.route[0]];
-        const d = this.driveway(lane.link.id, DEPART_FRAC * lane.geom.length - veh.len / 2);
+        const d = this.driveway(lane.link.id, Math.max(veh.len, veh.trip.departPos ?? DEPART_FRAC * lane.geom.length) - veh.len / 2);
         const lot = new THREE.Vector2(d.x, d.y);
         const road = new THREE.Vector2(p.x, p.y);
         const c = new THREE.Vector2(d.x + d.hy * (DRIVEWAY_M - 1), d.y - d.hx * (DRIVEWAY_M - 1));

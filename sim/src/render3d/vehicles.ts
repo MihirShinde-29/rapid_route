@@ -35,12 +35,15 @@ export function vehicleGeometry(
   let lightY = 0.11;
   let wheelR = 0.048;
   switch (kind) {
+    // Placeholder shapes for the emergency units (their own models come later).
+    case 'police':
     case 'sedan':
     case 'taxi':
       b.add(box(len, 0.1, W), BODY, 0, 0.095, 0);
       b.add(box(len * 0.5, 0.085, W * 0.84), GLASS, -len * 0.04, 0.187, 0);
       b.add(box(len * 0.4, 0.02, W * 0.86), BODY, -len * 0.05, 0.235, 0);
       if (kind === 'taxi') b.add(box(0.07, 0.035, W * 0.4), new THREE.Color(1, 1, 0.8), -len * 0.05, 0.262, 0);
+      if (kind === 'police') b.add(box(0.06, 0.03, W * 0.7), new THREE.Color(0.9, 0.15, 0.15), -len * 0.05, 0.26, 0);
       break;
     case 'hatchback':
       b.add(box(len, 0.1, W * 0.96), BODY, 0, 0.095, 0);
@@ -64,12 +67,14 @@ export function vehicleGeometry(
       b.add(box(len * 0.26, 0.02, W * 0.86), BODY, len * 0.09, 0.25, 0);
       b.add(box(len * 0.42, 0.012, W * 0.84), TRIM, -len * 0.26, 0.158, 0); // open bed
       break;
+    case 'ambulance':
     case 'van':
       b.add(box(len, 0.22, W), BODY, 0, 0.155, 0);
       b.add(box(0.012, 0.08, W * 0.86), GLASS, len / 2, 0.21, 0); // windscreen
       b.add(box(len * 0.22, 0.07, W * 1.01), GLASS, len * 0.34, 0.21, 0); // cab side windows
       lightY = 0.1;
       break;
+    case 'fire':
     case 'truck':
       wheelR = 0.055;
       lightY = 0.1;
@@ -132,6 +137,9 @@ const FLEET: number[] = [0xf2f2f2, 0xe9e9ea, 0xc8ccd0, 0x2a5aa0, 0xb02a2a]; // d
 export function vehiclePaint(trip: Trip, kind: VehicleKind, out: THREE.Color): THREE.Color {
   const h = hash01(trip.id, 0x2c1b);
   if (kind === 'taxi') return out.setHex(0xf2c21a);
+  if (kind === 'ambulance') return out.setHex(0xf4f4f4);
+  if (kind === 'fire') return out.setHex(0xc0261d);
+  if (kind === 'police') return out.setHex(0x1d2c4c);
   if (kind === 'truck' || kind === 'van') return out.setHex(FLEET[Math.floor(h * FLEET.length)]);
   let acc = 0;
   for (const [hex, share] of PAINT) {

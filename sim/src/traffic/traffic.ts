@@ -34,6 +34,8 @@ export interface Vehicle {
   enteredLane: number; // sim time it entered its current lane
   len: number; // m, bumper to bumper
   accel: number; // IDM maximum acceleration
+  arrivePos: number; // m along the last lane where it turns into its destination driveway
+  siren: boolean; // emergency vehicle on a call (yielding and pre-emption key off this)
 }
 
 interface Lane {
@@ -67,6 +69,8 @@ export class TrafficModel {
   private closedLinks = new Set<number>();
   private nextId = 0;
   private now = 0;
+  private sirens = new Set<number>(); // trip ids, so the flag also covers trips not yet on the road
+  private byTrip = new Map<number, Vehicle>();
   // Timed signals at arterial junctions and all-way stops at local ones; null keeps plain give-way
   // rules everywhere (used by the junction tests).
   readonly signals: SignalPlans | null;
@@ -76,6 +80,10 @@ export class TrafficModel {
 
   arrived = 0;
   removedGridlock = 0;
+  // Trips that reached their destination, and trips removed by the gridlock guard, during the
+  // last step. Both are cleared at the start of each step.
+  arrivals: Trip[] = [];
+  removals: Trip[] = [];
   private travelTimeSum = 0;
 
   constructor(
@@ -126,8 +134,45 @@ export class TrafficModel {
     return this.connector(v.route[v.ri], v.route[v.ri + 1]);
   }
 
-  enqueue(trip: Trip, route: number[]): void {
-    if (route.length > 0) this.backlog.push({ trip, route });
+  // `siren`: an emergency vehicle on a call. For now it drives like any other car.
+  enqueue(trip: Trip, route: number[], opts: { siren?: boolean } = {}): void {
+    if (route.length === 0) return;
+    this.backlog.push({ trip, route });
+    if (opts.siren) this.sirens.add(trip.id);
+  }
+
+  setSiren(tripId: number, on: boolean): void {
+    if (on) this.sirens.add(tripId);
+    else this.sirens.delete(tripId);
+    const veh = this.byTrip.get(tripId);
+    if (veh) veh.siren = on;
+  }
+
+  // The car driving this trip; undefined while it waits to pull out, or once it has arrived.
+  vehicleOf(tripId: number): Vehicle | undefined {
+    return this.byTrip.get(tripId);
+  }
+
+  // Send a car already on the road somewhere else. `route` starts with its current link (and its
+  // next one if it is committed to that junction); see Simulation.planTrip.
+  redirect(tripId: number, route: number[], arrivePos: number): boolean {
+    const veh = this.byTrip.get(tripId);
+    if (!veh || route[0] !== veh.route[veh.ri]) return false;
+    if ((veh.conn || veh.granted) && route[1] !== veh.route[veh.ri + 1]) return false;
+    veh.route = [...veh.route.slice(0, veh.ri), ...route];
+    veh.arrivePos = arrivePos;
+    veh.trip.destNode = this.net.links[route[route.length - 1]].to;
+    veh.trip.arrivePos = arrivePos;
+    return true;
+  }
+
+  private finish(veh: Vehicle, t: number): void {
+    this.arrived++;
+    this.travelTimeSum += t - veh.departTime;
+    this.vehicles.delete(veh);
+    this.byTrip.delete(veh.trip.id);
+    this.sirens.delete(veh.trip.id);
+    this.arrivals.push(veh.trip);
   }
 
   get waitingToDepart(): number {
@@ -222,6 +267,8 @@ export class TrafficModel {
 
   step(t: number, dt: number): void {
     this.now = t;
+    this.arrivals = [];
+    this.removals = [];
     this.insertBacklog(t);
     this.grantRightOfWay(t);
     this.computeAccelerations();
@@ -238,7 +285,7 @@ export class TrafficModel {
       const lane = this.lanes[item.route[0]];
       const spec = item.trip.kind ? VEHICLE_SPECS[item.trip.kind] : { length: VEHICLE_LENGTH, accel: IDM.a };
       const vs = lane.vehicles;
-      const pos = Math.max(spec.length, DEPART_FRAC * lane.geom.length);
+      const pos = Math.max(spec.length, item.trip.departPos ?? DEPART_FRAC * lane.geom.length);
       let k = 0;
       while (k < vs.length && vs[k].pos >= pos) k++;
       const lead = vs[k - 1];
@@ -268,10 +315,13 @@ export class TrafficModel {
         enteredLane: t,
         len: spec.length,
         accel: spec.accel,
+        arrivePos: item.trip.arrivePos ?? ARRIVE_FRAC * this.lanes[item.route[item.route.length - 1]].geom.length,
+        siren: this.sirens.has(item.trip.id),
       };
       vs.splice(k, 0, v);
       this.activeLanes.add(lane);
       this.vehicles.add(v);
+      this.byTrip.set(v.trip.id, v);
     }
     this.backlog = still;
   }
@@ -408,7 +458,7 @@ export class TrafficModel {
         let dv = 0;
         if (veh.ri === veh.route.length - 1) {
           // Slow down to turn into the destination driveway.
-          const toDrive = Math.max(0, ARRIVE_FRAC * lane.geom.length - veh.pos);
+          const toDrive = Math.max(0, veh.arrivePos - veh.pos);
           v0 = Math.min(v0, Math.sqrt(ARRIVE_SPEED ** 2 + 2 * IDM.b * toDrive));
         }
         if (k > 0) {
@@ -511,19 +561,15 @@ export class TrafficModel {
       // Arrivals turn off into their driveway part way along the last street.
       for (let k = vs.length - 1; k >= 0; k--) {
         const veh = vs[k];
-        if (veh.ri !== veh.route.length - 1 || veh.pos < ARRIVE_FRAC * lane.geom.length) continue;
+        if (veh.ri !== veh.route.length - 1 || veh.pos < veh.arrivePos) continue;
         vs.splice(k, 1);
-        this.arrived++;
-        this.travelTimeSum += t - veh.departTime;
-        this.vehicles.delete(veh);
+        this.finish(veh, t);
       }
       while (vs.length > 0 && vs[0].pos >= lane.geom.length) {
         const veh = vs.shift()!;
         lane.travelTime += TRAVEL_TIME_ALPHA * (t - veh.enteredLane - lane.travelTime);
         if (veh.ri === veh.route.length - 1) {
-          this.arrived++;
-          this.travelTimeSum += t - veh.departTime;
-          this.vehicles.delete(veh);
+          this.finish(veh, t);
           continue;
         }
         const conn = this.connector(lane.link.id, veh.route[veh.ri + 1]);
@@ -571,6 +617,9 @@ export class TrafficModel {
       list.splice(list.indexOf(veh), 1);
       if (veh.granted) this.release(veh, this.lanes[veh.route[veh.ri + 1]]);
       this.vehicles.delete(veh);
+      this.byTrip.delete(veh.trip.id);
+      this.sirens.delete(veh.trip.id);
+      this.removals.push(veh.trip);
       this.removedGridlock++;
     }
   }

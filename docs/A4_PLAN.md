@@ -123,7 +123,7 @@ The split is by module, with one interface between the halves (section 4), like 
 
 ## 4. Interface (agree on Day 1, Oct 27)
 
-Mihir lands a stub on Day 1. With it, units drive as ordinary cars, so Ananya can build dispatch against the real interface straight away; yielding and pre-emption replace the stub's internals later without changing its signatures.
+Mihir lands a stub on Day 1 (done Oct 27: `sim/src/city/sites.ts`, `sim/src/sim.ts`, `sim/src/traffic/traffic.ts`, tests in `sim/test/interface.test.ts`). With it, units drive as ordinary cars, so Ananya can build dispatch against the real interface straight away; yielding and pre-emption replace the stub's internals later without changing its signatures.
 
 ```ts
 // Vehicle kinds added to traffic/vehicleTypes.ts
@@ -132,11 +132,13 @@ type EmergencyKind = 'ambulance' | 'fire' | 'police';
 // TrafficModel (Mihir)
 enqueue(trip: Trip, route: number[], opts?: { siren?: boolean }): void; // siren: yield + pre-emption
 setSiren(tripId: number, on: boolean): void;                            // e.g. off when returning
-vehicleOf(tripId: number): Vehicle | undefined;                         // position for UI and ETA
-// Simulation.step() also reports trips that arrived this step:
-arrivals: Trip[];                                                       // cleared at the start of each step
+vehicleOf(tripId: number): Vehicle | undefined;                         // position for UI and ETA; vehicle.siren
+redirect(tripId: number, route: number[], arrivePos: number): boolean;  // send a car on the road elsewhere
+// After each step (both cleared at the start of the next):
+sim.arrivals: Trip[];   // trips that reached their destination entrance
+sim.removals: Trip[];   // trips removed by the gridlock guard (a unit stuck 180 s): return it to its station
 
-// Dispatch (Ananya), owned by Simulation and stepped each tick after traffic
+// Dispatch (Ananya), plugged in as `sim.dispatch = center`; stepped each tick after traffic
 class DispatchCenter {
   constructor(sim: Simulation, opts: { mode: 'dispatcher' | 'sandbox' });
   step(t: number): void;                          // generate calls, expire them, auto-assign in sandbox, read arrivals
@@ -160,12 +162,15 @@ interface Site { id: number; kind: SiteKind; zone: number; size: number; address
 sim.sites: Site[];
 // Route from a site, or from a vehicle where it is now (a unit on the move), to a site's entrance.
 sim.planTrip(from: Site | Vehicle, to: Site): { route: number[]; departPos: number; arrivePos: number; eta: number };
+// Plans and sends a unit in one call: from a site it enqueues a new trip, from a vehicle it redirects
+// that vehicle. Returns the trip (id for vehicleOf / arrivals), or null if there is no route.
+sim.sendUnit(kind: EmergencyKind, from: Site | Vehicle, to: Site, opts?: { siren?: boolean }): Trip | null;
 
 // Coverage (Mihir): seconds from the nearest free unit to every node, on live link costs.
-coverageTimes(sources: number[]): Float64Array;    // multi-source Dijkstra over sim.router's cost
+sim.coverageTimes(sources: number[]): Float64Array;    // multi-source Dijkstra over sim.router's cost
 ```
 
-To send a unit, dispatch calls `sim.planTrip(unit's station site or vehicle, call site)`, builds a Trip (kind = unit type) and calls `traffic.enqueue(..., { siren: true })`. Arrival is detected through `sim.arrivals`. Stations come from `sim.sites` (hospital, fire_station, police_station).
+To send a unit, dispatch calls `sim.sendUnit(kind, station site, call site)` (or with the unit's vehicle if it is already driving), and `sim.planTrip` for ETAs without sending. Back to base: `sim.sendUnit(kind, call site, station site, { siren: false })`. Arrival is detected through `sim.arrivals`. Stations come from `sim.sites` (hospital, fire_station, police_station).
 
 ## 5. A4 week (Oct 27 – Nov 2)
 

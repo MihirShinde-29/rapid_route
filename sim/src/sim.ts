@@ -7,7 +7,7 @@ import { TripGenerator, type Trip } from './demand/trips';
 import { Router, type RouteResult } from './routing/router';
 import { TrafficModel, type Vehicle } from './traffic/traffic';
 import { blockDistricts, DISTRICTS } from './demand/districts';
-import { buildSites, type Site } from './city/sites';
+import { buildCity, type CityLayout, type Site } from './city/sites';
 import type { EmergencyKind } from './traffic/vehicleTypes';
 
 // Perturbations the user can place on a street (both directions).
@@ -89,6 +89,7 @@ export class Simulation {
   readonly district: Int8Array; // per zone
   readonly incidents: Incident[] = [];
   private incidentId = 1;
+  readonly layout: CityLayout;
   readonly sites: Site[];
   private unitTripId = 2000000; // emergency trips, clear of generated and probe ids
   // Stepped every tick after traffic (the dispatch centre plugs in here).
@@ -126,7 +127,8 @@ export class Simulation {
     this.produced = new Int32Array(this.zones.length);
     this.attracted = new Int32Array(this.zones.length);
     this.district = blockDistricts(this.grid);
-    this.sites = buildSites(this.grid, this.zones);
+    this.layout = buildCity(this.grid, this.zones, config.seed ^ 0x5173);
+    this.sites = this.layout.sites;
   }
 
   step(dt: number = FIXED_DT): Trip[] {

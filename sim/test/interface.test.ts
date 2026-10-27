@@ -19,7 +19,7 @@ function routeErrors(route: number[]): string[] {
 
 const station = (kind: Site['kind']) => sim.sites.find((s) => s.kind === kind)!;
 
-describe('sites (Day-1 stub)', () => {
+describe('sites', () => {
   it('has addresses across the city and two of each station', () => {
     expect(sim.sites.length).toBeGreaterThan(1000);
     for (const kind of ['hospital', 'fire_station', 'police_station'] as const) {
@@ -29,6 +29,16 @@ describe('sites (Day-1 stub)', () => {
       expect(s.address).toMatch(/^\d+ \w+ (St|Ave)$/);
       expect(s.entrance.pos).toBeGreaterThan(0);
       expect(s.entrance.pos).toBeLessThan(sim.traffic.lanes[s.entrance.link].geom.length);
+    }
+  });
+
+  it('keeps every lot inside its block, with no two lots overlapping', () => {
+    const inside = (a: Site['lot'], b: Site['lot']) => a.x0 >= b.x0 - 1e-6 && a.x1 <= b.x1 + 1e-6 && a.y0 >= b.y0 - 1e-6 && a.y1 <= b.y1 + 1e-6;
+    const overlap = (a: Site['lot'], b: Site['lot']) => Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) > 1e-6 && Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0) > 1e-6;
+    for (const plan of sim.layout.blocks) {
+      const lots = plan.sites.map((id) => sim.sites[id].lot);
+      for (const lot of lots) expect(inside(lot, plan.rect)).toBe(true);
+      for (let i = 0; i < lots.length; i++) for (let j = i + 1; j < lots.length; j++) expect(overlap(lots[i], lots[j])).toBe(false);
     }
   });
 

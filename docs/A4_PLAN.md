@@ -153,8 +153,9 @@ class DispatchCenter {
   readonly events: DispatchEvent[];
 }
 
-// Sites (Mihir). The Day-1 stub has one site per block side at today's driveway points;
-// the real layout replaces it without changing these signatures.
+// Sites (Mihir). Built by the layout in sim/src/city/sites.ts (sim.layout: what stands on each
+// block; the 3D view only draws it). Each house, apartment building, tower, plaza, car park,
+// park, mall and station is a site with its own lot and entrance.
 type SiteKind = 'house' | 'apartment' | 'tower' | 'shop' | 'warehouse' | 'park' | 'plaza' | 'parking' | 'mall'
   | 'hospital' | 'fire_station' | 'police_station';
 interface Site { id: number; kind: SiteKind; zone: number; size: number; address: string;

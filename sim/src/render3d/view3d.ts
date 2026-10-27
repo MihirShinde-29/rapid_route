@@ -5,7 +5,8 @@ import type { Incident, IncidentKind, Simulation } from '../sim';
 import type { Trip } from '../demand/trips';
 import { DEPART_FRAC, type Vehicle } from '../traffic/traffic';
 import { JUNCTION_RADIUS } from '../traffic/geometry';
-import { hasStreet, nearestJunction } from '../network/grid';
+import { nearestJunction } from '../network/grid';
+import type { BlockPlan, Rect as CityRect, Site } from '../city/sites';
 import type { Light } from '../traffic/signals';
 import type { Zone, ZoneType } from '../demand/zones';
 import { hourOf } from '../core/time';
@@ -39,14 +40,6 @@ const DRIVEWAY_M = 13; // how far beside the lane a car's driveway starts
 
 type Area = { x0: number; x1: number; z0: number; z1: number }; // world units
 
-// Buildable area of a block in world units, and which of its sides face a street.
-interface Rect {
-  x0: number;
-  x1: number;
-  z0: number;
-  z1: number;
-  street: { top: boolean; right: boolean; bottom: boolean; left: boolean };
-}
 
 // A car that has arrived: drawn driving from the road into its destination lot, then gone.
 interface Parking {
@@ -485,20 +478,19 @@ export class View3D {
     }
   }
 
-  // One site per block, laid out by zone type with some variety, so no two blocks look
-  // stamped from the same mould. Superblocks are drawn once as a single park or mall.
+  // Draws the city layout from the simulation (sim/src/city/sites.ts): which block holds what,
+  // and every site's lot. This only decides looks: heights, colours, roofs and trees.
   private buildZones(rng: Rng): void {
-    const { net, blocks, superblocks } = this.sim.grid;
-    const inSuper = new Set<number>();
-    for (const sb of superblocks) for (const b of sb.blocks) inSuper.add(b);
-    const rects: Rect[] = [];
+    const { net, blocks } = this.sim.grid;
+    const layout = this.sim.layout;
     for (const z of this.sim.zones) {
+      const plan = layout.blocks[z.id];
       const [a, b, c, d] = blocks[z.id].corners;
       const [tl, tr, br, bl] = [a, b, c, d].map((n) => net.nodes[n]);
-      // Which sides face a street. Sides without one (superblocks, dropped streets) run to
-      // the centreline so neighbouring plates join up.
-      const street = { top: hasStreet(net, a, b), right: hasStreet(net, b, c), bottom: hasStreet(net, c, d), left: hasStreet(net, d, a) };
+      // Sides without a street (superblocks, dropped streets) run to the centreline so
+      // neighbouring plates join up.
       const ins = (on: boolean) => (on ? BLOCK_INSET / WORLD_PER_M : 0);
+      const st = plan.streets;
       const tint = new THREE.Color(ZONE_HEX[z.type]);
       // Low-density blocks read as lawns; denser blocks as paved lots tinted by zone type.
       const plateColor =
@@ -506,73 +498,60 @@ export class View3D {
         : z.type === 'residential' && z.density < 0.45 ? new THREE.Color(0x46603a).lerp(tint, 0.08)
         : new THREE.Color(0x30363d).lerp(tint, 0.14);
       const quad = [
-        [tl.x + ins(street.left), tl.y + ins(street.top)],
-        [tr.x - ins(street.right), tr.y + ins(street.top)],
-        [br.x - ins(street.right), br.y - ins(street.bottom)],
-        [bl.x + ins(street.left), bl.y - ins(street.bottom)],
+        [tl.x + ins(st.w), tl.y + ins(st.n)],
+        [tr.x - ins(st.e), tr.y + ins(st.n)],
+        [br.x - ins(st.e), br.y - ins(st.s)],
+        [bl.x + ins(st.w), bl.y - ins(st.s)],
       ].map(([x, y]) => new THREE.Vector3(this.wx(x), 0.03, this.wz(y)));
       // A unit plane (same attributes as the rest of the batch) with its corners moved onto the quad.
       const plate = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
       [quad[0], quad[1], quad[3], quad[2]].forEach((q, i) => plate.attributes.position.setXYZ(i, q.x, q.y, q.z));
       this.flat.add(plate, plateColor, 0, 0, 0);
-      // An axis-aligned rectangle inside the plate, a little further in, for buildings.
-      const pad = (on: boolean) => (on ? BLOCK_INSET + 0.5 : 0.4);
-      const rect: Rect = {
-        x0: Math.max(this.wx(tl.x), this.wx(bl.x)) + pad(street.left),
-        x1: Math.min(this.wx(tr.x), this.wx(br.x)) - pad(street.right),
-        z0: Math.max(this.wz(tl.y), this.wz(tr.y)) + pad(street.top),
-        z1: Math.min(this.wz(bl.y), this.wz(br.y)) - pad(street.bottom),
-        street,
-      };
-      rects[z.id] = rect;
-      if (inSuper.has(z.id)) continue;
-      if (z.type === 'park') this.addPark(rect, rng, false);
-      else this.addBuildings(z, rect, tint, rng);
+      this.drawBlock(plan, z, tint, rng);
     }
-    for (const sb of superblocks) {
-      const r = sb.blocks.map((b) => rects[b]);
-      const union: Rect = {
-        x0: Math.min(...r.map((q) => q.x0)),
-        x1: Math.max(...r.map((q) => q.x1)),
-        z0: Math.min(...r.map((q) => q.z0)),
-        z1: Math.max(...r.map((q) => q.z1)),
-        street: { top: true, right: true, bottom: true, left: true },
-      };
-      if (sb.kind === 'park') this.addPark(union, rng, true);
-      else this.addMall(union, rng);
+    for (const sb of layout.superblocks) {
+      if (sb.kind === 'park') this.addPark(this.area(sb.rect), rng, true);
+      else this.addMall(this.area(sb.rect), rng);
     }
     this.buildStreetTrees(rng);
+  }
+
+  // A rectangle in sim metres as world units.
+  private area(r: CityRect): Area {
+    return { x0: this.wx(r.x0), x1: this.wx(r.x1), z0: this.wz(r.y0), z1: this.wz(r.y1) };
   }
 
   // Building styles vary block by block: towers, podiums, plazas and car parks downtown,
   // perimeter blocks or apartment lots in denser housing, houses along the streets in the
   // suburbs, sheds and container yards in industrial blocks.
-  private addBuildings(z: Zone, r: Rect, tint: THREE.Color, rng: Rng): void {
+  private drawBlock(plan: BlockPlan, z: Zone, tint: THREE.Color, rng: Rng): void {
+    const r = this.area(plan.rect);
     const w = r.x1 - r.x0;
     const d = r.z1 - r.z0;
-    if (w < 1 || d < 1) return;
     const cx = (r.x0 + r.x1) / 2;
     const cz = (r.z0 + r.z1) / 2;
     const color = () => {
       const grey = 0.35 + (0.45 + 0.4 * rng()) * 0.25;
       return new THREE.Color(grey * 0.9, grey * 0.95, grey * 1.05).lerp(tint, 0.18);
     };
-    // Split an area into roughly square lots of about `size`.
-    const lots = (q: Area, size: number, place: (x: number, z: number, cell: number) => void) => {
-      const nx = Math.max(1, Math.round((q.x1 - q.x0) / size));
-      const nz = Math.max(1, Math.round((q.z1 - q.z0) / size));
-      const cw = (q.x1 - q.x0) / nx;
-      const cd = (q.z1 - q.z0) / nz;
-      for (let i = 0; i < nx; i++) for (let j = 0; j < nz; j++) place(q.x0 + cw * (i + 0.5), q.z0 + cd * (j + 0.5), Math.min(cw, cd));
+    const sites = plan.sites.map((id) => this.sim.sites[id]);
+    const lot = (site: Site) => {
+      const q = this.area(site.lot);
+      return { ...q, x: (q.x0 + q.x1) / 2, z: (q.z0 + q.z1) / 2, cell: Math.min(q.x1 - q.x0, q.z1 - q.z0) };
     };
-    const style = rng();
-    if (z.type === 'commercial') {
-      if (style < 0.14) {
-        // A tower on one half, a public plaza with trees and a fountain on the other.
-        const split = r.x0 + w * 0.5;
-        this.addTower((r.x0 + split) / 2, cz, Math.min(w * 0.5, d), z.density, color(), rng);
-        this.addPlaza({ x0: split, x1: r.x1, z0: r.z0, z1: r.z1 }, rng);
-      } else if (style < 0.3) {
+    switch (plan.style) {
+      case 'tower_plaza':
+      case 'towers':
+      case 'parking':
+        for (const site of sites) {
+          const q = lot(site);
+          if (site.kind === 'tower') this.addTower(q.x, q.z, q.cell, z.density, color(), rng);
+          else if (site.kind === 'plaza') this.addPlaza(q, rng);
+          else if (site.kind === 'parking') this.addParkingLot(q, rng);
+          else this.addBlock(q.x1 - q.x0, 2 * FLOOR, q.z1 - q.z0, q.x, 0, q.z, color(), rng);
+        }
+        break;
+      case 'podium': {
         // One podium over the whole block with towers rising from it.
         const base = (2 + Math.floor(rng() * 2)) * FLOOR;
         this.addBlock(w, base, d, cx, 0, cz, color(), rng);
@@ -582,91 +561,100 @@ export class View3D {
           const fp = Math.min(w / n, d) * 0.55;
           this.addBlock(fp, h, fp, r.x0 + (w / n) * (k + 0.5), base, cz, color(), rng);
         }
-      } else if (style < 0.38 && z.density < 0.9) {
-        // A surface car park with a low building at the back.
-        this.addParkingLot({ x0: r.x0, x1: r.x1, z0: r.z0 + d * 0.35, z1: r.z1 }, rng);
-        this.addBlock(w * 0.8, 2 * FLOOR, d * 0.26, cx, 0, r.z0 + d * 0.15, color(), rng);
-      } else {
-        lots(r, 5 + rng() * 2, (x, zz, cell) => this.addTower(x, zz, cell, z.density, color(), rng));
+        break;
       }
-    } else if (z.type === 'industrial') {
-      if (style < 0.55) {
+      case 'shed_yard': {
         // One big shed and a yard with shipping containers.
-        const shedW = w * (0.55 + 0.1 * rng());
+        const shedW = w * plan.split;
         this.addWarehouse(r.x0 + shedW / 2, cz, Math.min(shedW, d), color(), rng);
         this.addYard({ x0: r.x0 + shedW + 0.4, x1: r.x1, z0: r.z0, z1: r.z1 }, rng);
-      } else {
-        lots(r, 5.5, (x, zz, cell) => this.addWarehouse(x, zz, cell, color(), rng));
+        break;
       }
-    } else if (z.density >= 0.45) {
-      if (style < 0.5 && w > 6 && d > 6) {
-        // Perimeter block: apartment slabs round the edge, a green courtyard inside.
-        const depth = Math.min(w, d) * 0.24;
+      case 'warehouses':
+        for (const site of sites) {
+          const q = lot(site);
+          this.addWarehouse(q.x, q.z, q.cell, color(), rng);
+        }
+        break;
+      case 'perimeter': {
+        // Apartment slabs round the edge, a green courtyard inside.
         const floors = Math.max(3, Math.round(((1.6 + 7 * z.density) * (0.7 + 0.4 * rng())) / FLOOR));
-        const h = floors * FLOOR;
         const c = color();
-        this.addBlock(w, h, depth, cx, 0, r.z0 + depth / 2, c, rng);
-        this.addBlock(w, h, depth, cx, 0, r.z1 - depth / 2, c, rng);
-        this.addBlock(depth, h, d - 2 * depth, r.x0 + depth / 2, 0, cz, c, rng);
-        this.addBlock(depth, h, d - 2 * depth, r.x1 - depth / 2, 0, cz, c, rng);
-        this.flat.add(new THREE.PlaneGeometry(w - 2 * depth, d - 2 * depth), new THREE.Color(0x3f5c34), cx, 0.05, cz, -Math.PI / 2);
-        for (let k = 0; k < 3; k++) this.addTree(cx + (rng() - 0.5) * (w - 2 * depth) * 0.6, cz + (rng() - 0.5) * (d - 2 * depth) * 0.6, rng, 0.6);
-      } else {
-        lots(r, 4.6, (x, zz, cell) => {
-          if (rng() > 0.35 + 0.65 * z.density) this.addTree(x, zz, rng, 0.7);
-          else this.addApartment(x, zz, cell, z.density, color(), rng);
-        });
+        for (const site of sites) {
+          const q = lot(site);
+          this.addBlock(q.x1 - q.x0, floors * FLOOR, q.z1 - q.z0, q.x, 0, q.z, c, rng);
+        }
+        const t = Math.min(w, d) * 0.24;
+        this.flat.add(new THREE.PlaneGeometry(w - 2 * t, d - 2 * t), new THREE.Color(0x3f5c34), cx, 0.05, cz, -Math.PI / 2);
+        for (let k = 0; k < 3; k++) this.addTree(cx + (rng() - 0.5) * (w - 2 * t) * 0.6, cz + (rng() - 0.5) * (d - 2 * t) * 0.6, rng, 0.6);
+        break;
       }
-    } else {
-      this.addHouses(z, r, rng);
+      case 'apartments':
+        for (const site of sites) {
+          const q = lot(site);
+          this.addApartment(q.x, q.z, q.cell, z.density, color(), rng);
+        }
+        for (const e of plan.empty) {
+          const q = this.area(e);
+          this.addTree((q.x0 + q.x1) / 2, (q.z0 + q.z1) / 2, rng, 0.7);
+        }
+        break;
+      case 'houses':
+        for (const site of sites) this.drawHouse(site, rng);
+        break;
+      case 'park':
+        this.addPark(r, rng, false);
+        break;
+      case 'station':
+        for (const site of sites) this.drawStation(site, rng);
+        break;
     }
   }
 
-  // Houses face the streets round the block, each on its own lot with a front lawn and a
-  // driveway, and sometimes a pool or a tree in the back garden.
-  private addHouses(z: Zone, r: Rect, rng: Rng): void {
-    const lot = 3.3; // ~24 m frontage
-    const depth = Math.min(4.2, (r.z1 - r.z0) / 2, (r.x1 - r.x0) / 2);
-    const drive = new THREE.Color(0x5a5f66);
-    const any = r.street.top || r.street.bottom || r.street.left || r.street.right;
-    const sides = any ? r.street : { top: true, right: true, bottom: true, left: true };
-    // Each side's frontage, with the outward normal. The corners belong to the top and bottom rows.
-    const rows: { x0: number; z0: number; dx: number; dz: number; len: number; nx: number; nz: number }[] = [];
-    if (sides.top) rows.push({ x0: r.x0, z0: r.z0, dx: 1, dz: 0, len: r.x1 - r.x0, nx: 0, nz: -1 });
-    if (sides.bottom) rows.push({ x0: r.x0, z0: r.z1, dx: 1, dz: 0, len: r.x1 - r.x0, nx: 0, nz: 1 });
-    const zTop = r.z0 + (sides.top ? depth : 0);
-    const zBot = r.z1 - (sides.bottom ? depth : 0);
-    if (sides.left) rows.push({ x0: r.x0, z0: zTop, dx: 0, dz: 1, len: zBot - zTop, nx: -1, nz: 0 });
-    if (sides.right) rows.push({ x0: r.x1, z0: zTop, dx: 0, dz: 1, len: zBot - zTop, nx: 1, nz: 0 });
-    for (const row of rows) {
-      const n = Math.floor(row.len / lot);
-      if (n < 1) continue;
-      const step = row.len / n;
-      for (let k = 0; k < n; k++) {
-        if (rng() > 0.45 + 0.9 * z.density) continue; // an empty lot now and then
-        const along = step * (k + 0.5);
-        // Front of the lot at the street; the house sits back behind a lawn.
-        const fx = row.x0 + row.dx * along;
-        const fz = row.z0 + row.dz * along;
-        const c = new THREE.Color().setHSL(0.08 + 0.06 * rng(), 0.18 + 0.2 * rng(), 0.55 + 0.2 * rng());
-        this.addHouse(fx - row.nx * depth * 0.42, fz - row.nz * depth * 0.42, Math.min(step, depth) * 1.05, c, rng);
-        // Driveway from the house to the street.
-        const dl = depth * 0.3;
-        this.flat.add(
-          new THREE.PlaneGeometry(row.nx !== 0 ? dl : 0.5, row.nz !== 0 ? dl : 0.5),
-          drive,
-          fx - row.nx * dl * 0.5 + row.dx * step * 0.3,
-          0.045,
-          fz - row.nz * dl * 0.5 + row.dz * step * 0.3,
-          -Math.PI / 2,
-        );
-        // Back garden: a pool or a tree now and then.
-        const bx = fx - row.nx * depth * 0.88;
-        const bz = fz - row.nz * depth * 0.88;
-        const extra = rng();
-        if (extra < 0.12) this.flat.add(new THREE.PlaneGeometry(0.9, 0.55), new THREE.Color(0x3fa7c9), bx, 0.05, bz, -Math.PI / 2);
-        else if (extra < 0.55) this.addTree(bx + row.dx * (rng() - 0.5) * step * 0.5, bz + row.dz * (rng() - 0.5) * step * 0.5, rng, 0.55);
-      }
+  // A house set back behind a lawn, a driveway from the street to its door, and sometimes a
+  // pool or a tree in the back garden.
+  private drawHouse(site: Site, rng: Rng): void {
+    const q = this.area(site.lot);
+    // Outward normal (towards the street) and the lot's depth along it.
+    const [nx, nz] = { n: [0, -1], s: [0, 1], w: [-1, 0], e: [1, 0] }[site.front];
+    const deep = nx !== 0 ? q.x1 - q.x0 : q.z1 - q.z0;
+    const wide = nx !== 0 ? q.z1 - q.z0 : q.x1 - q.x0;
+    const fx = nx !== 0 ? (nx < 0 ? q.x0 : q.x1) : (q.x0 + q.x1) / 2;
+    const fz = nz !== 0 ? (nz < 0 ? q.z0 : q.z1) : (q.z0 + q.z1) / 2;
+    const c = new THREE.Color().setHSL(0.08 + 0.06 * rng(), 0.18 + 0.2 * rng(), 0.55 + 0.2 * rng());
+    this.addHouse(fx - nx * deep * 0.42, fz - nz * deep * 0.42, Math.min(wide, deep) * 1.05, c, rng);
+    // Driveway from the street to the door.
+    const dl = deep * 0.3;
+    const dx = this.wx(site.door.x);
+    const dz = this.wz(site.door.y);
+    this.flat.add(new THREE.PlaneGeometry(nx !== 0 ? dl : 0.5, nz !== 0 ? dl : 0.5), new THREE.Color(0x5a5f66), dx - nx * dl * 0.5, 0.045, dz - nz * dl * 0.5, -Math.PI / 2);
+    const bx = fx - nx * deep * 0.88;
+    const bz = fz - nz * deep * 0.88;
+    const extra = rng();
+    if (extra < 0.12) this.flat.add(new THREE.PlaneGeometry(0.9, 0.55), new THREE.Color(0x3fa7c9), bx, 0.05, bz, -Math.PI / 2);
+    else if (extra < 0.55) this.addTree(bx + Math.abs(nz) * (rng() - 0.5) * wide * 0.5, bz + Math.abs(nx) * (rng() - 0.5) * wide * 0.5, rng, 0.55);
+  }
+
+  // Placeholder station buildings (their own models come later): a hospital with a red cross on
+  // the roof, a red-brick fire station, a blue-grey police station.
+  private drawStation(site: Site, rng: Rng): void {
+    const q = this.area(site.lot);
+    const x = (q.x0 + q.x1) / 2;
+    const z = (q.z0 + q.z1) / 2;
+    const w = (q.x1 - q.x0) * 0.8;
+    const d = (q.z1 - q.z0) * 0.8;
+    const look = {
+      hospital: { color: 0xe4e6ea, floors: 6 },
+      fire_station: { color: 0x9a3b2c, floors: 2 },
+      police_station: { color: 0x4a5e7a, floors: 3 },
+    }[site.kind as 'hospital' | 'fire_station' | 'police_station'];
+    const h = look.floors * FLOOR;
+    this.addBlock(w, h, d, x, 0, z, new THREE.Color(look.color), rng);
+    if (site.kind === 'hospital') {
+      const red = new THREE.Color(0xd8262a);
+      const s = Math.min(w, d) * 0.4;
+      this.solid.add(new THREE.BoxGeometry(s, 0.05, s * 0.3), red, x, h + 0.2, z);
+      this.solid.add(new THREE.BoxGeometry(s * 0.3, 0.05, s), red, x, h + 0.2, z);
     }
   }
 
@@ -717,7 +705,7 @@ export class View3D {
   }
 
   // Lawn with crossing footpaths and trees; large parks also get a pond and a loop path.
-  private addPark(r: Rect, rng: Rng, large: boolean): void {
+  private addPark(r: Area, rng: Rng, large: boolean): void {
     const w = r.x1 - r.x0;
     const d = r.z1 - r.z0;
     const cx = (r.x0 + r.x1) / 2;
@@ -745,7 +733,7 @@ export class View3D {
   }
 
   // A big-box shopping centre with a large car park and trees along the edge.
-  private addMall(r: Rect, rng: Rng): void {
+  private addMall(r: Area, rng: Rng): void {
     const w = r.x1 - r.x0;
     const d = r.z1 - r.z0;
     const cx = (r.x0 + r.x1) / 2;

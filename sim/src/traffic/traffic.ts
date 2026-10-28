@@ -29,7 +29,7 @@ const LEFT_IMPATIENCE = 1 / 20;
 // Yielding to sirens, boids-style separation in a one-lane model: cars up to YIELD_RANGE_M ahead
 // of a unit on its path pull onto the shoulder and stop, the unit drives past them, and they
 // merge back once it is MERGE_CLEAR_M ahead. Junctions on its path hold their other approaches.
-const YIELD_RANGE_M = 120;
+export const YIELD_RANGE_M = 120;
 const MERGE_CLEAR_M = 20;
 const PULL_OVER_S = 1.5; // to move fully onto the shoulder, and back
 const ON_SHOULDER = 0.8; // shift at which a unit can pass the car
@@ -134,7 +134,8 @@ export class TrafficModel {
   private byTrip = new Map<number, Vehicle>();
   private shifted = new Set<Vehicle>(); // cars yielding, on the shoulder or merging back
   private sirenLanes = new Set<Lane>(); // lanes with a unit on them, where cars can be passed
-  private preempted = new Set<number>(); // junctions held for a unit this step
+  // Junctions held for a unit this step, with the approaches the units come from.
+  private preempted = new Map<number, Set<number>>();
   private zones = new Map<number, Zone>(); // by id
   private blockedZone = new Map<number, Zone>(); // by blocked lane
   private oncomingZone = new Map<number, Zone>(); // by oncoming lane
@@ -472,9 +473,12 @@ export class TrafficModel {
 
     for (const [node, reqs] of requests) {
       const box = this.boxes[node];
-      if (this.preempted.has(node)) {
-        // Held for a unit: only units get right-of-way here, whatever the lights show.
-        for (const f of reqs.filter((r) => r.siren).sort((a, b) => a.requestSince - b.requestSince)) this.tryGrant(f, box);
+      const held = this.preempted.get(node);
+      if (held) {
+        // Held for a unit: whatever the lights show, only units get right-of-way here, and the cars
+        // queued ahead of a unit on its own approach, so its way clears.
+        const go = reqs.filter((r) => r.siren || held.has(r.route[r.ri]));
+        for (const f of go.sort((a, b) => a.requestSince - b.requestSince)) this.tryGrant(f, box);
         continue;
       }
       if (this.signals?.isSignalised(node)) {
@@ -595,13 +599,29 @@ export class TrafficModel {
         const lane = this.lanes[u.route[ri]];
         this.sirenLanes.add(lane);
         const toLine = lane.geom.length - u.pos;
-        if (ri < u.route.length - 1 && toLine <= Math.max(PREEMPT_M, (u.v * u.v) / (2 * IDM.b) + 20)) this.preempted.add(lane.link.to);
+        if (ri < u.route.length - 1 && toLine <= Math.max(PREEMPT_M, (u.v * u.v) / (2 * IDM.b) + 20)) {
+          const node = lane.link.to;
+          if (!this.preempted.has(node)) this.preempted.set(node, new Set());
+          this.preempted.get(node)!.add(lane.link.id);
+        }
       }
-      while (budget > 0 && ri < u.route.length) {
+      // Nearest first. Making way only helps if the unit can reach the car, so marking stops at a
+      // car that cannot pull over: one crossing a junction, or one passing a blocked stretch (out
+      // in the oncoming lane, with no shoulder). Cars on a street also wait to pull over until any
+      // car crossing into it is in, or that car would be stuck in the junction behind them.
+      let stuck = false;
+      while (budget > 0 && ri < u.route.length && !stuck) {
         const lane = this.lanes[u.route[ri]];
-        for (const o of lane.vehicles) {
-          if (o === u || o.siren || o.granted) continue;
-          if (o.pos >= from && o.pos - from <= budget) marked.add(o);
+        if (this.connsInto[lane.link.id].some((c) => this.onConnector.get(c)!.some((o) => !o.siren))) break;
+        const passing = this.blockedZone.get(lane.link.id)?.passing;
+        for (let j = lane.vehicles.length - 1; j >= 0; j--) {
+          const o = lane.vehicles[j];
+          if (o === u || o.siren || o.pos < from || o.pos - from > budget) continue;
+          if (o.granted || passing?.has(o)) {
+            stuck = true;
+            break;
+          }
+          marked.add(o);
         }
         budget -= lane.geom.length - from;
         from = 0;
@@ -641,6 +661,38 @@ export class TrafficModel {
   // True while the junction holds its other approaches for a unit.
   isPreempted(node: number): boolean {
     return this.preempted.has(node);
+  }
+
+  // The approaches (link ids) a held junction lets cars in from: the units' own.
+  preemptedFrom(node: number): ReadonlySet<number> | undefined {
+    return this.preempted.get(node);
+  }
+
+  get preemptedNodes(): Iterable<number> {
+    return this.preempted.keys();
+  }
+
+  // The stretch of a unit's route, up to YIELD_RANGE_M ahead of it, where cars make way (as in
+  // updateYielding): lane pieces as [lane id, from m, to m]. For the boids debug view.
+  yieldReach(u: Vehicle): [number, number, number][] {
+    const out: [number, number, number][] = [];
+    let ri = u.ri;
+    let from = u.pos;
+    let budget = YIELD_RANGE_M;
+    if (u.conn) {
+      ri++;
+      budget -= u.conn.length - u.pos;
+      from = 0;
+    }
+    while (budget > 0 && ri < u.route.length) {
+      const lane = this.lanes[u.route[ri]];
+      out.push([lane.link.id, from, Math.min(lane.geom.length, from + budget)]);
+      budget -= lane.geom.length - from;
+      from = 0;
+      ri++;
+      if (ri < u.route.length) budget -= this.connector(u.route[ri - 1], u.route[ri]).length;
+    }
+    return out;
   }
 
   // One-lane-bridge control at each blockage: which blocked car may pass next, whose turn it is,
@@ -707,7 +759,10 @@ export class TrafficModel {
     if (z.inside.size > 0) return false;
     // Room to stop past the zone if the queue beyond it has not moved on.
     let rear = lane.geom.length;
-    for (const o of lane.vehicles) if (!z.passing.has(o) && o.pos - o.len >= z.end) rear = Math.min(rear, o.pos - o.len);
+    for (const o of lane.vehicles) {
+      if (z.passing.has(o) || o.pos - o.len < z.end || (v.siren && o.shift >= ON_SHOULDER)) continue; // a unit drives past cars on the shoulder
+      rear = Math.min(rear, o.pos - o.len);
+    }
     if (rear - z.end < v.len + IDM.s0 && !(v.ri === v.route.length - 1 && v.arrivePos < z.end)) return false;
     if (!other) return true;
     const window = Math.max(0, z.start - v.pos) / Math.max(v.v, z.passSpeed) + (z.end - z.start + v.len) / z.passSpeed + PASS_MARGIN_S;

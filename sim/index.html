@@ -88,6 +88,31 @@
         border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 4px; padding: 6px 9px; pointer-events: none;
       }
 
+      .coverage-legend {
+        position: absolute; left: 12px; top: 12px; z-index: 2; font-family: var(--font-mono); font-size: 10.5px;
+        color: var(--text); background: rgba(6, 9, 13, 0.8); border: 1px solid var(--line); border-radius: 4px; padding: 7px 10px;
+      }
+      .coverage-legend .ramp { width: 180px; background: linear-gradient(90deg, #2e9e5b, #d9b23a 40%, #c0392b); }
+      .coverage-legend .ticks { display: flex; justify-content: space-between; color: var(--text-dim); font-size: 9.5px; margin-top: 2px; }
+      .overlay {
+        position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center;
+        background: rgba(3, 5, 8, 0.72);
+      }
+      .overlay[hidden] { display: none; }
+      .overlay .card {
+        background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 18px 20px;
+        max-width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto;
+      }
+      .overlay h2 { margin: 0 0 12px; font-size: 14px; letter-spacing: 0.06em; text-transform: uppercase; }
+      .keys { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 12px; }
+      .keys kbd {
+        font-family: var(--font-mono); font-size: 11px; background: var(--panel-2); border: 1px solid var(--line);
+        border-radius: 3px; padding: 1px 6px; justify-self: start; color: var(--text);
+      }
+      .keys span { color: var(--text-dim); }
+      #errorOverlay .card { border-color: #c0392b; }
+      #errorText { font-family: var(--font-mono); font-size: 11px; white-space: pre-wrap; color: var(--text-dim); margin: 0 0 12px; max-height: 40vh; overflow: auto; }
+
       aside { flex: 0 0 320px; background: var(--panel); display: flex; flex-direction: column; overflow-y: auto; }
       section.panel { border-bottom: 1px solid var(--line-soft); padding: 14px 16px; }
       section.panel h2 {
@@ -135,6 +160,7 @@
       .dispatch-result-actions { display: flex; gap: 8px; }
       .dispatch-result-actions button { flex: 1; }
       .list li.incident { cursor: pointer; }
+      .list li.rideable { cursor: pointer; border-color: var(--accent); }
       .list li.incident strong { display: block; font-weight: 500; }
       .list li.incident span { display: block; color: var(--text-dim); font-size: 10px; margin-top: 2px; }
       .route-log { margin-top: 8px; padding: 7px 8px; border-left: 2px solid #ffd166; background: var(--panel-2); color: var(--text-dim); font-family: var(--font-mono); font-size: 10px; line-height: 1.45; }
@@ -186,6 +212,10 @@
         </select>
         <button id="incident">Place incident</button>
         <button id="arcs" aria-pressed="true">OD arcs</button>
+        <button id="boids" aria-pressed="false" title="Boids debug view (B)">Boids</button>
+        <button id="coverage" aria-pressed="false" title="Coverage map (C)">Coverage</button>
+        <button id="mute" aria-pressed="false" title="Siren sound (M)">Sound on</button>
+        <button id="help" title="Keyboard shortcuts (?)">?</button>
         <button id="reset">Reset</button>
       </div>
     </header>
@@ -196,6 +226,11 @@
         <div class="warmup" id="warmup" hidden>Fast-forwarding to start time…</div>
         <div class="pick" id="pickHint" role="status" hidden></div>
         <div class="perf" id="perf" aria-live="off"></div>
+        <div class="coverage-legend" id="coverageLegend" hidden>
+          <div id="coverageTitle">Coverage · nearest free unit</div>
+          <div class="ramp"></div>
+          <div class="ticks"><span>1 min</span><span>3 min</span><span>6+ min</span></div>
+        </div>
         <div class="hint">DRAG to orbit · SCROLL to zoom · RIGHT-DRAG or SHIFT+DRAG to pan</div>
       </div>
       <aside>
@@ -334,6 +369,52 @@
         </section>
       </aside>
     </main>
+
+    <div class="overlay" id="helpOverlay" hidden>
+      <div class="card" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+        <h2 id="helpTitle">Keyboard shortcuts</h2>
+        <div class="keys">
+          <kbd>Space</kbd><span>Pause or resume</span>
+          <kbd>1</kbd><span>Speed 1×, 2–5 for 5×, 10×, 60×, 300×</span>
+          <kbd>Tab</kbd><span>Select the next waiting call</span>
+          <kbd>Enter</kbd><span>Send the fastest unit (or the one picked) to the selected call</span>
+          <kbd>F</kbd><span>Ride along with the selected unit, or the latest one sent</span>
+          <kbd>C</kbd><span>Coverage map: all units, ambulances, fire engines, police, off</span>
+          <kbd>B</kbd><span>Boids debug view: yield reach, held junctions, steering arrows</span>
+          <kbd>M</kbd><span>Mute or unmute the sirens</span>
+          <kbd>Esc</kbd><span>Stop riding along, cancel placing, close this</span>
+          <kbd>?</kbd><span>Show or hide this help</span>
+        </div>
+        <p class="note">Click a unit on the map, or a driving unit in the unit list, to ride along with it.</p>
+      </div>
+    </div>
+    <div class="overlay" id="errorOverlay" hidden>
+      <div class="card" role="alertdialog" aria-labelledby="errorTitle">
+        <h2 id="errorTitle">Something went wrong</h2>
+        <p class="note">The simulation stopped because of an error. Reloading starts it again.</p>
+        <pre id="errorText"></pre>
+        <button class="primary" onclick="location.reload()">Reload</button>
+      </div>
+    </div>
+    <script>
+      // Registered before the app loads, so errors while it starts up are shown too.
+      (function () {
+        var shown = false;
+        function show(msg) {
+          if (shown) return;
+          shown = true;
+          document.getElementById('errorText').textContent = msg;
+          document.getElementById('errorOverlay').hidden = false;
+        }
+        window.addEventListener('error', function (e) {
+          if (String(e.message).indexOf('ResizeObserver') >= 0) return; // a harmless browser warning
+          show((e.error && e.error.stack) || e.message || String(e));
+        });
+        window.addEventListener('unhandledrejection', function (e) {
+          show((e.reason && e.reason.stack) || String(e.reason));
+        });
+      })();
+    </script>
 
     <footer>
       <span>IDM car-following · timed signals and stop signs · gravity OD demand · roads:<span class="key" style="background:#7a5a2a"></span>slow<span class="key" style="background:#7a3a2a"></span>jammed<span class="key" style="background:#6a2448"></span>closed</span>

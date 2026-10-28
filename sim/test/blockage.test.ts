@@ -107,3 +107,33 @@ describe('incidents on a lane in the city', () => {
     }, 120_000);
   }
 });
+
+describe('units and blocked lanes together', () => {
+  it('12 units at the peak with an accident and a lane closure on busy arterials: all arrive, no gridlock', () => {
+    const sim = new Simulation({ ...DEFAULT_CONFIG, startHour: 7.5 });
+    while (sim.time < 8.08 * HOUR) sim.step();
+    const stations = sim.sites.filter((s) => s.kind === 'hospital' || s.kind.endsWith('_station'));
+    const pending = new Set<number>();
+    for (let r = 0; r < 2; r++) {
+      stations.forEach((st, k) => {
+        const kind = st.kind === 'hospital' ? 'ambulance' : st.kind === 'fire_station' ? 'fire' : 'police';
+        const trip = sim.sendUnit(kind, st, sim.sites[(k * 331 + 97 + r * 500) % sim.sites.length]);
+        if (trip) pending.add(trip.id);
+      });
+    }
+    const lanes = sim.traffic.lanes.filter((l) => l.link.arterial && l.geom.length > 70).sort((a, b) => b.vehicles.length - a.vehicles.length);
+    sim.addIncident('accident', lanes[0].link.id);
+    sim.addIncident('lane', lanes[3].link.id);
+    let steps = 0;
+    while (sim.time < 8.25 * HOUR) {
+      sim.step();
+      for (const t of sim.arrivals) pending.delete(t.id);
+      if (++steps % 10 === 0) {
+        expect(sim.traffic.checkInvariants()).toEqual([]);
+        expect(sim.traffic.zoneConflicts()).toEqual([]);
+      }
+    }
+    expect(pending.size).toBe(0);
+    expect(sim.traffic.removedGridlock).toBe(0);
+  }, 180_000);
+});

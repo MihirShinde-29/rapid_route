@@ -4,8 +4,10 @@ import { OdHeatmap } from './render3d/odHeatmap';
 import { DISTRICTS } from './demand/districts';
 import { formatClock, periodAt, HOUR, type Period } from './core/time';
 import type { ZoneType } from './demand/zones';
-import { VEHICLE_KINDS, VEHICLE_SPECS, type VehicleKind } from './traffic/vehicleTypes';
+import { VEHICLE_KINDS, VEHICLE_SPECS, type EmergencyKind, type VehicleKind } from './traffic/vehicleTypes';
 import { DispatchCenter, type DispatchMode } from './dispatch/dispatch';
+import { SirenAudio } from './render3d/sirenAudio';
+import type { Vehicle } from './traffic/traffic';
 
 // ?start=7.75 opens at 07:45 with the previous 30 sim minutes already run,
 // so the roads are loaded instead of empty (useful for demos).
@@ -150,10 +152,6 @@ function launchProbe(from: number, to: number): void {
   setPickHint('Following the probe car · drag to look around · Esc to stop following');
   updateSidebar();
 }
-view.onFollowEnd = () => {
-  view.setProbePins(null, null);
-  setPickHint('Probe car arrived', 3000);
-};
 probeBtn.onclick = () => {
   endPlacing();
   if (probeMode !== 'idle') {
@@ -176,10 +174,16 @@ mapEl.addEventListener('pointerdown', (e) => {
   downAt = e.button === 0 ? [e.clientX, e.clientY] : null;
 });
 mapEl.addEventListener('pointerup', (e) => {
-  if (!downAt || (probeMode === 'idle' && placing === null)) return;
+  if (!downAt) return;
   const moved = Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]);
   downAt = null;
   if (moved > 5) return;
+  if (probeMode === 'idle' && placing === null) {
+    // A click on a unit rides along with it.
+    const unit = view.pickVehicle(e.clientX, e.clientY, isUnit);
+    if (unit) rideAlong(unit.trip.id);
+    return;
+  }
   if (placing !== null) {
     let inc: Incident;
     if (placing === 'closure') {
@@ -230,6 +234,68 @@ mapEl.addEventListener('pointerup', (e) => {
   }
 });
 window.addEventListener('keydown', (e) => {
+  sirens.unlock();
+  // Leave keys alone while a form control has focus (Space and Enter press buttons there).
+  const inControl = e.target instanceof Element && e.target.closest('button, select, input, textarea') !== null;
+  const help = $('helpOverlay');
+  if (e.key === '?' || (e.key === '/' && e.shiftKey)) {
+    help.hidden = !help.hidden;
+    e.preventDefault();
+    return;
+  }
+  if (!help.hidden && e.key === 'Escape') {
+    help.hidden = true;
+    return;
+  }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (!inControl && e.key === ' ') {
+    if (!pauseBtn.disabled) pauseBtn.click();
+    e.preventDefault();
+    return;
+  }
+  if (!inControl && /^[1-5]$/.test(e.key)) {
+    speedSel.selectedIndex = Number(e.key) - 1;
+    return;
+  }
+  if (e.key === 'Tab' && dispatch && dispatch.ended === null && !inControl) {
+    // Next waiting call, oldest first, wrapping round.
+    const waiting = dispatch.calls.filter((call) => call.state === 'created');
+    if (waiting.length > 0) {
+      const k = waiting.findIndex((call) => call.id === selectedCallId);
+      selectedCallId = waiting[(k + 1) % waiting.length].id;
+      selectedUnitId = null;
+      syncDispatchPanel();
+    }
+    e.preventDefault();
+    return;
+  }
+  if (e.key === 'Enter' && probeMode === 'idle' && !inControl && dispatch && dispatch.ended === null && selectedCallId !== null) {
+    const unitId = selectedUnitId ?? dispatch.candidates(selectedCallId)[0]?.unitId;
+    if (unitId !== undefined && dispatch.assign(selectedCallId, unitId)) lastSent = unitId;
+    selectedCallId = null;
+    selectedUnitId = null;
+    syncDispatchPanel();
+    return;
+  }
+  const key = e.key.toLowerCase();
+  if (!inControl && key === 'f') {
+    const unit = dispatch?.units[selectedUnitId ?? lastSent ?? -1];
+    if (unit?.tripId != null && sim.traffic.vehicleOf(unit.tripId)) rideAlong(unit.tripId);
+    else setPickHint('No unit on the road to ride along with · pick one in a call, or click one on the map', 3000);
+    return;
+  }
+  if (!inControl && key === 'c') {
+    coverageBtn.click();
+    return;
+  }
+  if (!inControl && key === 'b') {
+    boidsBtn.click();
+    return;
+  }
+  if (!inControl && key === 'm') {
+    muteBtn.click();
+    return;
+  }
   if (e.key === 'Escape') {
     if (placing !== null) {
       endPlacing();
@@ -252,6 +318,92 @@ jamBtn.onclick = () => {
     : 'Controlled jam removed. New trips use observed traffic only.';
 };
 $('reset').onclick = () => location.reload();
+
+// Ride along: the chase camera follows a unit until it arrives (Esc stops).
+const isUnit = (v: Vehicle) => v.trip.kind === 'ambulance' || v.trip.kind === 'fire' || v.trip.kind === 'police';
+let lastSent: number | null = null; // the unit most recently sent from the keyboard
+function rideAlong(tripId: number): void {
+  endPicking();
+  endPlacing();
+  view.setProbePins(null, null);
+  const unit = dispatch?.units.find((u) => u.tripId === tripId);
+  const veh = sim.traffic.vehicleOf(tripId);
+  const kind = unit?.kind ?? veh?.trip.kind ?? 'unit';
+  const name = unit ? `${kind.toUpperCase()} ${unit.id + 1}` : kind.toUpperCase();
+  view.follow(tripId, name);
+  setPickHint(`Riding along with ${name} · drag to look around · Esc to stop`, 4000);
+}
+view.onFollowEnd = () => {
+  view.setProbePins(null, null);
+  setPickHint('Arrived', 3000);
+};
+// Clicking a driving unit in the unit list rides along with it.
+$('dispatchUnits').addEventListener('click', (e) => {
+  const id = (e.target as HTMLElement).closest('li')?.dataset.unit;
+  const unit = id === undefined ? undefined : dispatch?.units[Number(id)];
+  if (unit?.tripId != null && sim.traffic.vehicleOf(unit.tripId)) rideAlong(unit.tripId);
+});
+
+// Boids debug view (B).
+const boidsBtn = $('boids') as HTMLButtonElement;
+boidsBtn.onclick = () => {
+  view.showBoids = !view.showBoids;
+  boidsBtn.setAttribute('aria-pressed', String(view.showBoids));
+};
+
+// Coverage map (C): streets shaded by how fast the nearest free unit could get there on live
+// traffic. Cycles through all units, then each kind, then off.
+const coverageBtn = $('coverage') as HTMLButtonElement;
+const COVERAGE_MODES: (EmergencyKind | 'all' | null)[] = [null, 'all', 'ambulance', 'fire', 'police'];
+const COVERAGE_LABEL = { all: 'nearest free unit', ambulance: 'nearest free ambulance', fire: 'nearest free fire engine', police: 'nearest free police car' };
+const STATION_KIND: Record<string, EmergencyKind> = { hospital: 'ambulance', fire_station: 'fire', police_station: 'police' };
+let coverageMode: EmergencyKind | 'all' | null = null;
+// Junctions where the free units are: idle at their stations (every station before a shift).
+function coverageSources(kind: EmergencyKind | 'all'): number[] {
+  const links = sim.grid.net.links;
+  const nodes = new Set<number>();
+  if (dispatch) {
+    for (const u of dispatch.units) {
+      if (u.state === 'idle' && (kind === 'all' || u.kind === kind)) nodes.add(links[u.location.entrance.link].to);
+    }
+  } else {
+    for (const s of sim.sites) {
+      const k = STATION_KIND[s.kind];
+      if (k && (kind === 'all' || k === kind)) nodes.add(links[s.entrance.link].to);
+    }
+  }
+  return [...nodes];
+}
+function syncCoverage(): void {
+  $('coverageLegend').hidden = coverageMode === null;
+  if (coverageMode === null) return;
+  $('coverageTitle').textContent = `Coverage · ${COVERAGE_LABEL[coverageMode]}`;
+  const sources = coverageSources(coverageMode);
+  view.setCoverage(sources.length > 0 ? sim.coverageTimes(sources) : new Float64Array(sim.grid.net.nodes.length).fill(Infinity));
+}
+coverageBtn.onclick = () => {
+  coverageMode = COVERAGE_MODES[(COVERAGE_MODES.indexOf(coverageMode) + 1) % COVERAGE_MODES.length];
+  coverageBtn.setAttribute('aria-pressed', String(coverageMode !== null));
+  if (coverageMode === null) view.setCoverage(null);
+  syncCoverage();
+};
+
+// Siren sound (M mutes). Audio starts with the first click or key press, as browsers require.
+const sirens = new SirenAudio();
+const muteBtn = $('mute') as HTMLButtonElement;
+muteBtn.onclick = () => {
+  sirens.unlock();
+  sirens.muted = !sirens.muted;
+  muteBtn.setAttribute('aria-pressed', String(sirens.muted));
+  muteBtn.textContent = sirens.muted ? 'Muted' : 'Sound on';
+};
+window.addEventListener('pointerdown', () => sirens.unlock());
+$('help').onclick = () => {
+  $('helpOverlay').hidden = false;
+};
+$('helpOverlay').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) $('helpOverlay').hidden = true;
+});
 
 // Incidents: pick a kind, click Place incident, then click a street. Placed incidents are
 // listed in the sidebar, where each can be removed.
@@ -413,7 +565,7 @@ function syncDispatchPanel(): void {
   const assignBtn = $('assignDispatch') as HTMLButtonElement;
   assignBtn.disabled = selectedCall === undefined || selectedUnitId === null;
   assignBtn.onclick = () => {
-    if (selectedCall && selectedUnitId !== null) dispatch?.assign(selectedCall.id, selectedUnitId);
+    if (selectedCall && selectedUnitId !== null && dispatch?.assign(selectedCall.id, selectedUnitId)) lastSent = selectedUnitId;
     selectedCallId = null;
     selectedUnitId = null;
     syncDispatchPanel();
@@ -445,9 +597,15 @@ function syncDispatchPanel(): void {
   }
 
   $('dispatchUnits').replaceChildren(
-    ...dispatch.units.map((unit) =>
-      listItem('var(--accent)', `${unit.kind} ${unit.id + 1} · ${unit.state.replace('_', ' ')}`, unit.location.address),
-    ),
+    ...dispatch.units.map((unit) => {
+      const li = listItem('var(--accent)', `${unit.kind} ${unit.id + 1} · ${unit.state.replace('_', ' ')}`, unit.location.address);
+      li.dataset.unit = String(unit.id);
+      if (unit.tripId !== null && sim.traffic.vehicleOf(unit.tripId)) {
+        li.classList.add('rideable');
+        li.title = 'Ride along';
+      }
+      return li;
+    }),
   );
 }
 
@@ -583,10 +741,12 @@ function frame(now: number): void {
   const drawStart = performance.now();
   perf.simMs = smooth(perf.simMs, drawStart - simStart);
   view.render(now);
+  sirens.update(view.nearestSiren(), !paused && !warming);
   perf.drawMs = smooth(perf.drawMs, performance.now() - drawStart);
   if (now - lastSidebar > SIDEBAR_MS) {
     lastSidebar = now;
     updateSidebar();
+    syncCoverage();
     $('perf').textContent =
       `${perf.fps.toFixed(0)} fps · sim ${perf.simMs.toFixed(1)} ms · draw ${perf.drawMs.toFixed(1)} ms · ` +
       `${view.renderer.info.render.calls} draw calls · ${sim.traffic.vehicles.size} cars`;

@@ -203,6 +203,8 @@ Mihir's side is now about twice a normal week. It fits only because most of that
 5. lane closures (accidents on a lane stay);
 6. left turns into and out of entrances (fall back to right-in, right-out).
 
+Status (Oct 28): item 1, station placement, is cut and moves to week 10; stations are real buildings now, so moving one needs `moveStation` on the dispatch side and redrawing the building. Everything else on Mihir's list is in.
+
 The core loop, yielding, sites with entrance-to-entrance trips, sound, alerts and shortcuts stay.
 
 ## 6. Schedule to the final (this table goes in the A4 PDF)

@@ -25,7 +25,7 @@ TypeScript + Vite + Three.js. The sim core has no DOM access and runs headless i
 cd sim
 npm install
 npm run dev     # open the printed localhost URL
-npm test        # 50 tests: demand, car-following, junctions, signals, routing, incidents, blocked lanes, sites, trips, units, yielding and dispatch
+npm test        # 53 tests: demand, car-following, junctions, signals, routing, incidents, blocked lanes, sites, trips, units, yielding, coverage, block fill and dispatch
 npm run build   # type-check and build a static site into sim/dist
 ```
 Needs Node 20+. Vite is pinned to 6 / Vitest to 3 because newer releases need a newer Node.
@@ -53,6 +53,13 @@ waiting the blocked side gets a turn of up to 15 s. A road closure (click a stre
 that start or end on it. Cars already driving whose route uses the street are rerouted at their next junction when a
 faster way exists; new trips route around it. Click an incident in the
 sidebar to fly to it, or × to remove it.
+
+Emergency units: click a unit on the map, or a driving unit in the unit list, to ride along with it. `Boids` shows how
+cars make way (each unit's yield reach along its route, the junctions held for it, and each yielding car's steering
+arrow). `Coverage` shades the city by how fast the nearest free unit could get there on live traffic (all units, then
+each kind). Sirens are procedural Web Audio, louder near the camera; `Sound on` mutes them. Press `?` for the keyboard
+shortcuts (Space pause, 1–5 speed, Tab next call, Enter send the fastest unit, F ride along, C coverage, B boids,
+M mute, Esc back). If anything throws, an error panel replaces the frozen page.
 
 The OD matrix groups the zones into nine districts (downtown and eight suburban sectors). Cell colour is the model's
 share for the current period; the number is the trips actually generated between the two districts in the last sim hour.

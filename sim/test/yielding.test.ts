@@ -69,13 +69,15 @@ describe('units in city traffic', () => {
       for (const t of sim.arrivals) pending.delete(t.id);
       for (const t of sim.removals) expect(pending.has(t.id)).toBe(false);
       for (const v of sim.traffic.vehicles) if (v.shift >= 0.8) pulledOver++;
-      // A car that is not a unit never enters a junction while it is held.
+      // While a junction is held, the only cars let in that are not units come from a unit's own
+      // approach (the queue ahead of it clearing).
       for (let n = 0; n < net.nodes.length; n++) {
         const now = sim.traffic.boxes[n].holders;
-        if (sim.traffic.isPreempted(n)) {
+        const from = sim.traffic.preemptedFrom(n);
+        if (from) {
           held++;
           const before = holders.get(n) ?? new Set();
-          for (const h of now) if (!before.has(h)) expect(h.siren).toBe(true);
+          for (const h of now) if (!before.has(h) && !h.siren) expect(from.has(h.conn ? h.conn.inLink : h.route[h.ri])).toBe(true);
         }
         if (now.size === 0) holders.delete(n);
         else holders.set(n, new Set(now));

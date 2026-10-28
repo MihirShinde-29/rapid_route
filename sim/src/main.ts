@@ -5,6 +5,7 @@ import { DISTRICTS } from './demand/districts';
 import { formatClock, periodAt, HOUR, type Period } from './core/time';
 import type { ZoneType } from './demand/zones';
 import { VEHICLE_KINDS, VEHICLE_SPECS, type VehicleKind } from './traffic/vehicleTypes';
+import { DispatchCenter, type DispatchMode } from './dispatch/dispatch';
 
 // ?start=7.75 opens at 07:45 with the previous 30 sim minutes already run,
 // so the roads are loaded instead of empty (useful for demos).
@@ -19,6 +20,9 @@ const sim = new Simulation({
   startHour: startHour !== null ? startHour - WARMUP_H : DEFAULT_CONFIG.startHour,
   peakTripsPerHour: DEFAULT_CONFIG.peakTripsPerHour * demand,
 });
+const modeParam = new URLSearchParams(location.search).get('mode');
+const dispatchMode: DispatchMode = modeParam === 'sandbox' ? 'sandbox' : 'dispatcher';
+const dispatch = new DispatchCenter(sim, { mode: dispatchMode });
 const warmUntil = startHour !== null ? startHour * HOUR : -Infinity;
 const WARMUP_STEPS_PER_FRAME = 600;
 const $ = (id: string) => document.getElementById(id)!;
@@ -47,6 +51,16 @@ const probeBtn = $('probe') as HTMLButtonElement;
 const jamBtn = $('jam') as HTMLButtonElement;
 const incidentBtn = $('incident') as HTMLButtonElement;
 const incidentKind = $('incidentKind') as HTMLSelectElement;
+const dispatchModeSelect = $('dispatchMode') as HTMLSelectElement;
+dispatchModeSelect.value = dispatchMode;
+dispatchModeSelect.onchange = () => {
+  const params = new URLSearchParams(location.search);
+  params.set('mode', dispatchModeSelect.value);
+  location.search = params.toString();
+};
+let selectedCallId: number | null = null;
+const endDispatchBtn = $('endDispatch') as HTMLButtonElement;
+endDispatchBtn.onclick = () => dispatch.end();
 let paused = false;
 let peakCars = 0;
 pauseBtn.onclick = () => {
@@ -254,6 +268,67 @@ function syncIncidentList(): void {
   $('incidentsEmpty').hidden = sim.incidents.length > 0;
 }
 
+function syncDispatchPanel(): void {
+  const activeCalls = dispatch.calls.filter((call) => call.state !== 'resolved' && call.state !== 'missed');
+  const finishedCalls = dispatch.calls.filter((call) => call.state === 'resolved' || call.state === 'missed').slice(-3);
+  const visibleCalls = [...activeCalls, ...finishedCalls].reverse();
+  const callsList = $('dispatchCalls');
+  callsList.replaceChildren();
+  for (const call of visibleCalls) {
+    const li = document.createElement('li');
+    const button = document.createElement('button');
+    button.className = 'dispatch-call';
+    button.textContent = `${call.kind.toUpperCase()} · ${call.site.address} · ${call.state.replace('_', ' ')}`;
+    button.setAttribute('aria-pressed', String(selectedCallId === call.id));
+    button.disabled = call.state !== 'created';
+    button.onclick = () => {
+      selectedCallId = selectedCallId === call.id ? null : call.id;
+      syncDispatchPanel();
+    };
+    li.append(button);
+    callsList.append(li);
+  }
+  $('dispatchCallsEmpty').hidden = visibleCalls.length > 0;
+
+  const selectedCall = dispatch.calls.find((call) => call.id === selectedCallId && call.state === 'created');
+  const candidatesList = $('dispatchCandidates');
+  candidatesList.replaceChildren();
+  if (selectedCall) {
+    for (const candidate of dispatch.candidates(selectedCall.id)) {
+      const unit = dispatch.units[candidate.unitId];
+      const li = document.createElement('li');
+      const button = document.createElement('button');
+      button.className = 'dispatch-candidate';
+      button.textContent = `${unit.kind.toUpperCase()} ${unit.id + 1} · ${Math.round(candidate.eta)} s`;
+      button.onclick = () => {
+        dispatch.assign(selectedCall.id, unit.id);
+        selectedCallId = null;
+        syncDispatchPanel();
+      };
+      li.append(button);
+      candidatesList.append(li);
+    }
+  }
+  $('dispatchCandidatesEmpty').hidden = candidatesList.childElementCount > 0;
+
+  $('dispatchScore').textContent = dispatch.score.points.toLocaleString();
+  $('dispatchResolved').textContent = dispatch.score.resolvedCalls.toLocaleString();
+  $('dispatchMissed').textContent = dispatch.score.missedCalls.toLocaleString();
+  $('dispatchResponse').textContent = dispatch.score.resolvedCalls > 0
+    ? `${Math.round(dispatch.score.meanResponseTime)} s`
+    : '—';
+  $('dispatchStatus').textContent = dispatch.ended === null
+    ? `${dispatch.mode === 'sandbox' ? 'Sandbox' : 'Dispatcher'} · shift ends ${formatClock(dispatch.shiftEndsAt)}`
+    : `Session ${dispatch.ended} · ${dispatch.score.resolvedCalls} resolved · ${dispatch.score.missedCalls} missed`;
+  endDispatchBtn.hidden = dispatch.mode !== 'sandbox' || dispatch.ended !== null;
+
+  $('dispatchUnits').replaceChildren(
+    ...dispatch.units.map((unit) =>
+      listItem('var(--accent)', `${unit.kind} ${unit.id + 1} · ${unit.state.replace('_', ' ')}`, unit.location.address),
+    ),
+  );
+}
+
 function listItem(color: string, name: string, num: string): HTMLLIElement {
   const li = document.createElement('li');
   const dot = document.createElement('span');
@@ -314,6 +389,7 @@ function updateSidebar(): void {
 
   heatmap.update(period);
   syncIncidentList();
+  syncDispatchPanel();
   if (period !== shownPeriod) {
     shownPeriod = period;
     $('periodStat').textContent = PERIOD_LABEL[period];

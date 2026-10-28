@@ -150,6 +150,7 @@
       .dispatch-call:disabled { cursor: default; opacity: 0.65; }
       .dispatch-candidate[aria-pressed='true'] { border-color: var(--accent); color: var(--text); }
       .dispatch-status { margin: 0 0 8px; font-family: var(--font-mono); font-size: 10px; color: var(--text-dim); }
+      .dispatch-travel-status { margin: 10px 0; padding: 8px; border-left: 2px solid #35d7ff; background: var(--panel-2); color: #b6ecfa; font-family: var(--font-mono); font-size: 10px; line-height: 1.45; }
       .dispatch-form { display: grid; gap: 10px; }
       .dispatch-form label { display: grid; gap: 4px; color: var(--text-dim); font-size: 11px; }
       .dispatch-form select { width: 100%; }
@@ -277,6 +278,7 @@
               <div class="stat"><div class="val" id="dispatchResolved">0</div><div class="lbl">Resolved</div></div>
               <div class="stat"><div class="val" id="dispatchResponse">—</div><div class="lbl">Mean response</div></div>
             </div>
+            <div class="dispatch-travel-status" id="dispatchTravelStatus" role="status">No emergency units currently en route.</div>
             <h3 class="dispatch-subhead">Calls</h3>
             <ul class="list dispatch-list" id="dispatchCalls"></ul>
             <div class="note" id="dispatchCallsEmpty">No calls yet.</div>

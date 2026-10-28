@@ -16,7 +16,7 @@ import { StaticBatch } from './batch';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { vehicleGeometry, vehiclePaint } from './vehicles';
 import { fillBlock, type FillItem } from './fill';
-import { VEHICLE_KINDS, type VehicleKind } from '../traffic/vehicleTypes';
+import { isEmergency, VEHICLE_KINDS, type VehicleKind } from '../traffic/vehicleTypes';
 
 // Zone identity colours (validated categorical slots 1-3 on the dark surface).
 // Parks are shown by their trees, not by colour.
@@ -226,6 +226,11 @@ export class View3D {
   private tmp = new THREE.Object3D();
   private tmpColor = new THREE.Color();
   private routeHighlight: THREE.LineSegments | null = null;
+  private emergencyRouteHighlight!: THREE.LineSegments;
+  private emergencyRoute: number[] | null = null;
+  private emergencyRouteKey = '';
+  private sirenMesh!: THREE.InstancedMesh;
+  private sirenCount = 0;
   private proofCar: THREE.Group | null = null; // highlight on the road under the probe or proof vehicle
   private highlightKey = '';
   private sky!: Sky;
@@ -261,7 +266,7 @@ export class View3D {
   private siteRanges = new Map<number, [number, number][]>();
   private redrawn = new Map<string, THREE.Mesh[]>(); // replacement meshes, by block or site
   private ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-  onFollowEnd: (() => void) | null = null; // the followed vehicle reached its destination
+  onFollowEnd: ((tripId: number) => void) | null = null; // the followed vehicle reached its destination
   showDesireLines = true;
   private followLabel = 'PROBE';
   // Boids debug view: each unit's yield reach along its route, the junctions held for it, and
@@ -341,6 +346,14 @@ export class View3D {
     this.scene.add(this.facadesMesh);
     this.buildArcPool();
     this.buildCars();
+    this.emergencyRouteHighlight = new THREE.LineSegments(
+      new THREE.BufferGeometry(),
+      new THREE.LineBasicMaterial({ color: 0x35d7ff, transparent: true, opacity: 1, depthTest: false }),
+    );
+    this.emergencyRouteHighlight.position.y = 0.62;
+    this.emergencyRouteHighlight.renderOrder = 11;
+    this.emergencyRouteHighlight.visible = false;
+    this.scene.add(this.emergencyRouteHighlight);
     this.routeHighlight = new THREE.LineSegments(
       new THREE.BufferGeometry(),
       new THREE.LineBasicMaterial({ color: 0xffd166, transparent: true, opacity: 0.95, depthTest: false }),
@@ -1170,6 +1183,15 @@ export class View3D {
       this.carLights.push(lights);
       this.fleet.set(kind, { body, lights, brake, left, right, sirens, n: 0 });
     }
+    this.sirenMesh = new THREE.InstancedMesh(
+      new THREE.SphereGeometry(0.32, 10, 8),
+      new THREE.MeshBasicMaterial({ vertexColors: true, depthTest: false }),
+      MAX_CARS,
+    );
+    this.sirenMesh.count = 0;
+    this.sirenMesh.frustumCulled = false;
+    this.sirenMesh.renderOrder = 12;
+    this.scene.add(this.sirenMesh);
   }
 
   // A driveway beside a lane: the point `along` metres down the lane, moved DRIVEWAY_M to the
@@ -1222,9 +1244,19 @@ export class View3D {
     const flash = performance.now() % 600;
     this.sirenPhase = flash < 80 || (flash > 140 && flash < 220) ? 0 : flash > 300 && (flash < 380 || (flash > 440 && flash < 520)) ? 1 : -1;
     for (const f of this.fleet.values()) f.n = 0;
+    this.sirenCount = 0;
     for (const veh of traffic.vehicles) {
       const kind = veh.trip.kind ?? 'sedan';
       const p = traffic.pose(veh);
+      if (veh.siren && this.sirenCount < MAX_CARS) {
+        this.tmp.position.set(this.wx(p.x), 0.68, this.wz(p.y));
+        this.tmp.rotation.set(0, 0, 0);
+        this.tmp.scale.setScalar(1);
+        this.tmp.updateMatrix();
+        this.sirenMesh.setMatrixAt(this.sirenCount, this.tmp.matrix);
+        this.sirenMesh.setColorAt(this.sirenCount, this.tmpColor.setHex(performance.now() % 500 < 250 ? 0xff2638 : 0x258bff));
+        this.sirenCount++;
+      }
       const age = now - veh.departTime;
       if (age >= 0 && age < DEPART_S) {
         // Pulling out of a driveway beside the street: straight out to the kerb, then turning
@@ -1283,6 +1315,9 @@ export class View3D {
       if (f.body.instanceColor) f.body.instanceColor.needsUpdate = true;
       for (const m of [f.brake, f.left, f.right, ...(f.sirens ?? [])]) if (m.instanceColor) m.instanceColor.needsUpdate = true;
     }
+    this.sirenMesh.count = this.sirenCount;
+    this.sirenMesh.instanceMatrix.needsUpdate = true;
+    if (this.sirenMesh.instanceColor) this.sirenMesh.instanceColor.needsUpdate = true;
   }
 
   // Signal heads on every approach to a signalised junction, stop signs at all-way stops.
@@ -1401,17 +1436,20 @@ export class View3D {
   // in the same view as the traffic and congestion tinting.
   private syncRouteHighlight(): void {
     if (!this.routeHighlight) return;
-    // A followed unit (or any car that is not the probe) shows the rest of its own route.
+    // A followed non-emergency vehicle shows its route here. Emergency routes use the
+    // separate cyan overlay, while the yellow line remains reserved for proof/probe routes.
     let links: number[] | null = null;
     let key = '';
     const veh = this.followVeh;
-    if (this.followTrip !== null && this.followTrip !== this.sim.probeDecision?.tripId) {
-      if (veh && this.sim.traffic.vehicles.has(veh)) {
+    const followedProbe = this.followTrip !== null && this.sim.probeDecision?.tripId === this.followTrip;
+    if (this.followTrip !== null && !followedProbe) {
+      if (veh && this.sim.traffic.vehicles.has(veh) && !isEmergency(veh.trip.kind)) {
         links = veh.route.slice(veh.ri);
         key = `${veh.trip.id}:${veh.ri}:${veh.route.length}:${veh.route[veh.route.length - 1]}`;
       }
-    } else {
-      const decision = this.followTrip !== null ? this.sim.probeDecision : this.showDesireLines ? this.sim.proofRoute : null;
+    }
+    if (!links) {
+      const decision = followedProbe ? this.sim.probeDecision : this.showDesireLines ? this.sim.proofRoute : null;
       if (decision) {
         links = decision.chosen.links;
         key = String(decision.tripId);
@@ -1440,11 +1478,13 @@ export class View3D {
 
   private syncProofCar(): void {
     if (!this.proofCar) return;
-    const proofId = this.followTrip ?? (this.showDesireLines ? this.sim.proofRoute?.tripId : undefined);
+    const followedProbe = this.followTrip !== null && this.sim.probeDecision?.tripId === this.followTrip;
+    const proofId = followedProbe ? this.followTrip : this.showDesireLines ? this.sim.proofRoute?.tripId : undefined;
     if (proofId === undefined) {
       this.proofCar.visible = false;
       return;
     }
+
     const vehicle = [...this.sim.traffic.vehicles].find((v) => v.trip.id === proofId);
     if (!vehicle) {
       this.proofCar.visible = false;
@@ -1455,6 +1495,28 @@ export class View3D {
     this.proofCar.rotation.y = -Math.atan2(p.hy, p.hx);
     this.proofCar.scale.setScalar(vehicle.len * WORLD_PER_M);
     this.proofCar.visible = true;
+  }
+
+  setEmergencyRoute(route: number[] | null): void {
+    this.emergencyRoute = route;
+  }
+
+  private syncEmergencyRoute(): void {
+    const key = this.emergencyRoute?.join(',') ?? '';
+    if (key === this.emergencyRouteKey) return;
+    this.emergencyRouteKey = key;
+    const points: number[] = [];
+    for (const id of this.emergencyRoute ?? []) {
+      const link = this.sim.grid.net.links[id];
+      const a = this.sim.grid.net.nodes[link.from];
+      const b = this.sim.grid.net.nodes[link.to];
+      points.push(this.wx(a.x), 0, this.wz(a.y), this.wx(b.x), 0, this.wz(b.y));
+    }
+    this.emergencyRouteHighlight.geometry.dispose();
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(points, 3));
+    this.emergencyRouteHighlight.geometry = geometry;
+    this.emergencyRouteHighlight.visible = points.length > 0;
   }
 
   // Fixed pool of OD arcs in one line batch, reused round-robin so busy peaks allocate
@@ -1971,8 +2033,9 @@ export class View3D {
       if (!this.followVeh) {
         // Not on the road yet (waiting to depart), or already arrived.
         if (this.followSeen) {
+          const tripId = this.followTrip;
           this.follow(null);
-          this.onFollowEnd?.();
+          if (tripId !== null) this.onFollowEnd?.(tripId);
         }
         return;
       }
@@ -2036,6 +2099,7 @@ export class View3D {
     this.syncCars();
     this.syncDaylight();
     this.syncRouteHighlight();
+    this.syncEmergencyRoute();
     this.syncProofCar();
     this.syncFollow();
     this.syncSignals();

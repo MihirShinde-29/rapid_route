@@ -92,6 +92,14 @@ export interface DispatchCandidate {
   eta: number;
 }
 
+export interface UnitTravelInfo {
+  tripId: number;
+  origin: Site;
+  destination: Site;
+  eta: number;
+  route: number[];
+}
+
 export class DispatchCenter {
   readonly stations: Station[] = [];
   readonly units: EmergencyUnit[] = [];
@@ -179,6 +187,22 @@ export class DispatchCenter {
       .map((unit) => ({ unitId: unit.id, eta: this.sim.planTrip(unit.location, call.site).eta }))
       .filter((candidate) => Number.isFinite(candidate.eta))
       .sort((a, b) => a.eta - b.eta || a.unitId - b.unitId);
+  }
+
+  unitTravel(unitId: number): UnitTravelInfo | null {
+    const unit = this.units.find((item) => item.id === unitId);
+    if (!unit || unit.state !== 'en_route' || unit.tripId === null || unit.callId === null) return null;
+    const call = this.calls.find((item) => item.id === unit.callId);
+    if (!call) return null;
+    const vehicle = this.sim.traffic.vehicleOf(unit.tripId);
+    const plan = this.sim.planTrip(vehicle ?? unit.location, call.site);
+    return {
+      tripId: unit.tripId,
+      origin: unit.station.site,
+      destination: call.site,
+      eta: plan.eta,
+      route: vehicle ? vehicle.route.slice(vehicle.ri) : plan.route,
+    };
   }
 
   assign(callId: number, unitId: number): boolean {

@@ -65,7 +65,7 @@ describe('dispatch', () => {
     const unit = center.units[unitId];
     expect(unit.state).toBe('on_scene');
 
-    for (let step = 0; step < 5 * 60 * 10 && call.state !== 'resolved'; step++) sim.step();
+    for (let step = 0; step < 6 * 60 * 10 && call.state !== 'resolved'; step++) sim.step();
     expect(call.state).toBe('resolved');
     expect(center.score.resolvedCalls).toBe(1);
     expect(center.score.meanResponseTime).toBe(call.responseTime);
@@ -73,6 +73,32 @@ describe('dispatch', () => {
     expect(unit.state).toBe('returning');
     for (let step = 0; step < 20 * 60 * 10 && unit.state !== 'idle'; step++) sim.step();
     expect(unit.state).toBe('idle');
+  });
+
+  it('keeps an assigned unit en route and resolves the call only after arrival', () => {
+    const sim = quietSimulation();
+    const center = new DispatchCenter(sim, { mode: 'dispatcher', callsPerHour: 0 });
+    const call = center.createCall('crash', nonStationSite(sim));
+    const unitId = center.candidates(call.id)[0].unitId;
+
+    expect(center.assign(call.id, unitId)).toBe(true);
+    expect(center.units[unitId].state).toBe('en_route');
+    expect(call.state).toBe('assigned');
+    expect(call.responseTime).toBeNull();
+    expect(center.unitTravel(unitId)?.destination).toBe(call.site);
+    expect(call.state).not.toBe('resolved');
+
+    for (let step = 0; step < 20 * 60 * 10 && center.units[unitId].state !== 'on_scene'; step++) {
+      sim.step();
+      expect(call.state).not.toBe('resolved');
+    }
+
+    expect(center.units[unitId].state).toBe('on_scene');
+    expect(call.state).toBe('en_route');
+    expect(call.responseTime).not.toBeNull();
+
+    for (let step = 0; step < 6 * 60 * 10 && call.state !== 'resolved'; step++) sim.step();
+    expect(call.state).toBe('resolved');
   });
 
   it('marks an unassigned call missed at expiry', () => {

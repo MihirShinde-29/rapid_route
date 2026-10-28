@@ -63,6 +63,8 @@ if (['am', 'midday', 'pm', 'night'].includes(pageParams.get('shift') ?? '')) shi
 if (['easy', 'normal', 'hard'].includes(pageParams.get('difficulty') ?? '')) difficultySelect.value = pageParams.get('difficulty')!;
 let selectedCallId: number | null = null;
 let selectedUnitId: number | null = null;
+let selectedEmergencyUnitId: number | null = null;
+let followingEmergency = false;
 const endDispatchBtn = $('endDispatch') as HTMLButtonElement;
 let paused = true;
 let peakCars = 0;
@@ -100,6 +102,7 @@ startDispatchBtn.onclick = () => {
   history.replaceState(null, '', `${location.pathname}?${pageParams.toString()}`);
   selectedCallId = null;
   selectedUnitId = null;
+  selectedEmergencyUnitId = null;
   paused = false;
   pauseBtn.disabled = false;
   pauseBtn.textContent = 'Pause';
@@ -147,6 +150,8 @@ function endPicking(): void {
 }
 function launchProbe(from: number, to: number): void {
   endPicking();
+  followingEmergency = false;
+  selectedEmergencyUnitId = null;
   const d = sim.spawnProbeTrip(from, to);
   view.setProbePins(from, to);
   view.follow(d.tripId);
@@ -163,6 +168,8 @@ probeBtn.onclick = () => {
     return;
   }
   view.follow(null);
+  followingEmergency = false;
+  selectedEmergencyUnitId = null;
   view.setProbePins(null, null);
   probeMode = 'start';
   probeBtn.textContent = 'Cancel probe';
@@ -277,7 +284,10 @@ window.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Enter' && probeMode === 'idle' && !inControl && dispatch && dispatch.ended === null && selectedCallId !== null) {
     const unitId = selectedUnitId ?? dispatch.candidates(selectedCallId)[0]?.unitId;
-    if (unitId !== undefined && dispatch.assign(selectedCallId, unitId)) lastSent = unitId;
+    if (unitId !== undefined && dispatch.assign(selectedCallId, unitId)) {
+      lastSent = unitId;
+      selectedEmergencyUnitId = unitId;
+    }
     selectedCallId = null;
     selectedUnitId = null;
     syncDispatchPanel();
@@ -315,6 +325,8 @@ window.addEventListener('keydown', (e) => {
       view.setProbePins(null, null);
     } else if (view.following) {
       view.follow(null);
+      followingEmergency = false;
+      selectedEmergencyUnitId = null;
     }
     setPickHint(null);
   } else if (e.key === 'Enter' && probeMode !== 'idle') {
@@ -341,15 +353,32 @@ function rideAlong(tripId: number): void {
   const veh = sim.traffic.vehicleOf(tripId);
   const kind = unit?.kind ?? veh?.trip.kind ?? 'unit';
   const name = unit ? `${kind.toUpperCase()} ${unit.id + 1}` : kind.toUpperCase();
+  if (unit) {
+    selectedEmergencyUnitId = unit.id;
+    followingEmergency = unit.state === 'en_route';
+    view.setEmergencyRoute(dispatch?.unitTravel(unit.id)?.route ?? null);
+    lastSent = unit.id;
+  } else {
+    followingEmergency = false;
+    selectedEmergencyUnitId = null;
+    view.setEmergencyRoute(null);
+  }
   view.follow(tripId, name);
   setPickHint(`Riding along with ${name} · drag to look around · Esc to stop`, 4000);
 }
-view.onFollowEnd = () => {
+view.onFollowEnd = (tripId) => {
   view.setProbePins(null, null);
-  setPickHint('Arrived', 3000);
+  if (followingEmergency) {
+    followingEmergency = false;
+    selectedEmergencyUnitId = null;
+    setPickHint('Emergency unit arrived at the call', 3000);
+  } else {
+    setPickHint(tripId === sim.probeDecision?.tripId ? 'Probe car arrived' : 'Arrived', 3000);
+  }
 };
 // Clicking a driving unit in the unit list rides along with it.
 $('dispatchUnits').addEventListener('click', (e) => {
+  if ((e.target as HTMLElement).closest('button')) return;
   const id = (e.target as HTMLElement).closest('li')?.dataset.unit;
   const unit = id === undefined ? undefined : dispatch?.units[Number(id)];
   if (unit?.tripId != null && sim.traffic.vehicleOf(unit.tripId)) rideAlong(unit.tripId);
@@ -617,6 +646,16 @@ function syncIncidentList(): void {
   $('incidentsEmpty').hidden = sim.incidents.length > 0;
 }
 
+function followEmergencyUnit(unitId: number): void {
+  const info = dispatch?.unitTravel(unitId);
+  if (!info) return;
+  selectedEmergencyUnitId = unitId;
+  followingEmergency = true;
+  view.setEmergencyRoute(info.route);
+  view.follow(info.tripId);
+  setPickHint(`Following emergency unit to ${info.destination.address}`);
+}
+
 function syncDispatchPanel(): void {
   if (!dispatch) return;
   const activeCalls = dispatch.calls.filter((call) => call.state !== 'resolved' && call.state !== 'missed');
@@ -628,12 +667,14 @@ function syncDispatchPanel(): void {
     const li = document.createElement('li');
     const button = document.createElement('button');
     button.className = 'dispatch-call';
-    button.textContent = `${call.kind.toUpperCase()} · ${call.site.address} · ${call.state.replace('_', ' ')}`;
+    const stateLabel = call.state === 'assigned' ? 'en route' : call.state.replace('_', ' ');
+    button.textContent = `${call.kind.toUpperCase()} · ${call.site.address} · ${stateLabel}`;
     button.setAttribute('aria-pressed', String(selectedCallId === call.id));
-    button.disabled = call.state !== 'created';
+    button.disabled = call.state === 'resolved' || call.state === 'missed';
     button.onclick = () => {
       selectedCallId = call.id;
       selectedUnitId = null;
+      selectedEmergencyUnitId = call.assignedUnitId;
       syncDispatchPanel();
     };
     li.append(button);
@@ -641,13 +682,32 @@ function syncDispatchPanel(): void {
   }
   $('dispatchCallsEmpty').hidden = visibleCalls.length > 0;
 
-  const selectedCall = dispatch.calls.find((call) => call.id === selectedCallId && call.state === 'created');
+  const selectedCall = dispatch.calls.find((call) => call.id === selectedCallId && call.state !== 'resolved' && call.state !== 'missed');
   const candidatesList = $('dispatchCandidates');
   candidatesList.replaceChildren();
-  $('dispatchCallDetails').textContent = selectedCall
-    ? `${selectedCall.kind.toUpperCase()} · ${selectedCall.site.address} · expires in ${Math.max(0, Math.ceil((selectedCall.expiresAt - sim.time) / 60))} min`
-    : 'Select a waiting call to see its location and response deadline.';
-  if (selectedCall) {
+  const assignedUnit = selectedCall?.assignedUnitId === null || selectedCall?.assignedUnitId === undefined
+    ? undefined
+    : dispatch.units[selectedCall.assignedUnitId];
+  const travel = assignedUnit ? dispatch.unitTravel(assignedUnit.id) : null;
+  $('dispatchCallDetails').textContent = selectedCall && assignedUnit && travel
+    ? `${selectedCall.kind.toUpperCase()} · ${travel.origin.address} → ${travel.destination.address} · ${assignedUnit.state.replace('_', ' ')} · ETA ${Math.ceil(travel.eta)} s`
+    : selectedCall
+      ? `${selectedCall.kind.toUpperCase()} · ${selectedCall.site.address} · expires in ${Math.max(0, Math.ceil((selectedCall.expiresAt - sim.time) / 60))} min`
+      : 'Select a waiting or assigned call to see its details.';
+  const selectedEmergencyTravel = selectedEmergencyUnitId === null
+    ? null
+    : dispatch.unitTravel(selectedEmergencyUnitId);
+  if (selectedEmergencyUnitId !== null && !selectedEmergencyTravel) selectedEmergencyUnitId = null;
+  const selectedAssignedUnit = assignedUnit && travel ? assignedUnit : undefined;
+  const statusUnit = selectedAssignedUnit
+    ?? (selectedEmergencyUnitId === null ? undefined : dispatch.units[selectedEmergencyUnitId])
+    ?? dispatch.units.find((unit) => unit.state === 'en_route');
+  const statusTravel = statusUnit ? dispatch.unitTravel(statusUnit.id) : null;
+  $('dispatchTravelStatus').textContent = statusUnit && statusTravel
+    ? `${statusUnit.kind[0].toUpperCase()}${statusUnit.kind.slice(1)} ${statusUnit.id + 1} en route to ${statusTravel.destination.address} — ETA ${Math.ceil(statusTravel.eta)} s`
+    : 'No emergency units currently en route.';
+  view.setEmergencyRoute(selectedEmergencyTravel?.route ?? null);
+  if (selectedCall?.state === 'created') {
     for (const candidate of dispatch.candidates(selectedCall.id)) {
       const unit = dispatch.units[candidate.unitId];
       const li = document.createElement('li');
@@ -667,8 +727,10 @@ function syncDispatchPanel(): void {
   const assignBtn = $('assignDispatch') as HTMLButtonElement;
   assignBtn.disabled = selectedCall === undefined || selectedUnitId === null;
   assignBtn.onclick = () => {
-    if (selectedCall && selectedUnitId !== null && dispatch?.assign(selectedCall.id, selectedUnitId)) lastSent = selectedUnitId;
-    selectedCallId = null;
+    if (selectedCall && selectedUnitId !== null && dispatch?.assign(selectedCall.id, selectedUnitId)) {
+      lastSent = selectedUnitId;
+      selectedEmergencyUnitId = selectedUnitId;
+    }
     selectedUnitId = null;
     syncDispatchPanel();
   };
@@ -698,17 +760,22 @@ function syncDispatchPanel(): void {
     pauseBtn.textContent = 'Resume';
   }
 
-  $('dispatchUnits').replaceChildren(
-    ...dispatch.units.map((unit) => {
-      const li = listItem('var(--accent)', `${unit.kind} ${unit.id + 1} · ${unit.state.replace('_', ' ')}`, unit.location.address);
-      li.dataset.unit = String(unit.id);
-      if (unit.tripId !== null && sim.traffic.vehicleOf(unit.tripId)) {
-        li.classList.add('rideable');
-        li.title = 'Ride along';
-      }
-      return li;
-    }),
-  );
+  const unitRows = dispatch.units.map((unit) => {
+    const li = listItem('var(--accent)', `${unit.kind} ${unit.id + 1} · ${unit.state.replace('_', ' ')}`, unit.location.address);
+    li.dataset.unit = String(unit.id);
+    if (unit.tripId !== null && sim.traffic.vehicleOf(unit.tripId)) {
+      li.classList.add('rideable');
+      li.title = 'Ride along';
+    }
+    const follow = document.createElement('button');
+    follow.textContent = 'Follow';
+    follow.disabled = unit.state !== 'en_route';
+    follow.setAttribute('aria-label', `Follow ${unit.kind} ${unit.id + 1}`);
+    follow.onclick = () => followEmergencyUnit(unit.id);
+    li.append(follow);
+    return li;
+  });
+  $('dispatchUnits').replaceChildren(...unitRows);
 }
 
 function listItem(color: string, name: string, num: string): HTMLLIElement {

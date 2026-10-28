@@ -10,6 +10,15 @@ function nonStationSite(sim: Simulation) {
   return sim.sites.find((site) => !site.kind.endsWith('station') && site.kind !== 'hospital')!;
 }
 
+function unrelatedLink(sim: Simulation, incidentLinks: number[]): number {
+  const link = sim.grid.net.links.find((candidate) =>
+    !incidentLinks.includes(candidate.id) &&
+    !incidentLinks.includes(sim.grid.net.reverse(candidate.id)!),
+  );
+  if (!link) throw new Error('Expected a separate street for an unrelated incident');
+  return link.id;
+}
+
 describe('dispatch', () => {
   it('creates addressed calls and generates them at the configured rate', () => {
     const sim = quietSimulation();
@@ -99,6 +108,47 @@ describe('dispatch', () => {
 
     for (let step = 0; step < 6 * 60 * 10 && call.state !== 'resolved'; step++) sim.step();
     expect(call.state).toBe('resolved');
+  });
+
+  it('creates a linked crash call when an accident is placed', () => {
+    const sim = quietSimulation();
+    const center = new DispatchCenter(sim, { mode: 'dispatcher', callsPerHour: 0 });
+    const accident = sim.addIncident('accident', sim.grid.net.links.find((link) => link.arterial)!.id);
+
+    const call = center.createCrashCall(accident);
+
+    expect(call.kind).toBe('crash');
+    expect(call.incidentId).toBe(accident.id);
+    expect(center.calls).toContain(call);
+    expect(sim.incidents).toContain(accident);
+  });
+
+  it('removes only the associated accident after resolving its crash call and keeps call history', () => {
+    const sim = quietSimulation();
+    const center = new DispatchCenter(sim, { mode: 'dispatcher', callsPerHour: 0 });
+    const accident = sim.addIncident('accident', sim.grid.net.links.find((link) => link.arterial)!.id);
+    const unrelated = sim.addIncident('lane', unrelatedLink(sim, accident.links));
+    const call = center.createCrashCall(accident);
+    const unitId = center.candidates(call.id)[0].unitId;
+
+    expect(center.assign(call.id, unitId)).toBe(true);
+    expect(sim.incidents).toContain(accident);
+
+    for (let step = 0; step < 20 * 60 * 10 && center.units[unitId].state !== 'on_scene'; step++) sim.step();
+    expect(center.units[unitId].state).toBe('on_scene');
+    expect(call.state).toBe('en_route');
+    expect(sim.incidents).toContain(accident);
+
+    for (let step = 0; step < 6 * 60 * 10 && call.state !== 'resolved'; step++) sim.step();
+
+    expect(call.state).toBe('resolved');
+    expect(center.calls).toContain(call);
+    expect(sim.incidents).not.toContain(accident);
+    expect(sim.incidents).toContain(unrelated);
+    expect(sim.incidents.map((incident) => incident.id)).toEqual([unrelated.id]);
+    expect(sim.traffic.blockages.map((blockage) => blockage.id)).toEqual([unrelated.blockage]);
+    expect(sim.traffic.blockDelay(accident.lane!)).toBe(0);
+    expect(sim.traffic.blockDelay(unrelated.lane!)).toBeGreaterThan(0);
   });
 
   it('marks an unassigned call missed at expiry', () => {

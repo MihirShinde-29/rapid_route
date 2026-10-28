@@ -223,12 +223,7 @@ mapEl.addEventListener('pointerup', (e) => {
       inc = placing === 'lane' ? sim.addIncident('lane', hit.link, laneStart!.pos, hit.pos) : sim.addIncident('accident', hit.link, hit.pos);
     }
     if (inc.kind === 'accident' && dispatch && dispatch.ended === null) {
-      const { x, y } = sim.incidentPoint(inc);
-      const site = sim.sites.reduce((nearest, candidate) =>
-        Math.hypot(candidate.door.x - x, candidate.door.y - y) <
-        Math.hypot(nearest.door.x - x, nearest.door.y - y) ? candidate : nearest,
-      );
-      dispatch.createCall('crash', site);
+      dispatch.createCrashCall(inc);
     }
     endPlacing();
     setPickHint(`${INCIDENT_LABEL[inc.kind]} placed · ${inc.rerouted} cars and waiting trips rerouted`, 4000);

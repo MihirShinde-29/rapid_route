@@ -2,7 +2,7 @@ import { HOUR } from '../core/time';
 import { mulberry32 } from '../core/rng';
 import type { Site } from '../city/sites';
 import type { EmergencyKind } from '../traffic/vehicleTypes';
-import type { Simulation } from '../sim';
+import type { Incident, Simulation } from '../sim';
 
 export type DispatchMode = 'dispatcher' | 'sandbox';
 export type CallKind = 'medical' | 'fire' | 'crime' | 'crash';
@@ -32,6 +32,7 @@ export interface EmergencyCall {
   id: number;
   kind: CallKind;
   site: Site;
+  incidentId: number | null;
   createdAt: number;
   targetResponseTime: number;
   expiresAt: number;
@@ -160,6 +161,27 @@ export class DispatchCenter {
   }
 
   createCall(kind?: CallKind, site?: Site): EmergencyCall {
+    return this.addCall(kind, site, null);
+  }
+
+  createCrashCall(incident: Incident): EmergencyCall {
+    if (
+      incident.kind !== 'accident' ||
+      !this.sim.incidents.some((item) => item.id === incident.id)
+    ) {
+      throw new RangeError('Crash calls require an active accident');
+    }
+    const point = this.sim.incidentPoint(incident);
+    const site = this.sim.sites.reduce((nearest, candidate) =>
+      Math.hypot(candidate.door.x - point.x, candidate.door.y - point.y) <
+      Math.hypot(nearest.door.x - point.x, nearest.door.y - point.y)
+        ? candidate
+        : nearest,
+    );
+    return this.addCall('crash', site, incident.id);
+  }
+
+  private addCall(kind: CallKind | undefined, site: Site | undefined, incidentId: number | null): EmergencyCall {
     const callKind = kind ?? CALL_KINDS[Math.floor(this.rng() * CALL_KINDS.length)];
     const callSite = site ?? this.chooseCallSite();
     if (!this.sim.sites.includes(callSite)) throw new RangeError('Call site must belong to this simulation');
@@ -168,6 +190,7 @@ export class DispatchCenter {
       id: this.nextCallId++,
       kind: callKind,
       site: callSite,
+      incidentId,
       createdAt: this.sim.time,
       targetResponseTime: timing.target,
       expiresAt: this.sim.time + timing.expires,
@@ -335,6 +358,7 @@ export class DispatchCenter {
 
   private resolveCall(call: EmergencyCall): void {
     call.state = 'resolved';
+    if (call.incidentId !== null) this.sim.removeIncident(call.incidentId);
     const responseTime = call.responseTime ?? 0;
     this.totalResponseTime += responseTime;
     this.resolvedCalls++;

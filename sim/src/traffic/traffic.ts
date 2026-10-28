@@ -26,6 +26,16 @@ const LEFT_IN_DECIDE_M = 12; // a car turning left in looks for its gap from thi
 // After waiting a while drivers take a shorter gap, down to this, losing a second every 20 s.
 const LEFT_MIN_GAP_S = 2.5;
 const LEFT_IMPATIENCE = 1 / 20;
+// Yielding to sirens, boids-style separation in a one-lane model: cars up to YIELD_RANGE_M ahead
+// of a unit on its path pull onto the shoulder and stop, the unit drives past them, and they
+// merge back once it is MERGE_CLEAR_M ahead. Junctions on its path hold their other approaches.
+const YIELD_RANGE_M = 120;
+const MERGE_CLEAR_M = 20;
+const PULL_OVER_S = 1.5; // to move fully onto the shoulder, and back
+const ON_SHOULDER = 0.8; // shift at which a unit can pass the car
+const HELD = 0.3; // a car shifted more than this stays stopped
+const PREEMPT_M = 100; // a junction is held for a unit this close to its stop line (or its braking distance)
+const SIREN_SPEED = 1.3; // units drive up to this times the speed limit
 
 export interface Vehicle {
   id: number;
@@ -47,6 +57,8 @@ export interface Vehicle {
   arriveLeft: boolean; // turns in across the other lane, so it waits for a gap there
   turnIn: boolean; // has its gap and is turning in
   siren: boolean; // emergency vehicle on a call (yielding and pre-emption key off this)
+  yielding: boolean; // a unit is coming: pull over and stop
+  shift: number; // 0 in the lane, 1 on the shoulder
 }
 
 interface Lane {
@@ -83,6 +95,9 @@ export class TrafficModel {
   private connsInto: Connector[][]; // by out-link
   private sirens = new Set<number>(); // trip ids, so the flag also covers trips not yet on the road
   private byTrip = new Map<number, Vehicle>();
+  private shifted = new Set<Vehicle>(); // cars yielding, on the shoulder or merging back
+  private sirenLanes = new Set<Lane>(); // lanes with a unit on them, where cars can be passed
+  private preempted = new Set<number>(); // junctions held for a unit this step
   // Timed signals at arterial junctions and all-way stops at local ones; null keeps plain give-way
   // rules everywhere (used by the junction tests).
   readonly signals: SignalPlans | null;
@@ -287,6 +302,7 @@ export class TrafficModel {
     this.arrivals = [];
     this.removals = [];
     this.insertBacklog(t);
+    this.updateYielding(dt);
     this.grantRightOfWay(t);
     this.computeAccelerations();
     this.integrate(dt);
@@ -339,6 +355,8 @@ export class TrafficModel {
         arriveLeft: item.trip.arriveLeft ?? false,
         turnIn: false,
         siren: this.sirens.has(item.trip.id),
+        yielding: false,
+        shift: 0,
       };
       vs.splice(k, 0, v);
       this.activeLanes.add(lane);
@@ -354,13 +372,13 @@ export class TrafficModel {
   private grantRightOfWay(t: number): void {
     const requests = new Map<number, Vehicle[]>();
     for (const lane of this.activeLanes) {
-      const f = lane.vehicles[0];
+      const f = this.requester(lane);
       if (!f || f.granted || f.ri === f.route.length - 1) continue;
       const dist = lane.geom.length - f.pos;
       if (dist > Math.max(25, (f.v * f.v) / (2 * IDM.b) + 10)) continue;
       const node = lane.link.to;
-      // Stop sign: come to a halt at the line before asking to go.
-      if (this.stopApproach[lane.link.id] && !(dist < STOP_LINE_ZONE && f.v < 0.5)) continue;
+      // Stop sign: come to a halt at the line before asking to go (a unit only slows).
+      if (this.stopApproach[lane.link.id] && !f.siren && !(dist < STOP_LINE_ZONE && f.v < 0.5)) continue;
       if (f.requestSince < 0) f.requestSince = t;
       if (!requests.has(node)) requests.set(node, []);
       requests.get(node)!.push(f);
@@ -368,6 +386,11 @@ export class TrafficModel {
 
     for (const [node, reqs] of requests) {
       const box = this.boxes[node];
+      if (this.preempted.has(node)) {
+        // Held for a unit: only units get right-of-way here, whatever the lights show.
+        for (const f of reqs.filter((r) => r.siren).sort((a, b) => a.requestSince - b.requestSince)) this.tryGrant(f, box);
+        continue;
+      }
       if (this.signals?.isSignalised(node)) {
         this.grantSignalised(t, box, reqs);
         continue;
@@ -401,8 +424,137 @@ export class TrafficModel {
         f.requestSince = -1;
         box.holders.add(f);
         out.reserved += this.slot(f);
+        this.toFront(f);
       }
     }
+  }
+
+  // Grants right-of-way if the movement fits the box and the exit has room.
+  private tryGrant(f: Vehicle, box: Box): boolean {
+    const m = this.movement(f);
+    for (const h of box.holders) if (!compatible(m, this.movement(h))) return false;
+    if (!this.exitHasRoom(f)) return false;
+    f.granted = true;
+    f.requestSince = -1;
+    box.holders.add(f);
+    this.lanes[f.route[f.ri + 1]].reserved += this.slot(f);
+    this.toFront(f);
+    return true;
+  }
+
+  // The car on a lane that would cross the junction next: the front car, unless it is pulling
+  // over, in which case a unit behind cars on the shoulder.
+  private requester(lane: Lane): Vehicle | undefined {
+    const vs = lane.vehicles;
+    const f = vs[0];
+    if (!f) return undefined;
+    if (!f.yielding && f.shift <= HELD) return f;
+    if (!this.sirenLanes.has(lane)) return undefined;
+    for (let k = 1; k < vs.length; k++) if (vs[k].siren) return this.leaderIndex(vs, k) < 0 ? vs[k] : undefined;
+    return undefined;
+  }
+
+  // A unit granted the junction from behind cars on the shoulder goes to the head of the lane.
+  private toFront(f: Vehicle): void {
+    const vs = this.lanes[f.route[f.ri]].vehicles;
+    const k = vs.indexOf(f);
+    if (k > 0) {
+      vs.splice(k, 1);
+      vs.unshift(f);
+    }
+  }
+
+  // A unit and a car on the shoulder ignore each other: the unit drives past.
+  private passable(a: Vehicle, b: Vehicle): boolean {
+    return (a.siren && b.shift >= ON_SHOULDER) || (b.siren && a.shift >= ON_SHOULDER);
+  }
+
+  // Index of the car that vehicle k follows: the nearest one ahead it cannot pass; -1 if none.
+  private leaderIndex(vs: Vehicle[], k: number): number {
+    let best = -1;
+    for (let j = k - 1; j >= 0; j--) {
+      if (this.passable(vs[k], vs[j])) continue;
+      if (best < 0 || vs[j].pos - vs[j].len < vs[best].pos - vs[best].len) best = j;
+    }
+    return best;
+  }
+
+  // The last car on a lane that `v` cannot pass.
+  private tailFor(lane: Lane, v: Vehicle): Vehicle | undefined {
+    const vs = lane.vehicles;
+    for (let k = vs.length - 1; k >= 0; k--) if (!this.passable(v, vs[k])) return vs[k];
+    return undefined;
+  }
+
+  // Marks the cars ahead of each unit on its path, moves them onto the shoulder (and back once
+  // it has gone), lets units overtake cars on the shoulder, and holds the junctions they approach.
+  private updateYielding(dt: number): void {
+    this.sirenLanes.clear();
+    this.preempted.clear();
+    const units: Vehicle[] = [];
+    for (const id of this.sirens) {
+      const u = this.byTrip.get(id);
+      if (u) units.push(u);
+    }
+    const marked = new Set<Vehicle>();
+    for (const u of units) {
+      let ri = u.ri;
+      let from = u.pos;
+      let budget = YIELD_RANGE_M;
+      if (u.conn) {
+        ri++;
+        budget -= u.conn.length - u.pos;
+        from = 0;
+      } else {
+        const lane = this.lanes[u.route[ri]];
+        this.sirenLanes.add(lane);
+        const toLine = lane.geom.length - u.pos;
+        if (ri < u.route.length - 1 && toLine <= Math.max(PREEMPT_M, (u.v * u.v) / (2 * IDM.b) + 20)) this.preempted.add(lane.link.to);
+      }
+      while (budget > 0 && ri < u.route.length) {
+        const lane = this.lanes[u.route[ri]];
+        for (const o of lane.vehicles) {
+          if (o === u || o.siren || o.granted) continue;
+          if (o.pos >= from && o.pos - from <= budget) marked.add(o);
+        }
+        budget -= lane.geom.length - from;
+        from = 0;
+        ri++;
+        if (ri < u.route.length) budget -= this.connector(u.route[ri - 1], u.route[ri]).length;
+      }
+    }
+    for (const v of marked) {
+      v.yielding = true;
+      v.shift = Math.min(1, v.shift + dt / PULL_OVER_S);
+      this.shifted.add(v);
+    }
+    for (const v of this.shifted) {
+      if (!this.vehicles.has(v)) {
+        this.shifted.delete(v);
+        continue;
+      }
+      if (marked.has(v)) continue;
+      v.yielding = false;
+      // Stay on the shoulder until the unit that just passed is clear ahead.
+      const lane = v.conn ? null : v.route[v.ri];
+      if (units.some((u) => !u.conn && u.route[u.ri] === lane && u.pos > v.pos && u.pos - u.len - v.pos < MERGE_CLEAR_M)) continue;
+      v.shift = Math.max(0, v.shift - dt / PULL_OVER_S);
+      if (v.shift === 0) this.shifted.delete(v);
+    }
+    // Units overtake the cars on the shoulder: keep each lane's list in order of position.
+    for (const lane of this.sirenLanes) {
+      const vs = lane.vehicles;
+      for (let k = 1; k < vs.length; k++) {
+        for (let j = k; j > 0 && this.passable(vs[j], vs[j - 1]) && vs[j].siren && vs[j].pos > vs[j - 1].pos; j--) {
+          [vs[j - 1], vs[j]] = [vs[j], vs[j - 1]];
+        }
+      }
+    }
+  }
+
+  // True while the junction holds its other approaches for a unit.
+  isPreempted(node: number): boolean {
+    return this.preempted.has(node);
   }
 
   // True if any approach to this junction has a stop sign.
@@ -453,6 +605,7 @@ export class TrafficModel {
       f.requestSince = -1;
       box.holders.add(f);
       this.lanes[f.route[f.ri + 1]].reserved += this.slot(f);
+      this.toFront(f);
     };
     for (const f of go) grant(f);
     for (const f of rightOnRed) {
@@ -465,7 +618,7 @@ export class TrafficModel {
   // Room for one more car on the lane after the junction, counting cars already granted into it.
   private exitHasRoom(v: Vehicle): boolean {
     const out = this.lanes[v.route[v.ri + 1]];
-    const tail = out.vehicles[out.vehicles.length - 1];
+    const tail = this.tailFor(out, v);
     return (tail ? tail.pos - tail.len : out.geom.length) - out.reserved >= this.slot(v);
   }
 
@@ -484,9 +637,10 @@ export class TrafficModel {
   private computeAccelerations(): void {
     for (const lane of this.activeLanes) {
       const vs = lane.vehicles;
+      const passing = this.sirenLanes.has(lane);
       for (let k = 0; k < vs.length; k++) {
         const veh = vs[k];
-        let v0 = this.desiredSpeed(lane.link);
+        let v0 = this.desiredSpeed(lane.link) * (veh.siren ? SIREN_SPEED : 1);
         let gap = Infinity;
         let dv = 0;
         if (veh.ri === veh.route.length - 1) {
@@ -494,12 +648,13 @@ export class TrafficModel {
           const toDrive = Math.max(0, veh.arrivePos - veh.pos);
           v0 = Math.min(v0, Math.sqrt(ARRIVE_SPEED ** 2 + 2 * IDM.b * toDrive));
           if (veh.arriveLeft && !veh.turnIn && toDrive < LEFT_IN_DECIDE_M) {
-            const gap = Math.max(LEFT_MIN_GAP_S, LEFT_IN_GAP_S - veh.stoppedFor * LEFT_IMPATIENCE);
+            const gap = veh.siren ? LEFT_MIN_GAP_S : Math.max(LEFT_MIN_GAP_S, LEFT_IN_GAP_S - veh.stoppedFor * LEFT_IMPATIENCE);
             veh.turnIn = this.crossingClear(this.net.reverse(lane.link.id)!, lane.geom.length - veh.arrivePos, gap + toDrive / Math.max(veh.v, 2));
           }
         }
-        if (k > 0) {
-          const lead = vs[k - 1];
+        const j = passing ? this.leaderIndex(vs, k) : k - 1;
+        if (j >= 0) {
+          const lead = vs[j];
           gap = lead.pos - lead.len - veh.pos;
           dv = veh.v - lead.v;
         } else if (veh.ri < veh.route.length - 1) {
@@ -524,6 +679,8 @@ export class TrafficModel {
           if (g < gap) [gap, dv] = [g, veh.v];
         }
         veh.acc = this.idm(veh.v, v0, gap, dv, veh.accel);
+        // Pulling over: brake gently to a stop and wait there until the unit has gone.
+        if (veh.yielding || veh.shift > HELD) veh.acc = Math.min(veh.acc, veh.v > 0 ? -IDM.b : 0);
       }
     }
     for (const conn of this.activeConns) {
@@ -539,14 +696,13 @@ export class TrafficModel {
           gap = vs[k - 1].pos - vs[k - 1].len - veh.pos;
           dv = veh.v - vs[k - 1].v;
         } else {
-          const out = this.lanes[conn.outLink];
-          const tail = out.vehicles[out.vehicles.length - 1];
+          const tail = this.tailFor(this.lanes[conn.outLink], veh);
           if (tail) {
             gap = conn.length - veh.pos + tail.pos - tail.len;
             dv = veh.v - tail.v;
           }
         }
-        veh.acc = this.idm(veh.v, v0, gap, dv, veh.accel);
+        veh.acc = this.idm(veh.v, veh.siren ? v0 * SIREN_SPEED : v0, gap, dv, veh.accel);
       }
     }
   }
@@ -577,8 +733,7 @@ export class TrafficModel {
     const onConn = this.onConnector.get(conn)!;
     const cTail = onConn[onConn.length - 1];
     if (cTail) return [remain + cTail.pos - cTail.len, veh.v - cTail.v];
-    const out = this.lanes[conn.outLink];
-    const tail = out.vehicles[out.vehicles.length - 1];
+    const tail = this.tailFor(this.lanes[conn.outLink], veh);
     if (tail) return [remain + conn.length + tail.pos - tail.len, veh.v - tail.v];
     return [Infinity, 0];
   }
@@ -598,14 +753,29 @@ export class TrafficModel {
     for (const lane of this.activeLanes) {
       const vs = lane.vehicles;
       if (vs.length === 0) continue;
-      const f = vs[0];
-      if (!f.granted && f.ri < f.route.length - 1 && f.pos > lane.geom.length) {
-        f.pos = lane.geom.length;
-        f.v = 0;
+      if (!this.sirenLanes.has(lane)) {
+        this.clampAtLine(vs[0], lane);
+        this.clampFollowers(vs);
+        continue;
       }
-      this.clampFollowers(vs);
+      // A unit passes cars on the shoulder, so each car is held behind the nearest car it can't pass.
+      for (let k = 0; k < vs.length; k++) {
+        const j = this.leaderIndex(vs, k);
+        if (j < 0) this.clampAtLine(vs[k], lane);
+        else if (vs[k].pos > vs[j].pos - vs[j].len) {
+          vs[k].pos = vs[j].pos - vs[j].len;
+          vs[k].v = Math.min(vs[k].v, vs[j].v);
+        }
+      }
     }
     for (const conn of this.activeConns) this.clampFollowers(this.onConnector.get(conn)!);
+  }
+
+  private clampAtLine(f: Vehicle, lane: Lane): void {
+    if (!f.granted && f.ri < f.route.length - 1 && f.pos > lane.geom.length) {
+      f.pos = lane.geom.length;
+      f.v = 0;
+    }
   }
 
   private clampFollowers(vs: Vehicle[]): void {
@@ -655,6 +825,7 @@ export class TrafficModel {
         veh.enteredLane = t;
         out.vehicles.push(veh);
         this.activeLanes.add(out);
+        if (veh.siren) this.sirenLanes.add(out);
         this.release(veh, out);
       }
       if (vs.length === 0) this.activeConns.delete(conn);
@@ -702,8 +873,12 @@ export class TrafficModel {
     const errors: string[] = [];
     const checkOrder = (vs: Vehicle[], where: string) => {
       for (let k = 1; k < vs.length; k++) {
-        const gap = vs[k - 1].pos - vs[k - 1].len - vs[k].pos;
-        if (gap < -1e-6) errors.push(`overlap on ${where}: gap ${gap.toFixed(2)} m`);
+        for (let j = k - 1; j >= 0; j--) {
+          if (this.passable(vs[j], vs[k])) continue;
+          const gap = vs[j].pos - vs[j].len - vs[k].pos;
+          if (gap < -1e-6) errors.push(`overlap on ${where}: gap ${gap.toFixed(2)} m`);
+          if (!vs.some((x) => x.siren)) break; // ordinary lanes: the car ahead is enough
+        }
       }
     };
     for (const lane of this.lanes) checkOrder(lane.vehicles, `link ${lane.link.id}`);

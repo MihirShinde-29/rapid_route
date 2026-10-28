@@ -37,6 +37,7 @@ const CONGESTION_REFRESH_MS = 500;
 const DEPART_S = 4; // sim s a new car takes to pull out of its lot onto the road
 const PARK_SPEED = 6; // m/s driving off the road into the destination lot
 const DRIVEWAY_M = 13; // how far beside the lane a car's driveway starts
+const SHOULDER_M = 2; // how far a car pulls over for a siren
 
 type Area = { x0: number; x1: number; z0: number; z1: number }; // world units
 
@@ -976,8 +977,11 @@ export class View3D {
         const turn = s < 0.7 ? this.sideOf(this.bp.x, this.bp.y, this.bd.x, this.bd.y, p.x + p.hx * 20, p.y + p.hy * 20) : null;
         this.placeCar(kind, veh.trip, this.bp.x, this.bp.y, this.bd.x, this.bd.y, 0.08 + 0.18 * s, 0.6 + 0.4 * s, false, turn);
       } else {
-        // On the road surface; brake lights while slowing down or held at a stop.
-        this.placeCar(kind, veh.trip, p.x, p.y, p.hx, p.hy, 0.26, 1, veh.acc < -0.8 || veh.v < 0.5, this.turnAhead(veh));
+        // On the road surface; brake lights while slowing down or held at a stop. A car making way
+        // for a siren sits up to SHOULDER_M to the right, indicating while it pulls over.
+        const off = veh.shift * SHOULDER_M;
+        const turn = veh.yielding && veh.shift < 1 ? 'right' : this.turnAhead(veh);
+        this.placeCar(kind, veh.trip, p.x - p.hy * off, p.y + p.hx * off, p.hx, p.hy, 0.26, 1, veh.acc < -0.8 || veh.v < 0.5, turn);
       }
     }
     // Cars that reached their destination this frame turn off into their lot.

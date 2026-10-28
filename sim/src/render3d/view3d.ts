@@ -4,7 +4,7 @@ import { mulberry32, type Rng } from '../core/rng';
 import type { Incident, IncidentKind, Simulation } from '../sim';
 import type { Trip } from '../demand/trips';
 import { DEPART_FRAC, type Vehicle } from '../traffic/traffic';
-import { JUNCTION_RADIUS } from '../traffic/geometry';
+import { JUNCTION_RADIUS, LANE_OFFSET } from '../traffic/geometry';
 import { nearestJunction } from '../network/grid';
 import type { BlockPlan, Rect as CityRect, Site } from '../city/sites';
 import type { Light } from '../traffic/signals';
@@ -960,9 +960,13 @@ export class View3D {
       const age = now - veh.departTime;
       if (age >= 0 && age < DEPART_S) {
         // Pulling out of a driveway beside the street: straight out to the kerb, then turning
-        // to join the car's real position on the road.
+        // to join the car's real position on the road. Pulling out to the left, the driveway
+        // is beside the other lane and the car crosses it.
         const lane = traffic.lanes[veh.route[0]];
-        const d = this.driveway(lane.link.id, Math.max(veh.len, veh.trip.departPos ?? DEPART_FRAC * lane.geom.length) - veh.len / 2);
+        const along = Math.max(veh.len, veh.trip.departPos ?? DEPART_FRAC * lane.geom.length) - veh.len / 2;
+        const d = veh.trip.departLeft
+          ? this.driveway(this.sim.grid.net.reverse(lane.link.id)!, lane.geom.length - along)
+          : this.driveway(lane.link.id, along);
         const lot = new THREE.Vector2(d.x, d.y);
         const road = new THREE.Vector2(p.x, p.y);
         const c = new THREE.Vector2(d.x + d.hy * (DRIVEWAY_M - 1), d.y - d.hx * (DRIVEWAY_M - 1));
@@ -980,9 +984,10 @@ export class View3D {
     for (const veh of this.lastVehicles) {
       if (traffic.vehicles.has(veh) || veh.ri !== veh.route.length - 1 || veh.stoppedFor >= 180) continue; // still driving, or removed by the gridlock guard
       const p = traffic.pose(veh);
-      // Turning off the street into a driveway beside it.
+      // Turning off the street into a driveway beside it, across the other lane for a left turn.
       const p0 = new THREE.Vector2(p.x, p.y);
-      const p2 = new THREE.Vector2(p.x + p.hx * 6 - p.hy * DRIVEWAY_M, p.y + p.hy * 6 + p.hx * DRIVEWAY_M);
+      const side = veh.arriveLeft ? -(DRIVEWAY_M + 2 * LANE_OFFSET) : DRIVEWAY_M;
+      const p2 = new THREE.Vector2(p.x + p.hx * 6 - p.hy * side, p.y + p.hy * 6 + p.hx * side);
       const c = new THREE.Vector2(p.x + p.hx * 6, p.y + p.hy * 6);
       const dist = p0.distanceTo(c) + c.distanceTo(p2);
       const turn = this.sideOf(p.x, p.y, p.hx, p.hy, p2.x, p2.y);

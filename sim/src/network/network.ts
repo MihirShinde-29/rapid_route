@@ -22,6 +22,7 @@ export class Network {
   readonly links: Link[] = [];
   readonly outLinks: number[][] = [];
   readonly inLinks: number[][] = [];
+  private reverses: (number | undefined)[] | null = null;
 
   addNode(x: number, y: number): number {
     const id = this.nodes.length;
@@ -38,7 +39,16 @@ export class Network {
     this.links.push({ id, from, to, length: Math.hypot(b.x - a.x, b.y - a.y), lanes, speedLimit, arterial });
     this.outLinks[from].push(id);
     this.inLinks[to].push(id);
+    this.reverses = null;
     return id;
+  }
+
+  // The other direction of a two-way street; undefined on a one-way link.
+  reverse(id: number): number | undefined {
+    if (!this.reverses) {
+      this.reverses = this.links.map((l) => this.outLinks[l.to].find((o) => this.links[o].to === l.from));
+    }
+    return this.reverses[id];
   }
 }
 

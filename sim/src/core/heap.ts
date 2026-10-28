@@ -7,6 +7,10 @@ export class MinHeap<T> {
     return this.items.length;
   }
 
+  get minKey(): number {
+    return this.keys.length > 0 ? this.keys[0] : Infinity;
+  }
+
   push(item: T, key: number): void {
     this.items.push(item);
     this.keys.push(key);

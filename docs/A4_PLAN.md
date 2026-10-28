@@ -133,7 +133,7 @@ type EmergencyKind = 'ambulance' | 'fire' | 'police';
 enqueue(trip: Trip, route: number[], opts?: { siren?: boolean }): void; // siren: yield + pre-emption
 setSiren(tripId: number, on: boolean): void;                            // e.g. off when returning
 vehicleOf(tripId: number): Vehicle | undefined;                         // position for UI and ETA; vehicle.siren
-redirect(tripId: number, route: number[], arrivePos: number): boolean;  // send a car on the road elsewhere
+redirect(tripId: number, route: number[], arrivePos: number, arriveLeft?: boolean): boolean;  // send a car on the road elsewhere
 // After each step (both cleared at the start of the next):
 sim.arrivals: Trip[];   // trips that reached their destination entrance
 sim.removals: Trip[];   // trips removed by the gridlock guard (a unit stuck 180 s): return it to its station
@@ -162,7 +162,9 @@ interface Site { id: number; kind: SiteKind; zone: number; size: number; address
   entrance: { link: number; pos: number }; door: { x: number; y: number } }
 sim.sites: Site[];
 // Route from a site, or from a vehicle where it is now (a unit on the move), to a site's entrance.
-sim.planTrip(from: Site | Vehicle, to: Site): { route: number[]; departPos: number; arrivePos: number; eta: number };
+// Either lane of the street at each end; departLeft / arriveLeft mean a left turn across the other lane.
+sim.planTrip(from: Site | Vehicle, to: Site): { route: number[]; departPos: number; arrivePos: number;
+  departLeft: boolean; arriveLeft: boolean; eta: number };
 // Plans and sends a unit in one call: from a site it enqueues a new trip, from a vehicle it redirects
 // that vehicle. Returns the trip (id for vehicleOf / arrivals), or null if there is no route.
 sim.sendUnit(kind: EmergencyKind, from: Site | Vehicle, to: Site, opts?: { siren?: boolean }): Trip | null;

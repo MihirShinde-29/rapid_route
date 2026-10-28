@@ -1,6 +1,6 @@
 import { mulberry32, type Rng } from '../core/rng';
 import type { Grid } from '../network/grid';
-import type { Link } from '../network/network';
+import type { Link, Network } from '../network/network';
 import type { Zone } from '../demand/zones';
 import { LaneGeom } from '../traffic/geometry';
 
@@ -34,6 +34,27 @@ export interface Site {
   door: { x: number; y: number }; // where the driveway meets the lot, m
   lot: Rect;
   front: Side; // the side of the lot its entrance is on
+}
+
+// One way into or out of a site: a lane of its street, the point on it beside the driveway, and
+// whether the car crosses the other lane to get there (a left turn).
+export interface Access {
+  link: number;
+  pos: number; // m along the lane
+  left: boolean;
+}
+
+// Cars leave a site onto either lane of its street and arrive from either, as long as that lane
+// leads on (out) or can be reached (in) without a U-turn. On a dead-end street that means
+// arriving on the way in and leaving on the way out. `length` gives a lane's length.
+export function siteAccess(net: Network, entrance: { link: number; pos: number }, length: (id: number) => number): { out: Access[]; in: Access[] } {
+  const near = entrance.link;
+  const far = net.reverse(near);
+  const lanes: Access[] = [{ link: near, pos: entrance.pos, left: false }];
+  if (far !== undefined) lanes.push({ link: far, pos: length(far) - entrance.pos, left: true });
+  const leadsOn = (id: number) => net.outLinks[net.links[id].to].some((o) => o !== net.reverse(id));
+  const reached = (id: number) => net.inLinks[net.links[id].from].some((i) => i !== net.reverse(id));
+  return { out: lanes.filter((a) => leadsOn(a.link)), in: lanes.filter((a) => reached(a.link)) };
 }
 
 export type BlockStyle =
@@ -119,11 +140,10 @@ export function buildCity(grid: Grid, zones: Zone[], seed: number): CityLayout {
   const rng: Rng = mulberry32(seed);
   const superOf = new Map<number, number>();
   grid.superblocks.forEach((sb, k) => sb.blocks.forEach((b) => superOf.set(b, k)));
-  const reverse = (link: Link) => net.outLinks[link.to].find((id) => net.links[id].to === link.from);
-  // A car must be able to arrive on the link and leave it without a U-turn.
+  // A car must be able to arrive at the entrance and leave it, from either lane, without a U-turn.
   const usable = (link: Link) => {
-    const back = reverse(link);
-    return net.inLinks[link.from].some((id) => net.links[id].from !== link.to) && net.outLinks[link.to].some((id) => id !== back);
+    const a = siteAccess(net, { link: link.id, pos: 0 }, (id) => geom(id).length);
+    return a.in.length > 0 && a.out.length > 0;
   };
   const geoms = new Map<number, LaneGeom>();
   const geom = (id: number) => {

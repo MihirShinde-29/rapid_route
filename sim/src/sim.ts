@@ -7,7 +7,7 @@ import { TripGenerator, type Trip } from './demand/trips';
 import { Router, type RouteResult } from './routing/router';
 import { TrafficModel, type Vehicle } from './traffic/traffic';
 import { blockDistricts, DISTRICTS } from './demand/districts';
-import { buildCity, type CityLayout, type Site } from './city/sites';
+import { buildCity, siteAccess, type Access, type CityLayout, type Site } from './city/sites';
 import type { EmergencyKind } from './traffic/vehicleTypes';
 
 // Perturbations the user can place on a street (both directions).
@@ -24,6 +24,10 @@ const ACCIDENT_SPEED = 2.5; // m/s, cars edge past the wreck
 const ACCIDENT_CLEARS_S = 20 * 60;
 const LANE_CLOSURE_FACTOR = 0.4; // of the speed limit, traffic merging into the open lane
 const CLOSED_COST = 1e5; // s, so routes avoid a closed street unless there is no other way
+// Routing cost of crossing the other lane at a driveway (s), standing for the wait for a gap;
+// four times that across an arterial. Cars still turn left when going round is much longer.
+const LEFT_TURN_S = 15;
+const ARTERIAL_LEFT_FACTOR = 4;
 
 export interface RouteDecision {
   tripId: number;
@@ -50,7 +54,7 @@ export const DEFAULT_CONFIG: SimConfig = {
   seed: 549,
   grid: DEFAULT_GRID,
   startHour: 6,
-  peakTripsPerHour: 13000, // ~715 mixed vehicles at the AM peak, no gridlock removals (see traffic.test.ts)
+  peakTripsPerHour: 11500, // ~700 mixed vehicles at the AM peak, no gridlock removals (see traffic.test.ts)
   beta: 0.02,
 };
 
@@ -58,10 +62,14 @@ export const FIXED_DT = 0.1; // s; IDM step
 
 // A route between entrances. `route` starts with the link the trip leaves from; for a car on
 // the road that is its current link (plus the next one if it is committed to that junction).
+// A site can be left or reached from either lane of its street; `departLeft` and `arriveLeft`
+// mean the car crosses the other lane to do it.
 export interface TripPlan {
   route: number[];
   departPos: number; // m along route[0]
   arrivePos: number; // m along the last link
+  departLeft: boolean;
+  arriveLeft: boolean;
   eta: number; // s on live link costs; Infinity if unreachable
 }
 
@@ -104,10 +112,15 @@ export class Simulation {
     this.probeTo = nearestJunction(this.grid.net, this.grid.net.nodes[this.grid.nodeAt(0, this.grid.opts.cols - 2)].x, mid);
     this.zones = generateZones(this.grid, rng);
     this.cost = zoneCostMatrix(this.grid.net, this.zones);
-    this.trips = new TripGenerator(this.zones, this.cost, rng, {
-      peakTripsPerHour: config.peakTripsPerHour,
-      beta: config.beta,
-    });
+    this.layout = buildCity(this.grid, this.zones, config.seed ^ 0x5173);
+    this.sites = this.layout.sites;
+    this.trips = new TripGenerator(
+      this.zones,
+      this.cost,
+      rng,
+      { peakTripsPerHour: config.peakTripsPerHour, beta: config.beta },
+      this.sites,
+    );
     // Downtown (the commercial centre and the blocks around it) has signals at every junction.
     const { rows, cols, suburbRing: ring } = this.grid.opts;
     const downtown = (node: number) => {
@@ -127,8 +140,6 @@ export class Simulation {
     this.produced = new Int32Array(this.zones.length);
     this.attracted = new Int32Array(this.zones.length);
     this.district = blockDistricts(this.grid);
-    this.layout = buildCity(this.grid, this.zones, config.seed ^ 0x5173);
-    this.sites = this.layout.sites;
   }
 
   step(dt: number = FIXED_DT): Trip[] {
@@ -138,7 +149,7 @@ export class Simulation {
       this.attracted[trip.destZone]++;
       this.recent.push(trip.departTime);
       this.recentPairs.push(this.district[trip.originZone] * DISTRICTS.length + this.district[trip.destZone]);
-      const decision = this.assignTrip(trip, 'generated');
+      const decision = trip.originSite !== undefined ? this.assignSiteTrip(trip) : this.assignTrip(trip, 'generated');
       this.routeLog.unshift(decision);
       if (!this.proofRoute && this.isLongerFaster(decision)) this.proofRoute = decision;
       if (this.routeLog.length > 20) this.routeLog.pop();
@@ -167,56 +178,61 @@ export class Simulation {
     return this.traffic.removals;
   }
 
-  // Route from a site, or from a car where it is now, to a site's entrance, on live link costs.
-  planTrip(from: Site | Vehicle, to: Site): TripPlan {
+  // Route from a site, or from a car where it is now, to a site's entrance, on live link costs
+  // (or on `router`'s). Tries both lanes at each end and keeps the cheapest, counting a wait for
+  // each left turn across the other lane.
+  planTrip(from: Site | Vehicle, to: Site, router: Router = this.router): TripPlan {
     const net = this.grid.net;
-    const lanes = this.traffic.lanes;
-    let start: number[];
-    let departPos: number;
+    const len = (id: number) => this.traffic.lanes[id].geom.length;
+    const cost = (id: number) => router.pathCost([id]);
+    const leftWait = (id: number, left: boolean) =>
+      !left || router !== this.router ? 0 : LEFT_TURN_S * (net.links[id].arterial ? ARTERIAL_LEFT_FACTOR : 1);
+    type Start = { prefix: number[]; pos: number; left: boolean };
+    let starts: Start[];
     if ('entrance' in from) {
-      start = [from.entrance.link];
-      departPos = from.entrance.pos;
+      starts = siteAccess(net, from.entrance, len).out.map((a) => ({ prefix: [a.link], pos: a.pos, left: a.left }));
     } else {
       const here = from.route[from.ri];
-      start = from.conn || from.granted ? [here, from.route[from.ri + 1]] : [here];
-      departPos = from.conn ? lanes[here].geom.length : from.pos;
+      const committed = from.conn || from.granted;
+      starts = [{ prefix: committed ? [here, from.route[from.ri + 1]] : [here], pos: from.conn ? len(here) : from.pos, left: false }];
     }
-    const target = to.entrance.link;
-    const last = start[start.length - 1];
-    const posOnLast = start.length === 1 ? departPos : 0;
-    const reverse = (id: number) => {
-      const l = net.links[id];
-      return net.outLinks[l.to].find((o) => net.links[o].to === l.from);
-    };
-    let route: number[] | null = null;
-    if (last === target && to.entrance.pos > posOnLast + 5) route = start;
-    else {
-      // Links between `last` and `target`, with no U-turn at either end. When both ends meet at
-      // one junction but only by a U-turn, go round the block first.
-      const skip = [reverse(last), reverse(target)].filter((id): id is number => id !== undefined);
-      const a = net.links[last].to;
-      const b = net.links[target].from;
-      let best: { links: number[]; cost: number } = { links: [], cost: Infinity };
-      if (a !== b) best = this.router.routeWithCost(a, b, skip);
-      else if (target !== reverse(last)) best = { links: [], cost: 0 };
-      else {
-        for (const o of net.outLinks[a]) {
-          if (skip.includes(o)) continue;
-          const back = reverse(o);
-          const rest = this.router.routeWithCost(net.links[o].to, b, back === undefined ? skip : [...skip, back]);
-          const cost = this.router.pathCost([o]) + rest.cost;
-          if (cost < best.cost) best = { links: [o, ...rest.links], cost };
-        }
+    const ends = siteAccess(net, to.entrance, len).in;
+    const lastOf = (s: Start) => s.prefix[s.prefix.length - 1];
+    // What is left to drive of a start's links, and the part of an end's link driven to arrive.
+    const startCost = (s: Start) =>
+      router.pathCost(s.prefix) - cost(s.prefix[0]) * Math.min(1, s.pos / len(s.prefix[0])) + leftWait(s.prefix[0], s.left);
+    const endCost = (e: Access) => cost(e.link) * (e.pos / len(e.link)) + leftWait(e.link, e.left);
+
+    let best: { route: number[]; start: Start; end: Access; eta: number } | null = null;
+    // Arriving further along the lane it leaves on.
+    for (const s of starts) {
+      const posOnLast = s.prefix.length === 1 ? s.pos : 0;
+      for (const e of ends) {
+        if (e.link !== lastOf(s) || e.pos <= posOnLast + 5) continue;
+        const eta = startCost(s) - cost(e.link) * (1 - e.pos / len(e.link)) + leftWait(e.link, e.left);
+        if (!best || eta < best.eta) best = { route: s.prefix, start: s, end: e, eta };
       }
-      if (best.cost < Infinity) route = [...start, ...best.links, target];
     }
-    if (!route) return { route: [], departPos, arrivePos: to.entrance.pos, eta: Infinity };
-    const len = (id: number) => lanes[id].geom.length;
-    const eta =
-      this.router.pathCost(route) -
-      this.router.pathCost([route[0]]) * Math.min(1, departPos / len(route[0])) -
-      this.router.pathCost([target]) * (1 - to.entrance.pos / len(target));
-    return { route, departPos, arrivePos: to.entrance.pos, eta: Math.max(0, eta) };
+    const found = router.routeLinks(
+      starts.map((s) => ({ link: lastOf(s), cost: startCost(s) })),
+      ends.map((e) => ({ link: e.link, cost: endCost(e) })),
+    );
+    if (found.links.length > 0 && (!best || found.cost < best.eta)) {
+      const s = starts.find((x) => lastOf(x) === found.links[0])!;
+      const e = ends.find((x) => x.link === found.links[found.links.length - 1])!;
+      best = { route: [...s.prefix.slice(0, -1), ...found.links], start: s, end: e, eta: found.cost };
+    }
+    if (!best) {
+      return { route: [], departPos: starts[0]?.pos ?? 0, arrivePos: to.entrance.pos, departLeft: false, arriveLeft: false, eta: Infinity };
+    }
+    return {
+      route: best.route,
+      departPos: best.start.pos,
+      arrivePos: best.end.pos,
+      departLeft: best.start.left,
+      arriveLeft: best.end.left,
+      eta: Math.max(0, best.eta),
+    };
   }
 
   // Send an emergency unit from a site (its station, or a call it just finished) or from where it
@@ -226,7 +242,7 @@ export class Simulation {
     if (plan.route.length === 0) return null;
     const siren = opts.siren ?? true;
     if (!('entrance' in from)) {
-      if (!this.traffic.redirect(from.trip.id, plan.route, plan.arrivePos)) return null;
+      if (!this.traffic.redirect(from.trip.id, plan.route, plan.arrivePos, plan.arriveLeft)) return null;
       from.trip.destZone = to.zone;
       this.traffic.setSiren(from.trip.id, siren);
       return from.trip;
@@ -242,6 +258,8 @@ export class Simulation {
       kind,
       departPos: plan.departPos,
       arrivePos: plan.arrivePos,
+      departLeft: plan.departLeft,
+      arriveLeft: plan.arriveLeft,
     };
     this.traffic.enqueue(trip, plan.route, { siren });
     return trip;
@@ -342,11 +360,35 @@ export class Simulation {
   private assignTrip(trip: Trip, kind: 'generated' | 'probe'): RouteDecision {
     const chosen = this.router.routeWithCost(trip.originNode, trip.destNode);
     const shorter = this.distanceRouter.routeWithCost(trip.originNode, trip.destNode);
+    return this.decision(trip, chosen.links, shorter.links, kind);
+  }
+
+  // A generated trip between two sites' entrances; fills in where it leaves and arrives.
+  private assignSiteTrip(trip: Trip): RouteDecision {
+    const from = this.sites[trip.originSite!];
+    const to = this.sites[trip.destSite!];
+    const plan = this.planTrip(from, to);
+    const links = this.grid.net.links;
+    trip.departPos = plan.departPos;
+    trip.arrivePos = plan.arrivePos;
+    trip.departLeft = plan.departLeft;
+    trip.arriveLeft = plan.arriveLeft;
+    if (plan.route.length > 0) {
+      trip.originNode = links[plan.route[0]].from;
+      trip.destNode = links[plan.route[plan.route.length - 1]].to;
+    }
+    const shorter = this.planTrip(from, to, this.distanceRouter);
+    return this.decision(trip, plan.route, shorter.route, 'generated');
+  }
+
+  private decision(trip: Trip, chosen: number[], shorter: number[], kind: 'generated' | 'probe'): RouteDecision {
     return {
-      tripId: trip.id, from: trip.originNode, to: trip.destNode, chosen, shorter,
-      chosenDistance: this.router.pathDistance(chosen.links),
-      shorterDistance: this.distanceRouter.pathDistance(shorter.links),
-      shorterLiveCost: this.router.pathCost(shorter.links), time: this.time, kind,
+      tripId: trip.id, from: trip.originNode, to: trip.destNode,
+      chosen: { links: chosen, cost: this.router.pathCost(chosen) },
+      shorter: { links: shorter, cost: this.distanceRouter.pathCost(shorter) },
+      chosenDistance: this.router.pathDistance(chosen),
+      shorterDistance: this.distanceRouter.pathDistance(shorter),
+      shorterLiveCost: this.router.pathCost(shorter), time: this.time, kind,
     };
   }
 

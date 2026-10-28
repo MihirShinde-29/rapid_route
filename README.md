@@ -25,13 +25,13 @@ TypeScript + Vite + Three.js. The sim core has no DOM access and runs headless i
 cd sim
 npm install
 npm run dev     # open the printed localhost URL
-npm test        # 34 tests: demand, car-following, junctions, signals, routing, incidents, sites and units
+npm test        # 44 tests: demand, car-following, junctions, signals, routing, incidents, sites, trips, units and dispatch
 npm run build   # type-check and build a static site into sim/dist
 ```
 Needs Node 20+. Vite is pinned to 6 / Vitest to 3 because newer releases need a newer Node.
 
 Open `http://localhost:5173/?start=8` to open at 08:00 with the morning peak already loaded.
-Add `&demand=1.2` to scale peak demand for a stress test (1 is the stable setting, 13,000 trips/h).
+Add `&demand=1.2` to scale peak demand for a stress test (1 is the stable setting, 11,500 trips/h).
 
 The live build at the link above is redeployed by GitHub Actions on every push to `main` (`.github/workflows/pages.yml`).
 

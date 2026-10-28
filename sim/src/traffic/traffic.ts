@@ -9,6 +9,7 @@ export const IDM = { a: 1.5, b: 2.0, T: 1.2, s0: 2.0, delta: 4, bMax: 9 };
 export const VEHICLE_LENGTH = 4.5; // m, for trips without a vehicle type
 const TURN_SPEED = 7; // m/s through a turning connector
 const STARVE_S = 8; // after this wait an approach overrides arterial priority
+const SPILLBACK_S = 75; // at a signal, a car kept waiting this long by a full exit gets the next space in it
 const STOP_LINE_ZONE = 4; // m; a car this close to the line at walking pace counts as stopped
 // Driveways are mid-block: cars join their first street and leave their last one part way
 // along it, beside the buildings, not at the junctions.
@@ -17,6 +18,14 @@ export const ARRIVE_FRAC = 0.65;
 const ARRIVE_SPEED = 5; // m/s, slowing to turn into the driveway
 const TRAVEL_TIME_ALPHA = 0.2; // smoothing for measured link travel times
 const GRIDLOCK_S = 180; // a car stopped this long is treated as gridlocked, removed and counted
+// Gap acceptance for crossing the other lane into or out of a driveway: no car on that lane may
+// reach the crossing point within this many seconds.
+const LEFT_IN_GAP_S = 4.5;
+const LEFT_OUT_GAP_S = 5.5;
+const LEFT_IN_DECIDE_M = 12; // a car turning left in looks for its gap from this far out
+// After waiting a while drivers take a shorter gap, down to this, losing a second every 20 s.
+const LEFT_MIN_GAP_S = 2.5;
+const LEFT_IMPATIENCE = 1 / 20;
 
 export interface Vehicle {
   id: number;
@@ -35,6 +44,8 @@ export interface Vehicle {
   len: number; // m, bumper to bumper
   accel: number; // IDM maximum acceleration
   arrivePos: number; // m along the last lane where it turns into its destination driveway
+  arriveLeft: boolean; // turns in across the other lane, so it waits for a gap there
+  turnIn: boolean; // has its gap and is turning in
   siren: boolean; // emergency vehicle on a call (yielding and pre-emption key off this)
 }
 
@@ -69,6 +80,7 @@ export class TrafficModel {
   private closedLinks = new Set<number>();
   private nextId = 0;
   private now = 0;
+  private connsInto: Connector[][]; // by out-link
   private sirens = new Set<number>(); // trip ids, so the flag also covers trips not yet on the road
   private byTrip = new Map<number, Vehicle>();
   // Timed signals at arterial junctions and all-way stops at local ones; null keeps plain give-way
@@ -100,6 +112,7 @@ export class TrafficModel {
       travelTime: link.length / link.speedLimit,
     }));
     this.boxes = net.nodes.map(() => ({ holders: new Set<Vehicle>() }));
+    this.connsInto = net.links.map(() => []);
     for (const inLane of this.lanes) {
       for (const outId of net.outLinks[inLane.link.to]) {
         const out = this.lanes[outId];
@@ -107,6 +120,7 @@ export class TrafficModel {
         const c = new Connector(inLane.link.id, outId, inLane.geom, out.geom);
         this.connectors.set(this.key(inLane.link.id, outId), c);
         this.onConnector.set(c, []);
+        this.connsInto[outId].push(c);
       }
     }
     this.stopApproach = new Uint8Array(net.links.length);
@@ -155,12 +169,15 @@ export class TrafficModel {
 
   // Send a car already on the road somewhere else. `route` starts with its current link (and its
   // next one if it is committed to that junction); see Simulation.planTrip.
-  redirect(tripId: number, route: number[], arrivePos: number): boolean {
+  redirect(tripId: number, route: number[], arrivePos: number, arriveLeft = false): boolean {
     const veh = this.byTrip.get(tripId);
     if (!veh || route[0] !== veh.route[veh.ri]) return false;
     if ((veh.conn || veh.granted) && route[1] !== veh.route[veh.ri + 1]) return false;
     veh.route = [...veh.route.slice(0, veh.ri), ...route];
     veh.arrivePos = arrivePos;
+    veh.arriveLeft = arriveLeft;
+    veh.turnIn = false;
+    veh.trip.arriveLeft = arriveLeft;
     veh.trip.destNode = this.net.links[route[route.length - 1]].to;
     veh.trip.arrivePos = arrivePos;
     return true;
@@ -295,7 +312,10 @@ export class TrafficModel {
       const behindOk = follow
         ? pos - spec.length - follow.pos >= IDM.s0 + 3 + 1.5 * follow.v * IDM.T
         : pos - spec.length >= lane.reserved + IDM.s0;
-      if (!aheadOk || !behindOk) {
+      // Pulling out to the left also needs a gap on the near lane, which it crosses first.
+      const gap = Math.max(LEFT_MIN_GAP_S, LEFT_OUT_GAP_S - (t - item.trip.departTime) * LEFT_IMPATIENCE);
+      const crossOk = !item.trip.departLeft || this.crossingClear(this.net.reverse(lane.link.id)!, lane.geom.length - pos, gap);
+      if (!aheadOk || !behindOk || !crossOk) {
         still.push(item);
         continue;
       }
@@ -316,6 +336,8 @@ export class TrafficModel {
         len: spec.length,
         accel: spec.accel,
         arrivePos: item.trip.arrivePos ?? ARRIVE_FRAC * this.lanes[item.route[item.route.length - 1]].geom.length,
+        arriveLeft: item.trip.arriveLeft ?? false,
+        turnIn: false,
         siren: this.sirens.has(item.trip.id),
       };
       vs.splice(k, 0, v);
@@ -412,7 +434,18 @@ export class TrafficModel {
       }
     }
     go.sort((a, b) => a.requestSince - b.requestSince);
+    // When a street ahead stays full, the approaches with a green would otherwise take every space
+    // that frees up in it. Keep it for the car that has waited longest, once that is over a cycle.
+    const held = new Map<number, Vehicle>();
+    for (const f of reqs) {
+      if (t - f.requestSince < SPILLBACK_S) continue;
+      const out = f.route[f.ri + 1];
+      const h = held.get(out);
+      if (!h || f.requestSince < h.requestSince) held.set(out, f);
+    }
     const grant = (f: Vehicle) => {
+      const keeper = held.get(f.route[f.ri + 1]);
+      if (keeper && keeper !== f) return;
       const m = this.movement(f);
       for (const h of box.holders) if (!compatible(m, this.movement(h))) return;
       if (!this.exitHasRoom(f)) return;
@@ -460,6 +493,10 @@ export class TrafficModel {
           // Slow down to turn into the destination driveway.
           const toDrive = Math.max(0, veh.arrivePos - veh.pos);
           v0 = Math.min(v0, Math.sqrt(ARRIVE_SPEED ** 2 + 2 * IDM.b * toDrive));
+          if (veh.arriveLeft && !veh.turnIn && toDrive < LEFT_IN_DECIDE_M) {
+            const gap = Math.max(LEFT_MIN_GAP_S, LEFT_IN_GAP_S - veh.stoppedFor * LEFT_IMPATIENCE);
+            veh.turnIn = this.crossingClear(this.net.reverse(lane.link.id)!, lane.geom.length - veh.arrivePos, gap + toDrive / Math.max(veh.v, 2));
+          }
         }
         if (k > 0) {
           const lead = vs[k - 1];
@@ -480,6 +517,11 @@ export class TrafficModel {
               if (g < gap) [gap, dv] = [g, veh.v - le.v];
             }
           }
+        }
+        if (veh.ri === veh.route.length - 1 && veh.arriveLeft && !veh.turnIn) {
+          // Waits beside its driveway for a gap in the oncoming lane; the cars behind queue.
+          const g = veh.arrivePos - veh.pos + 1;
+          if (g < gap) [gap, dv] = [g, veh.v];
         }
         veh.acc = this.idm(veh.v, v0, gap, dv, veh.accel);
       }
@@ -507,6 +549,27 @@ export class TrafficModel {
         veh.acc = this.idm(veh.v, v0, gap, dv, veh.accel);
       }
     }
+  }
+
+  // True if no car on lane `laneId` is over the point `at` (m along it) or reaches it within
+  // `window` seconds: the gap a car needs to cross that lane into or out of a driveway. A car
+  // waiting there to turn left across our lane is no obstacle (both turn), and a queue that has
+  // stopped across the driveway lets the car through.
+  private crossingClear(laneId: number, at: number, window: number): boolean {
+    const eta = (dist: number, v: number) => dist / Math.max(v, 2);
+    for (const o of this.lanes[laneId].vehicles) {
+      if (o.pos - o.len - 2 > at) continue; // already past
+      if (o.pos + 2 >= at) {
+        if (o.arriveLeft && !o.turnIn && o.ri === o.route.length - 1) continue;
+        if (o.v < 0.5 && o.stoppedFor > 2) continue;
+        return false;
+      }
+      if (eta(at - o.pos, o.v) < window) return false;
+    }
+    for (const c of this.connsInto[laneId]) {
+      for (const o of this.onConnector.get(c)!) if (eta(c.length - o.pos + at, o.v) < window) return false;
+    }
+    return true;
   }
 
   // Gap from a granted front car to whatever is ahead through its connector.
@@ -561,7 +624,7 @@ export class TrafficModel {
       // Arrivals turn off into their driveway part way along the last street.
       for (let k = vs.length - 1; k >= 0; k--) {
         const veh = vs[k];
-        if (veh.ri !== veh.route.length - 1 || veh.pos < veh.arrivePos) continue;
+        if (veh.ri !== veh.route.length - 1 || veh.pos < veh.arrivePos || (veh.arriveLeft && !veh.turnIn)) continue;
         vs.splice(k, 1);
         this.finish(veh, t);
       }

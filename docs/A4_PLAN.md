@@ -147,7 +147,7 @@ class DispatchCenter {
   readonly calls: Call[]; readonly units: Unit[]; readonly score: Score;
   readonly ended: null | 'win' | 'loss' | 'ended';
   readonly stations: Station[];
-  moveStation(stationId: number, node: number): void;  // pre-shift station placement (Mihir's map UI calls it)
+  // (no moveStation needed: station placement is sim.moveStation, below, before the centre is built)
   // Events since the last step, for alerts, sounds and the camera:
   // 'call' | 'assigned' | 'arrived' | 'resolved' | 'missed' | 'ended', each with callId / unitId.
   readonly events: DispatchEvent[];
@@ -177,6 +177,11 @@ sim.coverageTimes(sources: number[]): Float64Array;    // multi-source Dijkstra 
 sim.addIncident(kind: 'accident' | 'lane' | 'closure', link: number, at?: number, to?: number): Incident;
 sim.incidentPoint(inc: Incident): { x: number; y: number };  // where it is, e.g. for the crash call's site
 sim.removeIncident(id: number): void;                        // set inc.until = null to stop it clearing itself
+
+// Station placement (Mihir, Oct 28), before the shift: `to` becomes the station, `from` an ordinary
+// building. DispatchCenter reads the station sites when it is built, so it needs no change.
+sim.moveStation(from: Site, to: Site): boolean;
+sim.canHostStation(site: Site): boolean;
 ```
 
 To send a unit, dispatch calls `sim.sendUnit(kind, station site, call site)` (or with the unit's vehicle if it is already driving), and `sim.planTrip` for ETAs without sending. Back to base: `sim.sendUnit(kind, call site, station site, { siren: false })`. Arrival is detected through `sim.arrivals`. Stations come from `sim.sites` (hospital, fire_station, police_station).
@@ -203,11 +208,11 @@ Mihir's side is now about twice a normal week. It fits only because most of that
 5. lane closures (accidents on a lane stay);
 6. left turns into and out of entrances (fall back to right-in, right-out).
 
-Status (Oct 28): item 1, station placement, is cut and moves to week 10; stations are real buildings now, so moving one needs `moveStation` on the dispatch side and redrawing the building. Everything else on Mihir's list is in.
+Status (Oct 28): nothing on Mihir's list was cut. Station placement went in too: the sim swaps the chosen site's kind with the station's before the shift, so the dispatch side needed no `moveStation`.
 
 The core loop, yielding, sites with entrance-to-entrance trips, sound, alerts and shortcuts stay.
 
-## 6. Schedule to the final (this table goes in the A4 PDF)
+## 6. Schedule to the final (the current version for the PDF is in `docs/A4_REPORT_MIHIR.md`)
 
 Semester weeks counted from Aug 31 (week 9 = Oct 26). Assets are procedural (built in code); we are not using AI-generated assets.
 
@@ -233,10 +238,7 @@ Fixed
 - OD panel was unreadable (572 × 572 zone pairs drawn in about 260 px) and only redrew when the time period changed.
 - MVP checklist still said "target 150+ cars".
 
-Known issues
-- Lane closure is a speed cap; the model has one lane per direction, so no lane is physically closed.
-- A road closure still admits trips that start or end on that street.
-- Rerouting happens when an incident is placed; cars do not re-check their route afterwards.
+Known issues: see `docs/A4_REPORT_MIHIR.md` (traffic and map side, current as of Oct 28).
 
 ## 8. Risks
 

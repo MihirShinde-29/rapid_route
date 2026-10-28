@@ -20,6 +20,11 @@ export class StaticBatch {
     return start;
   }
 
+  // Vertices added so far: where the next part will start.
+  get size(): number {
+    return this.vertices;
+  }
+
   geometry(): THREE.BufferGeometry {
     const merged = mergeGeometries(this.parts)!;
     for (const g of this.parts) g.dispose();

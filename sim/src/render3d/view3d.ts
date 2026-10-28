@@ -247,8 +247,19 @@ export class View3D {
   private incidentKey = '';
   private beacons: THREE.MeshBasicMaterial[] = [];
   private lanePreview: THREE.Mesh | null = null;
+  private siteHighlight: THREE.Mesh | null = null;
   private sirenPhase = -1; // which siren lamps are lit this frame: 0 red, 1 blue, -1 neither
   private taken: Area[] = []; // what the block being drawn already covers, for the fill pass
+  // Where each block's buildings and each site's entrance sit in the merged city meshes, so a
+  // moved station can be redrawn without rebuilding the city (see redrawSites).
+  private flatMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95 });
+  private solidMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.75 });
+  private flatMesh!: THREE.Mesh;
+  private solidMesh!: THREE.Mesh;
+  private facadesMesh!: THREE.Mesh;
+  private blockRanges = new Map<number, [number, number][]>();
+  private siteRanges = new Map<number, [number, number][]>();
+  private redrawn = new Map<string, THREE.Mesh[]>(); // replacement meshes, by block or site
   private ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   onFollowEnd: (() => void) | null = null; // the followed vehicle reached its destination
   showDesireLines = true;
@@ -313,8 +324,9 @@ export class View3D {
     this.buildStreetLamps();
     this.buildSignals();
     this.buildTags();
-    this.scene.add(this.flat.build(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95 }), false, true));
-    this.scene.add(this.solid.build(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.75 }), true, true));
+    this.flatMesh = this.flat.build(this.flatMat, false, true);
+    this.solidMesh = this.solid.build(this.solidMat, true, true);
+    this.scene.add(this.flatMesh, this.solidMesh);
     const windows = windowTextures(this.renderer.capabilities.getMaxAnisotropy());
     this.facadeMat = new THREE.MeshStandardMaterial({
       vertexColors: true,
@@ -325,7 +337,8 @@ export class View3D {
       roughness: 0.6,
       metalness: 0.1,
     });
-    this.scene.add(this.facades.build(this.facadeMat, true, true));
+    this.facadesMesh = this.facades.build(this.facadeMat, true, true);
+    this.scene.add(this.facadesMesh);
     this.buildArcPool();
     this.buildCars();
     this.routeHighlight = new THREE.LineSegments(
@@ -537,7 +550,9 @@ export class View3D {
       const plate = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
       [quad[0], quad[1], quad[3], quad[2]].forEach((q, i) => plate.attributes.position.setXYZ(i, q.x, q.y, q.z));
       this.flat.add(plate, plateColor, 0, 0, 0);
+      const start = this.ranges();
       this.drawBlock(plan, z, tint, rng);
+      this.blockRanges.set(z.id, this.rangesSince(start));
     }
     for (const sb of layout.superblocks) {
       if (sb.kind === 'park') this.addPark(this.area(sb.rect), rng, true);
@@ -549,6 +564,66 @@ export class View3D {
   // A rectangle in sim metres as world units.
   private area(r: CityRect): Area {
     return { x0: this.wx(r.x0), x1: this.wx(r.x1), z0: this.wz(r.y0), z1: this.wz(r.y1) };
+  }
+
+  // Vertex counts of the three city batches, and the ranges added since such a count.
+  private ranges(): [number, number, number] {
+    return [this.flat.size, this.solid.size, this.facades.size];
+  }
+
+  private rangesSince(start: [number, number, number]): [number, number][] {
+    const now = this.ranges();
+    return start.map((s, k) => [s, now[k]]);
+  }
+
+  // Redraw the blocks and entrances of these sites after their kinds changed (a station moved):
+  // their old geometry in the merged meshes is collapsed out of sight and drawn again in meshes
+  // of their own.
+  redrawSites(sites: Site[]): void {
+    const meshes = [this.flatMesh, this.solidMesh, this.facadesMesh];
+    const hide = (ranges: [number, number][] | undefined) => {
+      ranges?.forEach(([a, b], k) => {
+        const pos = meshes[k].geometry.attributes.position as THREE.BufferAttribute;
+        for (let v = a; v < b; v++) pos.setXYZ(v, 0, -50, 0);
+        pos.needsUpdate = true;
+      });
+    };
+    const redraw = (key: string, draw: () => void) => {
+      for (const m of this.redrawn.get(key) ?? []) {
+        this.scene.remove(m);
+        m.geometry.dispose();
+      }
+      const kept = [this.flat, this.solid, this.facades];
+      this.flat = new StaticBatch();
+      this.solid = new StaticBatch();
+      this.facades = new StaticBatch();
+      draw();
+      const made: THREE.Mesh[] = [];
+      if (this.flat.size > 0) made.push(this.flat.build(this.flatMat, false, true));
+      if (this.solid.size > 0) made.push(this.solid.build(this.solidMat, true, true));
+      if (this.facades.size > 0) made.push(this.facades.build(this.facadeMat, true, true));
+      [this.flat, this.solid, this.facades] = kept;
+      for (const m of made) this.scene.add(m);
+      this.redrawn.set(key, made);
+    };
+    const layout = this.sim.layout;
+    for (const block of new Set(sites.map((s) => s.zone))) {
+      hide(this.blockRanges.get(block));
+      this.blockRanges.delete(block);
+      const z = this.sim.zones[block];
+      redraw(`block ${block}`, () => this.drawBlock(layout.blocks[block], z, new THREE.Color(ZONE_HEX[z.type]), mulberry32(this.sim.config.seed + block)));
+    }
+    for (const site of sites) {
+      hide(this.siteRanges.get(site.id));
+      this.siteRanges.delete(site.id);
+      redraw(`site ${site.id}`, () => this.drawEntrance(site));
+    }
+  }
+
+  // A site's lot in world units, with its centre and smaller side.
+  private lotArea(site: Site) {
+    const q = this.area(site.lot);
+    return { ...q, x: (q.x0 + q.x1) / 2, z: (q.z0 + q.z1) / 2, cell: Math.min(q.x1 - q.x0, q.z1 - q.z0) };
   }
 
   // Note a footprint (world units, centred) as covered in the block being drawn.
@@ -611,14 +686,16 @@ export class View3D {
       const grey = 0.35 + (0.45 + 0.4 * rng()) * 0.25;
       return new THREE.Color(grey * 0.9, grey * 0.95, grey * 1.05).lerp(tint, 0.18);
     };
-    const sites = plan.sites.map((id) => this.sim.sites[id]);
+    const all = plan.sites.map((id) => this.sim.sites[id]);
     // Keep the ground round each door clear (driveway, canopy, dock or gate).
     this.taken = [];
-    for (const site of sites) this.take(this.wx(site.door.x), this.wz(site.door.y), 10 * WORLD_PER_M, 10 * WORLD_PER_M);
-    const lot = (site: Site) => {
-      const q = this.area(site.lot);
-      return { ...q, x: (q.x0 + q.x1) / 2, z: (q.z0 + q.z1) / 2, cell: Math.min(q.x1 - q.x0, q.z1 - q.z0) };
-    };
+    for (const site of all) this.take(this.wx(site.door.x), this.wz(site.door.y), 10 * WORLD_PER_M, 10 * WORLD_PER_M);
+    // Stations are drawn by kind whatever the block's style (one may have moved here); the
+    // style draws the rest.
+    const isStation = (s: Site) => s.kind === 'hospital' || s.kind === 'fire_station' || s.kind === 'police_station';
+    for (const site of all) if (isStation(site)) this.drawStation(site, rng);
+    const sites = all.filter((s) => !isStation(s));
+    const lot = (site: Site) => this.lotArea(site);
     switch (plan.style) {
       case 'tower_plaza':
       case 'towers':
@@ -687,7 +764,11 @@ export class View3D {
         this.addPark(r, rng, false);
         break;
       case 'station':
-        for (const site of sites) this.drawStation(site, rng);
+        // A station moved away: its building stays, put to other use.
+        for (const site of sites) {
+          const q = lot(site);
+          this.addBlock((q.x1 - q.x0) * 0.8, 2 * FLOOR, (q.z1 - q.z0) * 0.8, q.x, 0, q.z, color(), rng);
+        }
         break;
     }
     // A separate stream, so the fill does not change the buildings of later blocks.
@@ -699,70 +780,76 @@ export class View3D {
   // its door, and a marker by kind (lobby canopy, loading dock, park gate, car park barrier,
   // station doors). Houses draw the rest of their driveway themselves.
   private buildEntrances(): void {
+    for (const site of this.sim.sites) {
+      const start = this.ranges();
+      this.drawEntrance(site);
+      this.siteRanges.set(site.id, this.rangesSince(start));
+    }
+  }
+
+  private drawEntrance(site: Site): void {
     const net = this.sim.grid.net;
     const M = WORLD_PER_M;
     const concrete = new THREE.Color(0x8a8d91);
     const kerb = new THREE.Color(0xb4b7ba);
     const path = new THREE.Color(0xa59b84);
     const dark = new THREE.Color(0x39424c);
-    for (const site of this.sim.sites) {
-      if (site.kind === 'plaza') continue; // open to the pavement all along
-      const link = net.links[site.entrance.link];
-      const g = this.sim.traffic.lanes[link.id].geom;
-      // Along the street (dx, dy) and across it towards the lot (nx, ny), in metres.
-      const nx = -g.dy;
-      const ny = g.dx;
-      const along = (site.door.x - g.x0) * g.dx + (site.door.y - g.y0) * g.dy;
-      const deep = (site.door.x - g.x0) * nx + (site.door.y - g.y0) * ny; // lane centre to door
-      const edge = (link.arterial ? 5.7 : 4.65) - LANE_OFFSET; // lane centre to road edge
-      const at = (across: number) => ({ x: this.wx(g.x0 + g.dx * along + nx * across), z: this.wz(g.y0 + g.dy * along + ny * across) });
-      const rot = -Math.atan2(g.dy, g.dx);
-      // A box `w` m along the street, `d` m across it and `h` m high, its near face `from` m
-      // from the lane centre and its middle `off` m along the street from the door.
-      const put = (batch: StaticBatch, w: number, d: number, h: number, from: number, y: number, color: THREE.Color, off = 0) => {
-        const c = at(from + d / 2);
-        batch.add(new THREE.BoxGeometry(w * M, Math.max(h * M, 0.005), d * M), color, c.x + g.dx * off * M, y + (h * M) / 2, c.z + g.dy * off * M, 0, rot);
-      };
-      const isPark = site.kind === 'park';
-      const width = { house: 3, warehouse: 7, parking: 6, mall: 7, hospital: 7, fire_station: 9, police_station: 6 }[site.kind as string] ?? (isPark ? 2.5 : 4);
-      put(this.flat, width + 2, 0.9, 0.01, edge - 0.9, 0.255, kerb); // dropped kerb on the road edge
-      if (deep > edge) put(this.flat, width, deep - edge, 0.01, edge, 0.045, isPark ? path : concrete);
-      const lotDepth = site.front === 'n' || site.front === 's' ? site.lot.y1 - site.lot.y0 : site.lot.x1 - site.lot.x0;
-      switch (site.kind) {
-        case 'tower':
-        case 'apartment':
-        case 'shop':
-          put(this.solid, 5, 2.5, 0.25, deep, 3.2 * M, dark); // lobby canopy
-          for (const s of [-2.2, 2.2]) put(this.solid, 0.2, 0.2, 3.2, deep + 2.2, 0, dark, s);
-          break;
-        case 'warehouse':
-          put(this.solid, 8, 2, 1.2, deep, 0, new THREE.Color(0x6e6c68)); // loading dock
-          for (const s of [-3.3, 3.3]) put(this.solid, 0.3, 0.3, 0.5, deep - 0.3, 0, new THREE.Color(0xd8b23a), s); // bollards
-          break;
-        case 'park':
-          for (const s of [-1.8, 1.8]) put(this.solid, 0.35, 0.35, 2, deep, 0, new THREE.Color(0x2c3a2e), s); // gate posts
-          put(this.solid, 3.95, 0.15, 0.15, deep + 0.1, 2 * M, new THREE.Color(0x2c3a2e));
-          break;
-        case 'parking':
-        case 'mall':
-          put(this.solid, 0.3, 0.3, 1.1, deep + 0.5, 0, dark, -width / 2 - 0.3); // barrier post and arm
-          put(this.solid, width, 0.12, 0.12, deep + 0.6, 1 * M, new THREE.Color(0xd0d0d0));
-          for (let k = 0; k < 3; k++) put(this.solid, 0.8, 0.13, 0.13, deep + 0.6, 1.01 * M, new THREE.Color(0xc82828), -width / 2 + 1 + k * 2.2);
-          break;
-        case 'hospital':
-        case 'police_station':
-        case 'fire_station': {
-          // Doors on the building's street face (stations fill 80% of their lot, centred).
-          const face = deep + lotDepth * 0.1;
-          if (site.kind === 'fire_station') {
-            for (const s of [-2.3, 2.3]) put(this.solid, 3.8, 0.2, 3.6, face - 0.2, 0, new THREE.Color(0xd4d4d0), s); // engine bay doors
-          } else {
-            const tone = site.kind === 'hospital' ? new THREE.Color(0xd8262a) : new THREE.Color(0x2a4a8a);
-            put(this.solid, 6, 3, 0.3, face - 3, 3 * M, tone); // canopy over the doors
-            put(this.solid, 3, 0.2, 2.6, face - 0.2, 0, new THREE.Color(0x2a3440)); // glass doors
-          }
-          break;
+    if (site.kind === 'plaza') return; // open to the pavement all along
+    const link = net.links[site.entrance.link];
+    const g = this.sim.traffic.lanes[link.id].geom;
+    // Along the street (dx, dy) and across it towards the lot (nx, ny), in metres.
+    const nx = -g.dy;
+    const ny = g.dx;
+    const along = (site.door.x - g.x0) * g.dx + (site.door.y - g.y0) * g.dy;
+    const deep = (site.door.x - g.x0) * nx + (site.door.y - g.y0) * ny; // lane centre to door
+    const edge = (link.arterial ? 5.7 : 4.65) - LANE_OFFSET; // lane centre to road edge
+    const at = (across: number) => ({ x: this.wx(g.x0 + g.dx * along + nx * across), z: this.wz(g.y0 + g.dy * along + ny * across) });
+    const rot = -Math.atan2(g.dy, g.dx);
+    // A box `w` m along the street, `d` m across it and `h` m high, its near face `from` m
+    // from the lane centre and its middle `off` m along the street from the door.
+    const put = (batch: StaticBatch, w: number, d: number, h: number, from: number, y: number, color: THREE.Color, off = 0) => {
+      const c = at(from + d / 2);
+      batch.add(new THREE.BoxGeometry(w * M, Math.max(h * M, 0.005), d * M), color, c.x + g.dx * off * M, y + (h * M) / 2, c.z + g.dy * off * M, 0, rot);
+    };
+    const isPark = site.kind === 'park';
+    const width = { house: 3, warehouse: 7, parking: 6, mall: 7, hospital: 7, fire_station: 9, police_station: 6 }[site.kind as string] ?? (isPark ? 2.5 : 4);
+    put(this.flat, width + 2, 0.9, 0.01, edge - 0.9, 0.255, kerb); // dropped kerb on the road edge
+    if (deep > edge) put(this.flat, width, deep - edge, 0.01, edge, 0.045, isPark ? path : concrete);
+    const lotDepth = site.front === 'n' || site.front === 's' ? site.lot.y1 - site.lot.y0 : site.lot.x1 - site.lot.x0;
+    switch (site.kind) {
+      case 'tower':
+      case 'apartment':
+      case 'shop':
+        put(this.solid, 5, 2.5, 0.25, deep, 3.2 * M, dark); // lobby canopy
+        for (const s of [-2.2, 2.2]) put(this.solid, 0.2, 0.2, 3.2, deep + 2.2, 0, dark, s);
+        break;
+      case 'warehouse':
+        put(this.solid, 8, 2, 1.2, deep, 0, new THREE.Color(0x6e6c68)); // loading dock
+        for (const s of [-3.3, 3.3]) put(this.solid, 0.3, 0.3, 0.5, deep - 0.3, 0, new THREE.Color(0xd8b23a), s); // bollards
+        break;
+      case 'park':
+        for (const s of [-1.8, 1.8]) put(this.solid, 0.35, 0.35, 2, deep, 0, new THREE.Color(0x2c3a2e), s); // gate posts
+        put(this.solid, 3.95, 0.15, 0.15, deep + 0.1, 2 * M, new THREE.Color(0x2c3a2e));
+        break;
+      case 'parking':
+      case 'mall':
+        put(this.solid, 0.3, 0.3, 1.1, deep + 0.5, 0, dark, -width / 2 - 0.3); // barrier post and arm
+        put(this.solid, width, 0.12, 0.12, deep + 0.6, 1 * M, new THREE.Color(0xd0d0d0));
+        for (let k = 0; k < 3; k++) put(this.solid, 0.8, 0.13, 0.13, deep + 0.6, 1.01 * M, new THREE.Color(0xc82828), -width / 2 + 1 + k * 2.2);
+        break;
+      case 'hospital':
+      case 'police_station':
+      case 'fire_station': {
+        // Doors on the building's street face (stations fill 80% of their lot, centred).
+        const face = deep + lotDepth * 0.1;
+        if (site.kind === 'fire_station') {
+          for (const s of [-2.3, 2.3]) put(this.solid, 3.8, 0.2, 3.6, face - 0.2, 0, new THREE.Color(0xd4d4d0), s); // engine bay doors
+        } else {
+          const tone = site.kind === 'hospital' ? new THREE.Color(0xd8262a) : new THREE.Color(0x2a4a8a);
+          put(this.solid, 6, 3, 0.3, face - 3, 3 * M, tone); // canopy over the doors
+          put(this.solid, 3, 0.2, 2.6, face - 0.2, 0, new THREE.Color(0x2a3440)); // glass doors
         }
+        break;
       }
     }
   }
@@ -1468,6 +1555,43 @@ export class View3D {
       if (d < bestD) [best, bestD] = [{ link: lane.link.id, pos }, d];
     }
     return best;
+  }
+
+  // The site under a screen point that `accept` takes: the one whose lot it is on, or else the
+  // nearest door within reach; null if none.
+  pickSite(clientX: number, clientY: number, accept: (s: Site) => boolean): Site | null {
+    const p = this.groundAt(clientX, clientY);
+    if (!p) return null;
+    let best: Site | null = null;
+    let bestD = 20; // m
+    for (const s of this.sim.sites) {
+      if (!accept(s)) continue;
+      const l = s.lot;
+      if (p.x >= l.x0 && p.x <= l.x1 && p.y >= l.y0 && p.y <= l.y1) return s;
+      const d = Math.hypot(s.door.x - p.x, s.door.y - p.y);
+      if (d < bestD) [best, bestD] = [s, d];
+    }
+    return best;
+  }
+
+  // A translucent box over a site's lot (station placement); null removes it.
+  setSiteHighlight(site: Site | null, ok = true): void {
+    if (this.siteHighlight) {
+      this.scene.remove(this.siteHighlight);
+      this.siteHighlight.geometry.dispose();
+      (this.siteHighlight.material as THREE.Material).dispose();
+      this.siteHighlight = null;
+    }
+    if (!site) return;
+    const q = this.lotArea(site);
+    const h = 4 * FLOOR;
+    const m = new THREE.Mesh(
+      new THREE.BoxGeometry(q.x1 - q.x0, h, q.z1 - q.z0),
+      new THREE.MeshBasicMaterial({ color: ok ? 0x4fd1ff : 0xff5a5a, transparent: true, opacity: 0.3, depthWrite: false }),
+    );
+    m.position.set(q.x, h / 2, q.z);
+    this.siteHighlight = m;
+    this.scene.add(m);
   }
 
   // A strip over part of a lane: the stretch a lane closure being placed would close.

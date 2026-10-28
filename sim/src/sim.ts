@@ -7,7 +7,7 @@ import { TripGenerator, type Trip } from './demand/trips';
 import { Router, type RouteResult } from './routing/router';
 import { TrafficModel, type Vehicle } from './traffic/traffic';
 import { blockDistricts, DISTRICTS } from './demand/districts';
-import { buildCity, siteAccess, type Access, type CityLayout, type Site } from './city/sites';
+import { buildCity, siteAccess, type Access, type BlockStyle, type CityLayout, type Site, type SiteKind } from './city/sites';
 import type { EmergencyKind } from './traffic/vehicleTypes';
 
 // Perturbations the user can place on a street. An accident blocks a short stretch of one lane
@@ -28,6 +28,9 @@ export interface Incident {
   blockage: number | null; // traffic blockage id
 }
 const ACCIDENT_CLEARS_S = 20 * 60;
+export const STATION_KINDS: SiteKind[] = ['hospital', 'fire_station', 'police_station'];
+const HOST_KINDS: SiteKind[] = ['house', 'apartment', 'tower', 'shop', 'warehouse', 'parking'];
+const HOST_STYLES: BlockStyle[] = ['houses', 'apartments', 'perimeter', 'towers', 'tower_plaza', 'parking', 'warehouses', 'station'];
 const ACCIDENT_M = 12; // of lane the wreck blocks
 export const BLOCK_JUNCTION_M = 18; // a blocked stretch keeps this far from each junction
 const ACCIDENT_PASS_SPEED = 4; // m/s past a wreck
@@ -357,6 +360,22 @@ export class Simulation {
     const a = nodes[links[inc.links[0]].from];
     const b = nodes[links[inc.links[0]].to];
     return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  }
+
+  // Station placement (before a shift): the station at `from` moves to the site `to`, which takes
+  // its kind, and `from` becomes an ordinary building of `to`'s old kind. Only buildings and car
+  // parks on blocks drawn lot by lot can take a station. Returns false if the move is not allowed.
+  moveStation(from: Site, to: Site): boolean {
+    if (!STATION_KINDS.includes(from.kind) || !this.canHostStation(to)) return false;
+    const kind = from.kind;
+    from.kind = to.kind;
+    to.kind = kind;
+    return true;
+  }
+
+  canHostStation(site: Site): boolean {
+    const style = this.layout.blocks[site.zone]?.style;
+    return HOST_KINDS.includes(site.kind) && style !== undefined && HOST_STYLES.includes(style);
   }
 
   incidentOn(linkId: number): Incident | undefined {

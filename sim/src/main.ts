@@ -1,4 +1,5 @@
-import { Simulation, FIXED_DT, DEFAULT_CONFIG, BLOCK_JUNCTION_M, type Incident, type IncidentKind } from './sim';
+import { Simulation, FIXED_DT, DEFAULT_CONFIG, BLOCK_JUNCTION_M, STATION_KINDS, type Incident, type IncidentKind } from './sim';
+import type { Site } from './city/sites';
 import { View3D, INCIDENT_HEX } from './render3d/view3d';
 import { OdHeatmap } from './render3d/odHeatmap';
 import { DISTRICTS } from './demand/districts';
@@ -85,6 +86,7 @@ startDispatchBtn.onclick = () => {
   if (!shift || !difficulty || (modeValue !== 'dispatcher' && modeValue !== 'sandbox')) {
     throw new RangeError('Invalid dispatch setup');
   }
+  endMoving();
   sim.time = shift.start * HOUR;
   dispatch = new DispatchCenter(sim, {
     mode: modeValue,
@@ -178,6 +180,10 @@ mapEl.addEventListener('pointerup', (e) => {
   const moved = Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]);
   downAt = null;
   if (moved > 5) return;
+  if (moving !== 'off') {
+    pickForMove(e.clientX, e.clientY);
+    return;
+  }
   if (probeMode === 'idle' && placing === null) {
     // A click on a unit rides along with it.
     const unit = view.pickVehicle(e.clientX, e.clientY, isUnit);
@@ -296,6 +302,11 @@ window.addEventListener('keydown', (e) => {
     muteBtn.click();
     return;
   }
+  if (e.key === 'Escape' && moving !== 'off') {
+    endMoving();
+    setPickHint(null);
+    return;
+  }
   if (e.key === 'Escape') {
     if (placing !== null) {
       endPlacing();
@@ -367,8 +378,10 @@ function coverageSources(kind: EmergencyKind | 'all'): number[] {
       if (u.state === 'idle' && (kind === 'all' || u.kind === kind)) nodes.add(links[u.location.entrance.link].to);
     }
   } else {
+    // Before a shift: every station, with the move being previewed (if any) applied.
     for (const s of sim.sites) {
-      const k = STATION_KIND[s.kind];
+      if (preview && s === preview.from) continue;
+      const k = STATION_KIND[preview && s === preview.to ? preview.from.kind : s.kind];
       if (k && (kind === 'all' || k === kind)) nodes.add(links[s.entrance.link].to);
     }
   }
@@ -381,12 +394,101 @@ function syncCoverage(): void {
   const sources = coverageSources(coverageMode);
   view.setCoverage(sources.length > 0 ? sim.coverageTimes(sources) : new Float64Array(sim.grid.net.nodes.length).fill(Infinity));
 }
-coverageBtn.onclick = () => {
-  coverageMode = COVERAGE_MODES[(COVERAGE_MODES.indexOf(coverageMode) + 1) % COVERAGE_MODES.length];
+function setCoverageMode(mode: EmergencyKind | 'all' | null): void {
+  coverageMode = mode;
   coverageBtn.setAttribute('aria-pressed', String(coverageMode !== null));
   if (coverageMode === null) view.setCoverage(null);
   syncCoverage();
+}
+coverageBtn.onclick = () => setCoverageMode(COVERAGE_MODES[(COVERAGE_MODES.indexOf(coverageMode) + 1) % COVERAGE_MODES.length]);
+
+// Station placement (before a shift, optional): click a station, then the building or car park
+// to move it to. While choosing, the coverage map shows that kind of unit as if it were there.
+// One move per shift; the button then undoes it.
+let moving: 'off' | 'station' | 'target' = 'off';
+let movingFrom: Site | null = null;
+let preview: { from: Site; to: Site } | null = null;
+let stationMove: { from: Site; to: Site } | null = null;
+const moveBtn = $('moveStation') as HTMLButtonElement;
+const SITE_LABEL: Record<string, string> = { hospital: 'Hospital', fire_station: 'Fire station', police_station: 'Police station' };
+function endMoving(): void {
+  if (moving === 'off') return;
+  moving = 'off';
+  movingFrom = null;
+  preview = null;
+  view.setSiteHighlight(null);
+  mapEl.style.cursor = '';
+  moveBtn.removeAttribute('aria-pressed');
+  moveBtn.textContent = stationMove ? 'Undo station move' : 'Move a station (optional)';
+  syncCoverage();
+}
+moveBtn.onclick = () => {
+  if (stationMove) {
+    // Undo: the station goes back (its old building can host it again).
+    const { from, to } = stationMove;
+    sim.moveStation(to, from);
+    view.redrawSites([from, to]);
+    stationMove = null;
+    $('moveStationNote').hidden = true;
+    moveBtn.textContent = 'Move a station (optional)';
+    syncCoverage();
+    return;
+  }
+  if (moving !== 'off') {
+    endMoving();
+    setPickHint(null);
+    return;
+  }
+  endPicking();
+  endPlacing();
+  view.follow(null);
+  moving = 'station';
+  mapEl.style.cursor = 'crosshair';
+  moveBtn.setAttribute('aria-pressed', 'true');
+  moveBtn.textContent = 'Cancel';
+  if (coverageMode === null) setCoverageMode('all');
+  setPickHint('Click the hospital, fire station or police station to move · Esc to cancel');
 };
+function pickForMove(x: number, y: number): void {
+  if (moving === 'station') {
+    const site = view.pickSite(x, y, (s) => STATION_KINDS.includes(s.kind));
+    if (!site) {
+      setPickHint('No station there · click a hospital, fire station or police station · Esc to cancel');
+      return;
+    }
+    movingFrom = site;
+    moving = 'target';
+    setCoverageMode(STATION_KIND[site.kind]);
+    setPickHint(`Now click the building or car park to move the ${SITE_LABEL[site.kind].toLowerCase()} to · the map shows coverage from there · Esc to cancel`);
+    return;
+  }
+  const from = movingFrom!;
+  const to = view.pickSite(x, y, (s) => sim.canHostStation(s));
+  if (!to || !sim.moveStation(from, to)) {
+    setPickHint('A station needs a building or car park lot · Esc to cancel');
+    return;
+  }
+  view.redrawSites([from, to]);
+  stationMove = { from, to };
+  const note = $('moveStationNote');
+  note.textContent = `${SITE_LABEL[to.kind]} moved from ${from.address} to ${to.address}.`;
+  note.hidden = false;
+  endMoving();
+  setPickHint(`${SITE_LABEL[to.kind]} moved to ${to.address}`, 4000);
+}
+mapEl.addEventListener('pointermove', (e) => {
+  if (moving === 'off') return;
+  const site = moving === 'station'
+    ? view.pickSite(e.clientX, e.clientY, (s) => STATION_KINDS.includes(s.kind))
+    : view.pickSite(e.clientX, e.clientY, (s) => s !== movingFrom && !STATION_KINDS.includes(s.kind));
+  const ok = site !== null && (moving === 'station' || sim.canHostStation(site));
+  view.setSiteHighlight(site, ok);
+  const next = moving === 'target' && site && ok ? { from: movingFrom!, to: site } : null;
+  if (next?.to !== preview?.to) {
+    preview = next;
+    syncCoverage();
+  }
+});
 
 // Siren sound (M mutes). Audio starts with the first click or key press, as browsers require.
 const sirens = new SirenAudio();

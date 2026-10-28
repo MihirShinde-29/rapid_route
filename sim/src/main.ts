@@ -21,8 +21,9 @@ const sim = new Simulation({
   peakTripsPerHour: DEFAULT_CONFIG.peakTripsPerHour * demand,
 });
 const modeParam = new URLSearchParams(location.search).get('mode');
-const dispatchMode: DispatchMode = modeParam === 'sandbox' ? 'sandbox' : 'dispatcher';
-const dispatch = new DispatchCenter(sim, { mode: dispatchMode });
+const initialDispatchMode: DispatchMode = modeParam === 'sandbox' ? 'sandbox' : 'dispatcher';
+let dispatch: DispatchCenter | null = null;
+const pageParams = new URLSearchParams(location.search);
 const warmUntil = startHour !== null ? startHour * HOUR : -Infinity;
 const WARMUP_STEPS_PER_FRAME = 600;
 const $ = (id: string) => document.getElementById(id)!;
@@ -52,17 +53,66 @@ const jamBtn = $('jam') as HTMLButtonElement;
 const incidentBtn = $('incident') as HTMLButtonElement;
 const incidentKind = $('incidentKind') as HTMLSelectElement;
 const dispatchModeSelect = $('dispatchMode') as HTMLSelectElement;
-dispatchModeSelect.value = dispatchMode;
-dispatchModeSelect.onchange = () => {
-  const params = new URLSearchParams(location.search);
-  params.set('mode', dispatchModeSelect.value);
-  location.search = params.toString();
-};
+dispatchModeSelect.value = initialDispatchMode;
+const shiftSelect = $('dispatchShift') as HTMLSelectElement;
+const difficultySelect = $('dispatchDifficulty') as HTMLSelectElement;
+if (['am', 'midday', 'pm', 'night'].includes(pageParams.get('shift') ?? '')) shiftSelect.value = pageParams.get('shift')!;
+if (['easy', 'normal', 'hard'].includes(pageParams.get('difficulty') ?? '')) difficultySelect.value = pageParams.get('difficulty')!;
 let selectedCallId: number | null = null;
+let selectedUnitId: number | null = null;
 const endDispatchBtn = $('endDispatch') as HTMLButtonElement;
-endDispatchBtn.onclick = () => dispatch.end();
-let paused = false;
+let paused = true;
 let peakCars = 0;
+pauseBtn.disabled = true;
+const startDispatchBtn = $('startDispatch') as HTMLButtonElement;
+startDispatchBtn.onclick = () => {
+  const shifts: Record<string, { start: number; duration: number }> = {
+    am: { start: 6, duration: 4 },
+    midday: { start: 10, duration: 5 },
+    pm: { start: 15, duration: 4 },
+    night: { start: 22, duration: 8 },
+  };
+  const difficulties: Record<string, { callsPerHour: number; missedLimit: number }> = {
+    easy: { callsPerHour: 12, missedLimit: 5 },
+    normal: { callsPerHour: 20, missedLimit: 3 },
+    hard: { callsPerHour: 30, missedLimit: 2 },
+  };
+  const shift = shifts[shiftSelect.value];
+  const difficulty = difficulties[difficultySelect.value];
+  const modeValue = dispatchModeSelect.value;
+  if (!shift || !difficulty || (modeValue !== 'dispatcher' && modeValue !== 'sandbox')) {
+    throw new RangeError('Invalid dispatch setup');
+  }
+  sim.time = shift.start * HOUR;
+  dispatch = new DispatchCenter(sim, {
+    mode: modeValue,
+    shiftDurationSeconds: shift.duration * HOUR,
+    ...difficulty,
+  });
+  pageParams.set('mode', dispatchModeSelect.value);
+  pageParams.set('shift', shiftSelect.value);
+  pageParams.set('difficulty', difficultySelect.value);
+  pageParams.delete('replay');
+  history.replaceState(null, '', `${location.pathname}?${pageParams.toString()}`);
+  selectedCallId = null;
+  selectedUnitId = null;
+  paused = false;
+  pauseBtn.disabled = false;
+  pauseBtn.textContent = 'Pause';
+  $('dispatchMenu').hidden = true;
+  $('dispatchActive').hidden = false;
+  syncDispatchPanel();
+  updateSidebar();
+};
+endDispatchBtn.onclick = () => dispatch?.end();
+$('playAgain').addEventListener('click', () => {
+  pageParams.set('replay', '1');
+  location.search = pageParams.toString();
+});
+$('returnMenu').addEventListener('click', () => {
+  pageParams.delete('replay');
+  location.search = pageParams.toString();
+});
 pauseBtn.onclick = () => {
   paused = !paused;
   pauseBtn.textContent = paused ? 'Resume' : 'Pause';
@@ -137,6 +187,18 @@ mapEl.addEventListener('pointerup', (e) => {
       return;
     }
     const inc = sim.addIncident(placing, link);
+    if (inc.kind === 'accident' && dispatch && dispatch.ended === null) {
+      const street = sim.grid.net.links[inc.links[0]];
+      const from = sim.grid.net.nodes[street.from];
+      const to = sim.grid.net.nodes[street.to];
+      const x = (from.x + to.x) / 2;
+      const y = (from.y + to.y) / 2;
+      const site = sim.sites.reduce((nearest, candidate) =>
+        Math.hypot(candidate.door.x - x, candidate.door.y - y) <
+        Math.hypot(nearest.door.x - x, nearest.door.y - y) ? candidate : nearest,
+      );
+      dispatch.createCall('crash', site);
+    }
     endPlacing();
     setPickHint(`${INCIDENT_LABEL[inc.kind]} placed · ${inc.rerouted} cars and waiting trips rerouted`, 4000);
     updateSidebar();
@@ -269,6 +331,7 @@ function syncIncidentList(): void {
 }
 
 function syncDispatchPanel(): void {
+  if (!dispatch) return;
   const activeCalls = dispatch.calls.filter((call) => call.state !== 'resolved' && call.state !== 'missed');
   const finishedCalls = dispatch.calls.filter((call) => call.state === 'resolved' || call.state === 'missed').slice(-3);
   const visibleCalls = [...activeCalls, ...finishedCalls].reverse();
@@ -282,7 +345,8 @@ function syncDispatchPanel(): void {
     button.setAttribute('aria-pressed', String(selectedCallId === call.id));
     button.disabled = call.state !== 'created';
     button.onclick = () => {
-      selectedCallId = selectedCallId === call.id ? null : call.id;
+      selectedCallId = call.id;
+      selectedUnitId = null;
       syncDispatchPanel();
     };
     li.append(button);
@@ -293,6 +357,9 @@ function syncDispatchPanel(): void {
   const selectedCall = dispatch.calls.find((call) => call.id === selectedCallId && call.state === 'created');
   const candidatesList = $('dispatchCandidates');
   candidatesList.replaceChildren();
+  $('dispatchCallDetails').textContent = selectedCall
+    ? `${selectedCall.kind.toUpperCase()} · ${selectedCall.site.address} · expires in ${Math.max(0, Math.ceil((selectedCall.expiresAt - sim.time) / 60))} min`
+    : 'Select a waiting call to see its location and response deadline.';
   if (selectedCall) {
     for (const candidate of dispatch.candidates(selectedCall.id)) {
       const unit = dispatch.units[candidate.unitId];
@@ -300,9 +367,9 @@ function syncDispatchPanel(): void {
       const button = document.createElement('button');
       button.className = 'dispatch-candidate';
       button.textContent = `${unit.kind.toUpperCase()} ${unit.id + 1} · ${Math.round(candidate.eta)} s`;
+      button.setAttribute('aria-pressed', String(selectedUnitId === unit.id));
       button.onclick = () => {
-        dispatch.assign(selectedCall.id, unit.id);
-        selectedCallId = null;
+        selectedUnitId = unit.id;
         syncDispatchPanel();
       };
       li.append(button);
@@ -310,17 +377,39 @@ function syncDispatchPanel(): void {
     }
   }
   $('dispatchCandidatesEmpty').hidden = candidatesList.childElementCount > 0;
+  const assignBtn = $('assignDispatch') as HTMLButtonElement;
+  assignBtn.disabled = selectedCall === undefined || selectedUnitId === null;
+  assignBtn.onclick = () => {
+    if (selectedCall && selectedUnitId !== null) dispatch?.assign(selectedCall.id, selectedUnitId);
+    selectedCallId = null;
+    selectedUnitId = null;
+    syncDispatchPanel();
+  };
 
   $('dispatchScore').textContent = dispatch.score.points.toLocaleString();
+  $('dispatchWaiting').textContent = dispatch.calls.filter((call) => call.state === 'created').length.toLocaleString();
   $('dispatchResolved').textContent = dispatch.score.resolvedCalls.toLocaleString();
   $('dispatchMissed').textContent = dispatch.score.missedCalls.toLocaleString();
   $('dispatchResponse').textContent = dispatch.score.resolvedCalls > 0
     ? `${Math.round(dispatch.score.meanResponseTime)} s`
     : '—';
-  $('dispatchStatus').textContent = dispatch.ended === null
-    ? `${dispatch.mode === 'sandbox' ? 'Sandbox' : 'Dispatcher'} · shift ends ${formatClock(dispatch.shiftEndsAt)}`
-    : `Session ${dispatch.ended} · ${dispatch.score.resolvedCalls} resolved · ${dispatch.score.missedCalls} missed`;
-  endDispatchBtn.hidden = dispatch.mode !== 'sandbox' || dispatch.ended !== null;
+  $('dispatchStatus').textContent = `${dispatch.mode === 'sandbox' ? 'Sandbox' : 'Dispatcher'} · shift ends ${formatClock(dispatch.shiftEndsAt)}`;
+  const outcome = dispatch.ended;
+  endDispatchBtn.hidden = outcome !== null;
+  const isEnded = outcome !== null;
+  pauseBtn.disabled = isEnded;
+  $('dispatchActive').hidden = isEnded;
+  $('dispatchResult').hidden = !isEnded;
+  if (isEnded) {
+    $('dispatchResultTitle').textContent = outcome === 'win' ? 'Shift complete' : outcome === 'loss' ? 'Shift failed' : 'Session ended';
+    $('dispatchResultState').textContent = outcome.toUpperCase();
+    $('resultResolved').textContent = dispatch.score.resolvedCalls.toLocaleString();
+    $('resultMissed').textContent = dispatch.score.missedCalls.toLocaleString();
+    $('resultResponse').textContent = dispatch.score.resolvedCalls > 0 ? `${Math.round(dispatch.score.meanResponseTime)} s` : '—';
+    $('resultScore').textContent = dispatch.score.points.toLocaleString();
+    paused = true;
+    pauseBtn.textContent = 'Resume';
+  }
 
   $('dispatchUnits').replaceChildren(
     ...dispatch.units.map((unit) =>
@@ -470,5 +559,6 @@ function frame(now: number): void {
       `${view.renderer.info.render.calls} draw calls · ${sim.traffic.vehicles.size} cars`;
   }
   requestAnimationFrame(frame);
+  if (pageParams.get('replay') === '1') startDispatchBtn.click();
 }
 requestAnimationFrame(frame);

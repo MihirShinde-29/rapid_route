@@ -123,7 +123,17 @@
       .dispatch-call, .dispatch-candidate { width: 100%; text-align: left; white-space: normal; line-height: 1.35; }
       .dispatch-call[aria-pressed='true'] { border-color: var(--accent); color: var(--text); }
       .dispatch-call:disabled { cursor: default; opacity: 0.65; }
+      .dispatch-candidate[aria-pressed='true'] { border-color: var(--accent); color: var(--text); }
       .dispatch-status { margin: 0 0 8px; font-family: var(--font-mono); font-size: 10px; color: var(--text-dim); }
+      .dispatch-form { display: grid; gap: 10px; }
+      .dispatch-form label { display: grid; gap: 4px; color: var(--text-dim); font-size: 11px; }
+      .dispatch-form select { width: 100%; }
+      .dispatch-instructions { color: var(--text-dim); font-size: 11px; line-height: 1.5; }
+      .dispatch-result { text-align: center; }
+      .dispatch-result h3 { margin: 4px 0 8px; font-size: 18px; }
+      .dispatch-result .stat-grid { text-align: left; margin: 12px 0; }
+      .dispatch-result-actions { display: flex; gap: 8px; }
+      .dispatch-result-actions button { flex: 1; }
       .list li.incident { cursor: pointer; }
       .list li.incident strong { display: block; font-weight: 500; }
       .list li.incident span { display: block; color: var(--text-dim); font-size: 10px; margin-top: 2px; }
@@ -191,30 +201,71 @@
       <aside>
         <section class="panel">
           <h2>Dispatch Alpha</h2>
-          <div class="dispatch-head">
-            <label class="dispatch-mode" for="dispatchMode">Mode
-              <select id="dispatchMode" aria-label="Dispatch mode">
-                <option value="dispatcher">Dispatcher</option>
-                <option value="sandbox">Sandbox</option>
-              </select>
-            </label>
-            <button id="endDispatch" hidden>End session</button>
+          <div id="dispatchMenu">
+            <p class="dispatch-instructions">Coordinate emergency units through a live traffic simulation. Select a waiting call, choose a suitable unit by ETA, and assign it before its deadline. Sandbox dispatches automatically.</p>
+            <div class="dispatch-form">
+              <label for="dispatchMode">Mode
+                <select id="dispatchMode" aria-label="Dispatch mode">
+                  <option value="dispatcher">Dispatcher</option>
+                  <option value="sandbox">Sandbox</option>
+                </select>
+              </label>
+              <label for="dispatchShift">Shift
+                <select id="dispatchShift" aria-label="Shift">
+                  <option value="am">AM · 06:00–10:00</option>
+                  <option value="midday">Midday · 10:00–15:00</option>
+                  <option value="pm">PM · 15:00–19:00</option>
+                  <option value="night">Night · 22:00–06:00</option>
+                </select>
+              </label>
+              <label for="dispatchDifficulty">Difficulty
+                <select id="dispatchDifficulty" aria-label="Difficulty">
+                  <option value="easy">Easy</option>
+                  <option value="normal" selected>Normal</option>
+                  <option value="hard">Hard</option>
+                </select>
+              </label>
+              <button id="startDispatch" class="primary">Start shift</button>
+            </div>
           </div>
-          <div class="dispatch-status" id="dispatchStatus"></div>
-          <div class="stat-grid">
-            <div class="stat"><div class="val" id="dispatchScore">0</div><div class="lbl">Score</div></div>
-            <div class="stat"><div class="val" id="dispatchResolved">0</div><div class="lbl">Resolved</div></div>
-            <div class="stat"><div class="val" id="dispatchMissed">0</div><div class="lbl">Missed</div></div>
-            <div class="stat"><div class="val" id="dispatchResponse">—</div><div class="lbl">Mean response</div></div>
+          <div id="dispatchActive" hidden>
+            <div class="dispatch-head">
+              <div class="dispatch-status" id="dispatchStatus"></div>
+              <button id="endDispatch">End shift</button>
+            </div>
+            <div class="stat-grid">
+              <div class="stat"><div class="val" id="dispatchScore">0</div><div class="lbl">Score</div></div>
+              <div class="stat"><div class="val" id="dispatchWaiting">0</div><div class="lbl">Calls waiting</div></div>
+              <div class="stat"><div class="val" id="dispatchMissed">0</div><div class="lbl">Missed calls</div></div>
+              <div class="stat"><div class="val" id="dispatchResolved">0</div><div class="lbl">Resolved</div></div>
+              <div class="stat"><div class="val" id="dispatchResponse">—</div><div class="lbl">Mean response</div></div>
+            </div>
+            <h3 class="dispatch-subhead">Calls</h3>
+            <ul class="list dispatch-list" id="dispatchCalls"></ul>
+            <div class="note" id="dispatchCallsEmpty">No calls yet.</div>
+            <h3 class="dispatch-subhead">Selected call</h3>
+            <div class="note" id="dispatchCallDetails">Select a waiting call to see its location and response deadline.</div>
+            <h3 class="dispatch-subhead">Candidate units · ETA</h3>
+            <ul class="list dispatch-list" id="dispatchCandidates"></ul>
+            <div class="note" id="dispatchCandidatesEmpty">Select a waiting call.</div>
+            <button id="assignDispatch" class="primary" disabled>Assign selected unit</button>
+            <h3 class="dispatch-subhead">Units</h3>
+            <ul class="list" id="dispatchUnits"></ul>
           </div>
-          <h3 class="dispatch-subhead">Calls</h3>
-          <ul class="list dispatch-list" id="dispatchCalls"></ul>
-          <div class="note" id="dispatchCallsEmpty">No calls yet.</div>
-          <h3 class="dispatch-subhead">Available units · ETA</h3>
-          <ul class="list dispatch-list" id="dispatchCandidates"></ul>
-          <div class="note" id="dispatchCandidatesEmpty">Select an open call.</div>
-          <h3 class="dispatch-subhead">Units</h3>
-          <ul class="list" id="dispatchUnits"></ul>
+          <div id="dispatchResult" class="dispatch-result" hidden>
+            <h3 id="dispatchResultTitle">Shift complete</h3>
+            <div class="dispatch-status" id="dispatchResultState"></div>
+            <div class="stat-grid">
+              <div class="stat"><div class="val" id="resultResolved">0</div><div class="lbl">Calls handled</div></div>
+              <div class="stat"><div class="val" id="resultMissed">0</div><div class="lbl">Missed calls</div></div>
+              <div class="stat"><div class="val" id="resultResponse">—</div><div class="lbl">Mean response</div></div>
+              <div class="stat"><div class="val" id="resultScore">0</div><div class="lbl">Score</div></div>
+            </div>
+            <div class="dispatch-result-actions">
+              <button id="playAgain" class="primary">Play Again</button>
+              <button id="returnMenu">Return to Menu</button>
+            </div>
+          </div>
         </section>
         <section class="panel">
           <h2>Traffic</h2>

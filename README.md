@@ -25,7 +25,7 @@ TypeScript + Vite + Three.js. The sim core has no DOM access and runs headless i
 cd sim
 npm install
 npm run dev     # open the printed localhost URL
-npm test        # 47 tests: demand, car-following, junctions, signals, routing, incidents, sites, trips, units, yielding and dispatch
+npm test        # 50 tests: demand, car-following, junctions, signals, routing, incidents, blocked lanes, sites, trips, units, yielding and dispatch
 npm run build   # type-check and build a static site into sim/dist
 ```
 Needs Node 20+. Vite is pinned to 6 / Vitest to 3 because newer releases need a newer Node.
@@ -45,10 +45,13 @@ Work split: `docs/MVP_WORK_SPLIT.md`.
 
 Assignment 3 recording plan and evidence checklist: `docs/ASSIGNMENT3_DEMO_SCRIPT.md`.
 
-Incidents: pick Accident, Lane closure or Road closure in the toolbar, click `Place incident`, then click a street.
-An accident caps speed at 2.5 m/s and clears after 20 sim minutes, a lane closure caps it at 40% of the limit, and a road
-closure keeps all traffic off the street except trips that start or end on it. Cars already driving whose route uses the
-street are rerouted at their next junction when a faster way exists; new trips route around it. Click an incident in the
+Incidents: pick Accident, Lane closure or Road closure in the toolbar and click `Place incident`. An accident goes where
+you click and blocks 12 m of that lane for 20 sim minutes. A lane closure takes two clicks along one lane, its start and
+its end. Cars get past either one through the oncoming lane, one side at a time, like a one-lane bridge: the oncoming side
+has priority, a blocked car goes when no oncoming car would reach the stretch before it is through, and after 10 s of
+waiting the blocked side gets a turn of up to 15 s. A road closure (click a street) keeps all traffic off it except trips
+that start or end on it. Cars already driving whose route uses the street are rerouted at their next junction when a
+faster way exists; new trips route around it. Click an incident in the
 sidebar to fly to it, or × to remove it.
 
 The OD matrix groups the zones into nine districts (downtown and eight suburban sectors). Cell colour is the model's

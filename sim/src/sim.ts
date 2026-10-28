@@ -10,19 +10,28 @@ import { blockDistricts, DISTRICTS } from './demand/districts';
 import { buildCity, siteAccess, type Access, type CityLayout, type Site } from './city/sites';
 import type { EmergencyKind } from './traffic/vehicleTypes';
 
-// Perturbations the user can place on a street (both directions).
+// Perturbations the user can place on a street. An accident blocks a short stretch of one lane
+// and a lane closure a longer one; cars get past through the oncoming lane, one side at a time.
+// A road closure shuts the street both ways.
 export type IncidentKind = 'accident' | 'lane' | 'closure';
 export interface Incident {
   id: number;
   kind: IncidentKind;
   links: number[]; // the street's directed links
+  // Accident and lane closure: the lane blocked, and the stretch of it, in m along it.
+  lane: number | null;
+  from: number;
+  to: number;
   placedAt: number; // sim time
   until: number | null; // sim time it clears by itself, or null until removed
   rerouted: number; // cars and waiting trips given a new route when it was placed
+  blockage: number | null; // traffic blockage id
 }
-const ACCIDENT_SPEED = 2.5; // m/s, cars edge past the wreck
 const ACCIDENT_CLEARS_S = 20 * 60;
-const LANE_CLOSURE_FACTOR = 0.4; // of the speed limit, traffic merging into the open lane
+const ACCIDENT_M = 12; // of lane the wreck blocks
+export const BLOCK_JUNCTION_M = 18; // a blocked stretch keeps this far from each junction
+const ACCIDENT_PASS_SPEED = 4; // m/s past a wreck
+const LANE_PASS_SPEED = 7; // m/s through a lane closure
 const CLOSED_COST = 1e5; // s, so routes avoid a closed street unless there is no other way
 // Routing cost of crossing the other lane at a driveway (s), standing for the wait for a gap;
 // four times that across an arterial. Cars still turn left when going round is much longer.
@@ -133,7 +142,10 @@ export class Simulation {
     // fall back to their speed limit through TrafficModel.linkMeanSpeed().
     this.router = new Router(
       this.grid.net,
-      (link) => link.length / Math.max(1, this.traffic.linkMeanSpeed(link.id)) + (this.traffic.isClosed(link.id) ? CLOSED_COST : 0),
+      (link) =>
+        link.length / Math.max(1, this.traffic.linkMeanSpeed(link.id)) +
+        this.traffic.blockDelay(link.id) +
+        (this.traffic.isClosed(link.id) ? CLOSED_COST : 0),
     );
     this.distanceRouter = new Router(this.grid.net, (link) => link.length);
     this.time = config.startHour * HOUR;
@@ -277,30 +289,53 @@ export class Simulation {
     return out;
   }
 
-  // Place an incident on the street that `linkId` belongs to. Cars whose route uses the street
-  // are rerouted at their next junction if there is a faster way round.
-  addIncident(kind: IncidentKind, linkId: number): Incident {
+  // Place an incident on the street that `linkId` belongs to. An accident blocks ACCIDENT_M of
+  // that lane centred at `at` m along it (default: the middle); a lane closure blocks `at` to `to`
+  // (default: the middle half). Both keep BLOCK_JUNCTION_M from the junctions. A road closure shuts
+  // the street both ways. Cars whose route uses it are rerouted at their next junction if there
+  // is a faster way round.
+  addIncident(kind: IncidentKind, linkId: number, at?: number, to?: number): Incident {
     const net = this.grid.net;
-    const link = net.links[linkId];
-    const back = net.outLinks[link.to].find((id) => net.links[id].to === link.from);
+    const back = net.reverse(linkId);
     const links = back === undefined ? [linkId] : [linkId, back];
     for (const id of links) this.removeIncidentOn(id);
-    for (const id of links) {
-      if (kind === 'closure') this.traffic.setClosed(id, true);
-      else this.traffic.setIncidentCap(id, kind === 'accident' ? ACCIDENT_SPEED : net.links[id].speedLimit * LANE_CLOSURE_FACTOR);
+    let lane: number | null = null;
+    let from = 0;
+    let end = 0;
+    let blockage: number | null = null;
+    if (kind === 'closure') {
+      for (const id of links) this.traffic.setClosed(id, true);
+    } else {
+      const len = this.traffic.lanes[linkId].geom.length;
+      const lo = Math.min(BLOCK_JUNCTION_M, len / 2);
+      const hi = Math.max(len - BLOCK_JUNCTION_M, len / 2);
+      const clamp = (x: number) => Math.min(hi, Math.max(lo, x));
+      if (kind === 'accident') {
+        const mid = clamp(at ?? len / 2);
+        from = clamp(mid - ACCIDENT_M / 2);
+        end = clamp(from + ACCIDENT_M);
+        from = clamp(end - ACCIDENT_M);
+      } else {
+        const a = clamp(at ?? len / 4);
+        const b = clamp(to ?? (3 * len) / 4);
+        from = Math.min(a, b);
+        end = Math.max(a, b, Math.min(hi, from + ACCIDENT_M));
+      }
+      lane = linkId;
+      blockage = this.traffic.addBlockage(linkId, from, end, kind === 'accident' ? ACCIDENT_PASS_SPEED : LANE_PASS_SPEED);
     }
-    const rerouted = this.traffic.reroute(new Set(links), (node, last, skip) => {
+    const rerouted = this.traffic.reroute(new Set(kind === 'closure' ? links : [linkId]), (node, last, skip) => {
       const lastLink = net.links[last];
       // The new route must end on the same last link; never arrive at it from its reverse (a U-turn).
-      const reverse = net.outLinks[lastLink.to].find((id) => net.links[id].to === lastLink.from);
+      const reverse = net.reverse(last);
       const toLast = node === lastLink.from ? { links: [], cost: 0 } : this.router.routeWithCost(node, lastLink.from, reverse === undefined ? skip : [...skip, reverse]);
       if (toLast.cost >= CLOSED_COST) return null;
       if (node === lastLink.from && skip.includes(last)) return null;
       return [...toLast.links, last];
     });
     const inc: Incident = {
-      id: this.incidentId++, kind, links, placedAt: this.time,
-      until: kind === 'accident' ? this.time + ACCIDENT_CLEARS_S : null, rerouted,
+      id: this.incidentId++, kind, links, lane, from, to: end, placedAt: this.time,
+      until: kind === 'accident' ? this.time + ACCIDENT_CLEARS_S : null, rerouted, blockage,
     };
     this.incidents.push(inc);
     return inc;
@@ -309,11 +344,19 @@ export class Simulation {
   removeIncident(id: number): void {
     const k = this.incidents.findIndex((inc) => inc.id === id);
     if (k < 0) return;
-    for (const linkId of this.incidents[k].links) {
-      this.traffic.setClosed(linkId, false);
-      this.traffic.setIncidentCap(linkId, null);
-    }
+    const inc = this.incidents[k];
+    for (const linkId of inc.links) this.traffic.setClosed(linkId, false);
+    if (inc.blockage !== null) this.traffic.removeBlockage(inc.blockage);
     this.incidents.splice(k, 1);
+  }
+
+  // Where an incident is: the middle of its blocked stretch, or of the closed street.
+  incidentPoint(inc: Incident): { x: number; y: number } {
+    if (inc.lane !== null) return this.traffic.lanes[inc.lane].geom.pose((inc.from + inc.to) / 2);
+    const { nodes, links } = this.grid.net;
+    const a = nodes[links[inc.links[0]].from];
+    const b = nodes[links[inc.links[0]].to];
+    return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
   }
 
   incidentOn(linkId: number): Incident | undefined {

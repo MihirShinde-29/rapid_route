@@ -66,6 +66,8 @@ const wrapAngle = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
 const BRAKE_ON = new THREE.Color(1, 0.12, 0.06);
 const BRAKE_OFF = new THREE.Color(0, 0, 0); // additive: black draws nothing
 const INDICATOR_ON = new THREE.Color(1, 0.55, 0.05);
+const SIREN_RED = new THREE.Color(1, 0.1, 0.08);
+const SIREN_BLUE = new THREE.Color(0.15, 0.35, 1);
 const INDICATE_M = 40; // start indicating this far before a turn
 type Turn = 'left' | 'right' | null;
 const SIGNAL = {
@@ -198,6 +200,7 @@ export class View3D {
       brake: THREE.InstancedMesh;
       left: THREE.InstancedMesh;
       right: THREE.InstancedMesh;
+      sirens: [THREE.InstancedMesh, THREE.InstancedMesh] | null;
       n: number;
     }
   >();
@@ -237,6 +240,8 @@ export class View3D {
   private incidentGroup = new THREE.Group();
   private incidentKey = '';
   private beacons: THREE.MeshBasicMaterial[] = [];
+  private lanePreview: THREE.Mesh | null = null;
+  private sirenPhase = -1; // which siren lamps are lit this frame: 0 red, 1 blue, -1 neither
   private ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   onFollowEnd: (() => void) | null = null; // the followed vehicle reached its destination
   showDesireLines = true;
@@ -289,6 +294,7 @@ export class View3D {
     this.buildGround();
     this.buildRoads();
     this.buildZones(rng);
+    this.buildEntrances();
     this.buildStreetLamps();
     this.buildSignals();
     this.buildTags();
@@ -612,6 +618,78 @@ export class View3D {
     }
   }
 
+  // Every site's way in from its street: a dropped kerb, a driveway or path across the verge to
+  // its door, and a marker by kind (lobby canopy, loading dock, park gate, car park barrier,
+  // station doors). Houses draw the rest of their driveway themselves.
+  private buildEntrances(): void {
+    const net = this.sim.grid.net;
+    const M = WORLD_PER_M;
+    const concrete = new THREE.Color(0x8a8d91);
+    const kerb = new THREE.Color(0xb4b7ba);
+    const path = new THREE.Color(0xa59b84);
+    const dark = new THREE.Color(0x39424c);
+    for (const site of this.sim.sites) {
+      if (site.kind === 'plaza') continue; // open to the pavement all along
+      const link = net.links[site.entrance.link];
+      const g = this.sim.traffic.lanes[link.id].geom;
+      // Along the street (dx, dy) and across it towards the lot (nx, ny), in metres.
+      const nx = -g.dy;
+      const ny = g.dx;
+      const along = (site.door.x - g.x0) * g.dx + (site.door.y - g.y0) * g.dy;
+      const deep = (site.door.x - g.x0) * nx + (site.door.y - g.y0) * ny; // lane centre to door
+      const edge = (link.arterial ? 5.7 : 4.65) - LANE_OFFSET; // lane centre to road edge
+      const at = (across: number) => ({ x: this.wx(g.x0 + g.dx * along + nx * across), z: this.wz(g.y0 + g.dy * along + ny * across) });
+      const rot = -Math.atan2(g.dy, g.dx);
+      // A box `w` m along the street, `d` m across it and `h` m high, its near face `from` m
+      // from the lane centre and its middle `off` m along the street from the door.
+      const put = (batch: StaticBatch, w: number, d: number, h: number, from: number, y: number, color: THREE.Color, off = 0) => {
+        const c = at(from + d / 2);
+        batch.add(new THREE.BoxGeometry(w * M, Math.max(h * M, 0.005), d * M), color, c.x + g.dx * off * M, y + (h * M) / 2, c.z + g.dy * off * M, 0, rot);
+      };
+      const isPark = site.kind === 'park';
+      const width = { house: 3, warehouse: 7, parking: 6, mall: 7, hospital: 7, fire_station: 9, police_station: 6 }[site.kind as string] ?? (isPark ? 2.5 : 4);
+      put(this.flat, width + 2, 0.9, 0.01, edge - 0.9, 0.255, kerb); // dropped kerb on the road edge
+      if (deep > edge) put(this.flat, width, deep - edge, 0.01, edge, 0.045, isPark ? path : concrete);
+      const lotDepth = site.front === 'n' || site.front === 's' ? site.lot.y1 - site.lot.y0 : site.lot.x1 - site.lot.x0;
+      switch (site.kind) {
+        case 'tower':
+        case 'apartment':
+        case 'shop':
+          put(this.solid, 5, 2.5, 0.25, deep, 3.2 * M, dark); // lobby canopy
+          for (const s of [-2.2, 2.2]) put(this.solid, 0.2, 0.2, 3.2, deep + 2.2, 0, dark, s);
+          break;
+        case 'warehouse':
+          put(this.solid, 8, 2, 1.2, deep, 0, new THREE.Color(0x6e6c68)); // loading dock
+          for (const s of [-3.3, 3.3]) put(this.solid, 0.3, 0.3, 0.5, deep - 0.3, 0, new THREE.Color(0xd8b23a), s); // bollards
+          break;
+        case 'park':
+          for (const s of [-1.8, 1.8]) put(this.solid, 0.35, 0.35, 2, deep, 0, new THREE.Color(0x2c3a2e), s); // gate posts
+          put(this.solid, 3.95, 0.15, 0.15, deep + 0.1, 2 * M, new THREE.Color(0x2c3a2e));
+          break;
+        case 'parking':
+        case 'mall':
+          put(this.solid, 0.3, 0.3, 1.1, deep + 0.5, 0, dark, -width / 2 - 0.3); // barrier post and arm
+          put(this.solid, width, 0.12, 0.12, deep + 0.6, 1 * M, new THREE.Color(0xd0d0d0));
+          for (let k = 0; k < 3; k++) put(this.solid, 0.8, 0.13, 0.13, deep + 0.6, 1.01 * M, new THREE.Color(0xc82828), -width / 2 + 1 + k * 2.2);
+          break;
+        case 'hospital':
+        case 'police_station':
+        case 'fire_station': {
+          // Doors on the building's street face (stations fill 80% of their lot, centred).
+          const face = deep + lotDepth * 0.1;
+          if (site.kind === 'fire_station') {
+            for (const s of [-2.3, 2.3]) put(this.solid, 3.8, 0.2, 3.6, face - 0.2, 0, new THREE.Color(0xd4d4d0), s); // engine bay doors
+          } else {
+            const tone = site.kind === 'hospital' ? new THREE.Color(0xd8262a) : new THREE.Color(0x2a4a8a);
+            put(this.solid, 6, 3, 0.3, face - 3, 3 * M, tone); // canopy over the doors
+            put(this.solid, 3, 0.2, 2.6, face - 0.2, 0, new THREE.Color(0x2a3440)); // glass doors
+          }
+          break;
+        }
+      }
+    }
+  }
+
   // A house set back behind a lawn, a driveway from the street to its door, and sometimes a
   // pool or a tree in the back garden.
   private drawHouse(site: Site, rng: Rng): void {
@@ -902,13 +980,18 @@ export class View3D {
       left.instanceMatrix = body.instanceMatrix;
       const right = new THREE.InstancedMesh(geo.indicatorR, this.brakeMat, MAX_CARS);
       right.instanceMatrix = body.instanceMatrix;
-      for (const m of [body, lights, brake, left, right]) {
+      let sirens: [THREE.InstancedMesh, THREE.InstancedMesh] | null = null;
+      if (geo.sirenA && geo.sirenB) {
+        sirens = [new THREE.InstancedMesh(geo.sirenA, this.brakeMat, MAX_CARS), new THREE.InstancedMesh(geo.sirenB, this.brakeMat, MAX_CARS)];
+        for (const m of sirens) m.instanceMatrix = body.instanceMatrix;
+      }
+      for (const m of [body, lights, brake, left, right, ...(sirens ?? [])]) {
         m.count = 0;
         m.frustumCulled = false;
         this.scene.add(m);
       }
       this.carLights.push(lights);
-      this.fleet.set(kind, { body, lights, brake, left, right, n: 0 });
+      this.fleet.set(kind, { body, lights, brake, left, right, sirens, n: 0 });
     }
   }
 
@@ -919,7 +1002,7 @@ export class View3D {
     return { x: p.x - p.hy * DRIVEWAY_M, y: p.y + p.hx * DRIVEWAY_M, hx: p.hx, hy: p.hy };
   }
 
-  private placeCar(kind: VehicleKind, trip: Trip, x: number, y: number, hx: number, hy: number, lift: number, scale: number, braking: boolean, turn: Turn = null): void {
+  private placeCar(kind: VehicleKind, trip: Trip, x: number, y: number, hx: number, hy: number, lift: number, scale: number, braking: boolean, turn: Turn = null, siren = false): void {
     const f = this.fleet.get(kind)!;
     if (f.n >= MAX_CARS) return;
     this.tmp.position.set(this.wx(x), lift, this.wz(y));
@@ -931,6 +1014,11 @@ export class View3D {
     f.brake.setColorAt(f.n, braking ? BRAKE_ON : BRAKE_OFF);
     f.left.setColorAt(f.n, this.blinkOn && turn === 'left' ? INDICATOR_ON : BRAKE_OFF);
     f.right.setColorAt(f.n, this.blinkOn && turn === 'right' ? INDICATOR_ON : BRAKE_OFF);
+    if (f.sirens) {
+      // Red and blue flash in turn, each with a quick double flash.
+      f.sirens[0].setColorAt(f.n, siren && this.sirenPhase === 0 ? SIREN_RED : BRAKE_OFF);
+      f.sirens[1].setColorAt(f.n, siren && this.sirenPhase === 1 ? SIREN_BLUE : BRAKE_OFF);
+    }
     f.n++;
   }
 
@@ -954,6 +1042,8 @@ export class View3D {
     const traffic = this.sim.traffic;
     const now = this.sim.time;
     this.blinkOn = performance.now() % 700 < 380; // real time, so the blink rate ignores sim speed
+    const flash = performance.now() % 600;
+    this.sirenPhase = flash < 80 || (flash > 140 && flash < 220) ? 0 : flash > 300 && (flash < 380 || (flash > 440 && flash < 520)) ? 1 : -1;
     for (const f of this.fleet.values()) f.n = 0;
     for (const veh of traffic.vehicles) {
       const kind = veh.trip.kind ?? 'sedan';
@@ -975,13 +1065,14 @@ export class View3D {
         bezier(lot, c, road, s, this.bp, this.bd);
         // Indicates towards the road it is pulling onto.
         const turn = s < 0.7 ? this.sideOf(this.bp.x, this.bp.y, this.bd.x, this.bd.y, p.x + p.hx * 20, p.y + p.hy * 20) : null;
-        this.placeCar(kind, veh.trip, this.bp.x, this.bp.y, this.bd.x, this.bd.y, 0.08 + 0.18 * s, 0.6 + 0.4 * s, false, turn);
+        this.placeCar(kind, veh.trip, this.bp.x, this.bp.y, this.bd.x, this.bd.y, 0.08 + 0.18 * s, 0.6 + 0.4 * s, false, turn, veh.siren);
       } else {
         // On the road surface; brake lights while slowing down or held at a stop. A car making way
-        // for a siren sits up to SHOULDER_M to the right, indicating while it pulls over.
-        const off = veh.shift * SHOULDER_M;
+        // for a siren sits up to SHOULDER_M to the right, indicating while it pulls over; one
+        // passing a blocked stretch drives out in the oncoming lane.
+        const off = veh.shift * SHOULDER_M - veh.pass * 2 * LANE_OFFSET;
         const turn = veh.yielding && veh.shift < 1 ? 'right' : this.turnAhead(veh);
-        this.placeCar(kind, veh.trip, p.x - p.hy * off, p.y + p.hx * off, p.hx, p.hy, 0.26, 1, veh.acc < -0.8 || veh.v < 0.5, turn);
+        this.placeCar(kind, veh.trip, p.x - p.hy * off, p.y + p.hx * off, p.hx, p.hy, 0.26, 1, veh.acc < -0.8 || veh.v < 0.5, turn, veh.siren);
       }
     }
     // Cars that reached their destination this frame turn off into their lot.
@@ -1010,9 +1101,10 @@ export class View3D {
       f.brake.count = f.n;
       f.left.count = f.n;
       f.right.count = f.n;
+      for (const m of f.sirens ?? []) m.count = f.n;
       f.body.instanceMatrix.needsUpdate = true;
       if (f.body.instanceColor) f.body.instanceColor.needsUpdate = true;
-      for (const m of [f.brake, f.left, f.right]) if (m.instanceColor) m.instanceColor.needsUpdate = true;
+      for (const m of [f.brake, f.left, f.right, ...(f.sirens ?? [])]) if (m.instanceColor) m.instanceColor.needsUpdate = true;
     }
   }
 
@@ -1240,6 +1332,47 @@ export class View3D {
     return best;
   }
 
+  // Lane under a screen point and how far along it, or null if no lane is within reach. With
+  // `onLane`, the point is projected onto that lane instead (clamped to its ends).
+  pickLane(clientX: number, clientY: number, onLane?: number): { link: number; pos: number } | null {
+    const p = this.groundAt(clientX, clientY);
+    if (!p) return null;
+    const lanes = this.sim.traffic.lanes;
+    let best: { link: number; pos: number } | null = null;
+    let bestD = onLane === undefined ? 12 : Infinity; // m
+    for (const lane of onLane === undefined ? lanes : [lanes[onLane]]) {
+      const g = lane.geom;
+      const pos = Math.max(0, Math.min(g.length, (p.x - g.x0) * g.dx + (p.y - g.y0) * g.dy));
+      const d = Math.hypot(g.x0 + g.dx * pos - p.x, g.y0 + g.dy * pos - p.y);
+      if (d < bestD) [best, bestD] = [{ link: lane.link.id, pos }, d];
+    }
+    return best;
+  }
+
+  // A strip over part of a lane: the stretch a lane closure being placed would close.
+  setLanePreview(link: number | null, from = 0, to = 0): void {
+    if (this.lanePreview) {
+      this.scene.remove(this.lanePreview);
+      this.lanePreview.geometry.dispose();
+      (this.lanePreview.material as THREE.Material).dispose();
+      this.lanePreview = null;
+    }
+    if (link === null) return;
+    const g = this.sim.traffic.lanes[link].geom;
+    const a = Math.min(from, to);
+    const len = Math.max(1, Math.abs(to - from));
+    const mid = g.pose(a + len / 2);
+    const m = new THREE.Mesh(
+      new THREE.BoxGeometry(len * WORLD_PER_M, 0.02, 3 * WORLD_PER_M),
+      new THREE.MeshBasicMaterial({ color: INCIDENT_HEX.lane, transparent: true, opacity: 0.6, depthTest: false }),
+    );
+    m.position.set(this.wx(mid.x), 0.3, this.wz(mid.y));
+    m.rotation.y = -Math.atan2(g.dy, g.dx);
+    m.renderOrder = 9;
+    this.lanePreview = m;
+    this.scene.add(m);
+  }
+
   // Markers for the placed incidents; rebuilt when the set changes.
   private syncIncidents(now: number): void {
     const incidents = this.sim.incidents;
@@ -1270,9 +1403,13 @@ export class View3D {
     const b = net.nodes[link.to];
     const len = Math.hypot(b.x - a.x, b.y - a.y);
     const g = new THREE.Group();
-    g.position.set(this.wx((a.x + b.x) / 2), 0.26, this.wz((a.y + b.y) / 2)); // on the road surface, like the cars
+    // On the road surface, like the cars: a road closure at the street's middle, an accident or
+    // lane closure at the middle of its stretch, on that lane.
+    const at = inc.lane === null ? { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } : this.sim.traffic.lanes[inc.lane].geom.pose((inc.from + inc.to) / 2);
+    g.position.set(this.wx(at.x), 0.26, this.wz(at.y));
     g.rotation.y = -Math.atan2(b.y - a.y, b.x - a.x);
-    // Scene details in metres: x along the street, z across it, origin at its middle.
+    // Scene details in metres: x along the traffic, z across it to the right, origin at the middle
+    // of the street (road closure) or of the blocked lane's stretch.
     const local = new THREE.Group();
     local.scale.setScalar(WORLD_PER_M);
     g.add(local);
@@ -1296,21 +1433,20 @@ export class View3D {
       s.position.set(x, y, z);
       local.add(s);
     };
+    const stretch = inc.to - inc.from;
     if (inc.kind === 'accident') {
-      // Two cars at an angle across the lane, with cones behind them.
-      box(6.7, 2.1, 2.9, 0xe8e8e8, -2, 0.2, 1.4, 0.5);
-      box(6.6, 2.1, 2.9, 0x8a1c1c, 4, 0.2, 2.6, -0.35);
-      beacon(-2, 3.4, 1.4);
-      for (const x of [-9, -12, -15]) cone(x, 1.6 - (x + 9) * 0.1);
+      // Two cars at an angle in the lane, with cones tapering in behind them.
+      box(6.7, 2.1, 2.9, 0xe8e8e8, -2.5, 0.2, 0.2, 0.4);
+      box(6.6, 2.1, 2.9, 0x8a1c1c, 3, 0.2, -0.3, -0.3);
+      beacon(-2.5, 3.4, 0.2);
+      for (const k of [0, 1, 2]) cone(-stretch / 2 - 1 - 3 * k, -1.2 + 0.9 * k);
     } else if (inc.kind === 'lane') {
-      // A line of cones closing one lane each way, and a flashing arrow board.
-      for (let k = 0; k < 7; k++) {
-        const x = -len * 0.25 + (k * len * 0.5) / 6;
-        cone(x, 3.2);
-        cone(-x, -3.2);
-      }
-      box(0.3, 1.6, 2.2, 0x222222, -len * 0.25 - 4, 0.2, 3.2);
-      beacon(-len * 0.25 - 4, 2.4, 3.2);
+      // Cones along the lane's inner edge, tapering in from the kerb, and a flashing arrow board.
+      const n = Math.max(2, Math.round(stretch / 6));
+      for (let k = 0; k <= n; k++) cone(-stretch / 2 + (k * stretch) / n, -1.6);
+      for (const k of [1, 2]) cone(-stretch / 2 - 3 * k, -1.6 + 1.3 * k);
+      box(0.3, 1.6, 2.2, 0x222222, -stretch / 2 - 9, 0.2, 0.6);
+      beacon(-stretch / 2 - 9, 2.4, 0.6);
     } else {
       // Red and white barriers across the street at both ends.
       for (const x of [-len / 2 + 14, len / 2 - 14]) {

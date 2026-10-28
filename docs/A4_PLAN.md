@@ -171,6 +171,12 @@ sim.sendUnit(kind: EmergencyKind, from: Site | Vehicle, to: Site, opts?: { siren
 
 // Coverage (Mihir): seconds from the nearest free unit to every node, on live link costs.
 sim.coverageTimes(sources: number[]): Float64Array;    // multi-source Dijkstra over sim.router's cost
+
+// Incidents (Mihir, Oct 28). An accident blocks 12 m of lane `link` centred `at` m along it; a lane
+// closure blocks `at` to `to`; both keep 18 m from the junctions. A road closure shuts the street.
+sim.addIncident(kind: 'accident' | 'lane' | 'closure', link: number, at?: number, to?: number): Incident;
+sim.incidentPoint(inc: Incident): { x: number; y: number };  // where it is, e.g. for the crash call's site
+sim.removeIncident(id: number): void;                        // set inc.until = null to stop it clearing itself
 ```
 
 To send a unit, dispatch calls `sim.sendUnit(kind, station site, call site)` (or with the unit's vehicle if it is already driving), and `sim.planTrip` for ETAs without sending. Back to base: `sim.sendUnit(kind, call site, station site, { siren: false })`. Arrival is detected through `sim.arrivals`. Stations come from `sim.sites` (hospital, fire_station, police_station).

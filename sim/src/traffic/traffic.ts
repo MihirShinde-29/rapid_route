@@ -36,6 +36,18 @@ const ON_SHOULDER = 0.8; // shift at which a unit can pass the car
 const HELD = 0.3; // a car shifted more than this stays stopped
 const PREEMPT_M = 100; // a junction is held for a unit this close to its stop line (or its braking distance)
 const SIREN_SPEED = 1.3; // units drive up to this times the speed limit
+// A blocked stretch of one lane (accident, lane closure) is run like a one-lane bridge: the stretch
+// plus ZONE_MARGIN_M either side is a zone covering both lanes. Oncoming traffic has priority; a
+// blocked car waits at the zone for a gap and passes in the oncoming lane, which then holds at the
+// zone. After FLAGGER_S of waiting the blocked side gets a turn of up to TURN_S.
+const ZONE_MARGIN_M = 5;
+const PASS_MARGIN_S = 2;
+const FLAGGER_S = 10;
+const TURN_S = 15;
+const QUEUE_M = 40; // a blocked car this close to the zone counts as waiting
+// When the oncoming lane's zone starts this close to its junction, oncoming cars are held at the
+// junction instead, since cars coming off it could not stop in time.
+const ENTRY_HOLD_M = 40;
 
 export interface Vehicle {
   id: number;
@@ -59,6 +71,32 @@ export interface Vehicle {
   siren: boolean; // emergency vehicle on a call (yielding and pre-emption key off this)
   yielding: boolean; // a unit is coming: pull over and stop
   shift: number; // 0 in the lane, 1 on the shoulder
+  pass: number; // 0 in the lane, 1 out in the oncoming lane passing a blocked stretch
+}
+
+// A stretch of one lane that cars cannot use, `from` to `to` m along it.
+export interface Blockage {
+  id: number;
+  lane: number;
+  from: number;
+  to: number;
+  passSpeed: number; // m/s through the zone
+}
+
+// One-lane-bridge control for a blockage. The zone runs start..end on the blocked lane and
+// oStart..oEnd on the oncoming one (same stretch of road, measured the other way).
+interface Zone extends Blockage {
+  other: number; // oncoming lane, -1 on a one-way street
+  start: number;
+  end: number;
+  oStart: number;
+  oEnd: number;
+  passing: Set<Vehicle>; // blocked-side cars allowed through, until they are clear of the zone
+  inside: Set<Vehicle>; // oncoming cars in the zone at the last update
+  held: Set<Vehicle>; // oncoming cars that must stop at the zone this step
+  turn: boolean; // the blocked side's turn: oncoming cars hold
+  turnSince: number; // first car in on this turn, -1 before
+  waitSince: number; // the first blocked car started waiting, -1 if none
 }
 
 interface Lane {
@@ -87,8 +125,7 @@ export class TrafficModel {
   private activeConns = new Set<Connector>();
   private backlog: { trip: Trip; route: number[] }[] = [];
   private forcedSpeeds = new Map<number, number>();
-  // Incidents placed by the user: a speed cap (accident, lane closure) or a closed street.
-  private incidentCaps = new Map<number, number>();
+  // Streets closed by the user (accidents and lane closures are blockages, below).
   private closedLinks = new Set<number>();
   private nextId = 0;
   private now = 0;
@@ -98,6 +135,10 @@ export class TrafficModel {
   private shifted = new Set<Vehicle>(); // cars yielding, on the shoulder or merging back
   private sirenLanes = new Set<Lane>(); // lanes with a unit on them, where cars can be passed
   private preempted = new Set<number>(); // junctions held for a unit this step
+  private zones = new Map<number, Zone>(); // by id
+  private blockedZone = new Map<number, Zone>(); // by blocked lane
+  private oncomingZone = new Map<number, Zone>(); // by oncoming lane
+  private zoneId = 1;
   // Timed signals at arterial junctions and all-way stops at local ones; null keeps plain give-way
   // rules everywhere (used by the junction tests).
   readonly signals: SignalPlans | null;
@@ -228,19 +269,53 @@ export class TrafficModel {
     return Math.min(lane.link.length / expected, this.capOf(linkId));
   }
 
-  // Speed limit, or the incident cap if one is set, so a jammed link really slows cars.
+  // Speed limit, or the forced cap if one is set, so a jammed link really slows cars.
   private desiredSpeed(link: Link): number {
     return Math.min(link.speedLimit, this.capOf(link.id));
   }
 
   private capOf(linkId: number): number {
-    return Math.min(this.forcedSpeeds.get(linkId) ?? Infinity, this.incidentCaps.get(linkId) ?? Infinity);
+    return this.forcedSpeeds.get(linkId) ?? Infinity;
   }
 
-  // Cap speed on a link (accident, lane closure); null removes the cap.
-  setIncidentCap(linkId: number, speed: number | null): void {
-    if (speed === null) this.incidentCaps.delete(linkId);
-    else this.incidentCaps.set(linkId, Math.max(0.5, speed));
+  // Block `from`..`to` m of a lane (an accident or a lane closure); cars get past it through the
+  // oncoming lane, one side at a time. Cars already in the zone carry on through. Returns its id.
+  addBlockage(lane: number, from: number, to: number, passSpeed: number): number {
+    const len = this.lanes[lane].geom.length;
+    const start = Math.max(0, from - ZONE_MARGIN_M);
+    const end = Math.min(len, to + ZONE_MARGIN_M);
+    const z: Zone = {
+      id: this.zoneId++, lane, from, to, passSpeed,
+      other: this.net.reverse(lane) ?? -1,
+      start, end, oStart: len - end, oEnd: len - start,
+      passing: new Set(), inside: new Set(), held: new Set(), turn: false, turnSince: 0, waitSince: -1,
+    };
+    for (const v of this.lanes[lane].vehicles) if (v.pos > start && v.pos - v.len < end) z.passing.add(v);
+    this.zones.set(z.id, z);
+    this.blockedZone.set(lane, z);
+    if (z.other >= 0) this.oncomingZone.set(z.other, z);
+    return z.id;
+  }
+
+  removeBlockage(id: number): void {
+    const z = this.zones.get(id);
+    if (!z) return;
+    this.zones.delete(id);
+    this.blockedZone.delete(z.lane);
+    this.oncomingZone.delete(z.other);
+    for (const v of this.lanes[z.lane].vehicles) v.pass = 0;
+  }
+
+  get blockages(): Blockage[] {
+    return [...this.zones.values()];
+  }
+
+  // Expected extra time (s) a blockage adds to driving this link, for routing: the slow pass and
+  // a typical wait on the blocked lane, a few seconds of holding on the oncoming one.
+  blockDelay(linkId: number): number {
+    const z = this.blockedZone.get(linkId);
+    if (z) return (z.end - z.start) / z.passSpeed + FLAGGER_S;
+    return this.oncomingZone.has(linkId) ? 5 : 0;
   }
 
   // A closed link takes no new cars; cars already on it drive out. Routing keeps traffic off it.
@@ -294,7 +369,7 @@ export class TrafficModel {
   }
 
   isForcedJammed(linkId: number): boolean {
-    return this.forcedSpeeds.has(linkId) || this.incidentCaps.has(linkId) || this.closedLinks.has(linkId);
+    return this.forcedSpeeds.has(linkId) || this.blockedZone.has(linkId) || this.closedLinks.has(linkId);
   }
 
   step(t: number, dt: number): void {
@@ -303,6 +378,7 @@ export class TrafficModel {
     this.removals = [];
     this.insertBacklog(t);
     this.updateYielding(dt);
+    this.updateZones(t);
     this.grantRightOfWay(t);
     this.computeAccelerations();
     this.integrate(dt);
@@ -318,7 +394,16 @@ export class TrafficModel {
       const lane = this.lanes[item.route[0]];
       const spec = item.trip.kind ? VEHICLE_SPECS[item.trip.kind] : { length: VEHICLE_LENGTH, accel: IDM.a };
       const vs = lane.vehicles;
-      const pos = Math.max(spec.length, item.trip.departPos ?? DEPART_FRAC * lane.geom.length);
+      let pos = Math.max(spec.length, item.trip.departPos ?? DEPART_FRAC * lane.geom.length);
+      // A driveway inside a blocked stretch: pull out past it. Beside one, on the oncoming lane:
+      // wait while blocked-side cars are passing.
+      const bz = this.blockedZone.get(lane.link.id);
+      if (bz && pos > bz.start && pos - spec.length < bz.end) pos = Math.min(lane.geom.length, bz.end + spec.length);
+      const oz = this.oncomingZone.get(lane.link.id);
+      if (oz && (oz.turn || oz.passing.size > 0) && pos > oz.oStart && pos - spec.length < oz.oEnd) {
+        still.push(item);
+        continue;
+      }
       let k = 0;
       while (k < vs.length && vs[k].pos >= pos) k++;
       const lead = vs[k - 1];
@@ -357,6 +442,7 @@ export class TrafficModel {
         siren: this.sirens.has(item.trip.id),
         yielding: false,
         shift: 0,
+        pass: 0,
       };
       vs.splice(k, 0, v);
       this.activeLanes.add(lane);
@@ -557,6 +643,126 @@ export class TrafficModel {
     return this.preempted.has(node);
   }
 
+  // One-lane-bridge control at each blockage: which blocked car may pass next, whose turn it is,
+  // and which oncoming cars hold at the zone.
+  private updateZones(t: number): void {
+    for (const z of this.zones.values()) {
+      const lane = this.lanes[z.lane];
+      const other = z.other >= 0 ? this.lanes[z.other] : null;
+      for (const v of z.passing) {
+        if (!this.vehicles.has(v) || v.conn || v.route[v.ri] !== z.lane || v.pos - v.len >= z.end) z.passing.delete(v);
+      }
+      // Out into the oncoming lane over the margin before the blocked stretch, back over the one after.
+      for (const v of lane.vehicles) {
+        if (!z.passing.has(v) && v.pass === 0) continue;
+        const m = ZONE_MARGIN_M;
+        v.pass = Math.max(0, Math.min(1, (v.pos - z.from + m) / m, (z.to + m - (v.pos - v.len)) / m));
+      }
+      // The next blocked car to go: the front one not yet passing, unless it has pulled over for a unit.
+      let next: Vehicle | undefined;
+      for (const v of lane.vehicles) {
+        if (z.passing.has(v) || v.pos > z.start + 0.5 || v.shift > HELD) continue;
+        if (!next || v.pos > next.pos) next = v;
+      }
+      // The wait for a turn counts from when the zone is clear, so the oncoming side gets to go
+      // between the blocked side's turns.
+      const waiting = next !== undefined && z.start - next.pos < QUEUE_M;
+      if (!waiting || (!z.turn && z.passing.size > 0)) z.waitSince = -1;
+      else if (z.waitSince < 0) z.waitSince = t;
+      const unitOncoming = other?.vehicles.some((o) => o.siren && o.pos < z.oEnd) ?? false;
+      if (z.turn) {
+        if (!waiting || (z.turnSince >= 0 && t - z.turnSince > TURN_S)) {
+          z.turn = false;
+          z.waitSince = -1;
+        }
+      } else if (waiting && !unitOncoming && (next!.siren || (z.waitSince >= 0 && t - z.waitSince > FLAGGER_S))) {
+        z.turn = true;
+        z.turnSince = -1; // the turn's time runs from its first car in
+      }
+      // Oncoming cars in the zone carry on; the rest hold while blocked cars pass, and during the
+      // blocked side's turn if they can still stop.
+      z.inside.clear();
+      z.held.clear();
+      if (other) {
+        for (const o of other.vehicles) {
+          if (o.pos > z.oStart && o.pos - o.len < z.oEnd) z.inside.add(o);
+          else if (o.pos <= z.oStart + 0.5 && (z.passing.size > 0 || (z.turn && this.canStop(o, z.oStart - o.pos)))) z.held.add(o);
+        }
+      }
+      if (next && waiting && (!unitOncoming || next.siren) && this.passClear(z, next, lane, other)) {
+        z.passing.add(next);
+        z.waitSince = -1;
+        if (z.turn && z.turnSince < 0) z.turnSince = t;
+      }
+    }
+  }
+
+  private canStop(o: Vehicle, dist: number): boolean {
+    return o.v < 0.5 || (o.v * o.v) / (2 * IDM.b) < dist + 0.5;
+  }
+
+  // May blocked car `v` start through the zone? Nobody oncoming is in it, none reaches it before
+  // `v` is through (or, on the blocked side's turn, all can stop), and there is room beyond it.
+  private passClear(z: Zone, v: Vehicle, lane: Lane, other: Lane | null): boolean {
+    if (z.inside.size > 0) return false;
+    // Room to stop past the zone if the queue beyond it has not moved on.
+    let rear = lane.geom.length;
+    for (const o of lane.vehicles) if (!z.passing.has(o) && o.pos - o.len >= z.end) rear = Math.min(rear, o.pos - o.len);
+    if (rear - z.end < v.len + IDM.s0 && !(v.ri === v.route.length - 1 && v.arrivePos < z.end)) return false;
+    if (!other) return true;
+    const window = Math.max(0, z.start - v.pos) / Math.max(v.v, z.passSpeed) + (z.end - z.start + v.len) / z.passSpeed + PASS_MARGIN_S;
+    const clear = (o: Vehicle, dist: number) => (z.turn ? this.canStop(o, dist) : dist / Math.max(o.v, 2) >= window);
+    for (const o of other.vehicles) if (o.pos <= z.oStart && !clear(o, z.oStart - o.pos)) return false;
+    for (const c of this.connsInto[other.link.id]) {
+      for (const o of this.onConnector.get(c)!) if (!clear(o, c.length - o.pos + z.oStart)) return false;
+      // Cars given the junction into the oncoming lane, and (oncoming traffic having priority)
+      // cars waiting at it to go there.
+      const into = this.lanes[c.inLink];
+      const front = this.requester(into);
+      for (const o of into.vehicles) {
+        if (o.route[o.ri + 1] !== other.link.id || !(o.granted || o === front)) continue;
+        const dist = into.geom.length - o.pos;
+        if (!o.granted && !z.turn && dist < QUEUE_M) return false;
+        if (!clear(o, dist + c.length + z.oStart)) return false;
+      }
+    }
+    return true;
+  }
+
+  // Blocked cars stop at the zone without a pass; held oncoming cars stop at its other end.
+  private clampAtZone(lane: Lane): void {
+    const z = this.blockedZone.get(lane.link.id);
+    if (z) {
+      for (const v of lane.vehicles) {
+        if (!z.passing.has(v) && v.pos > z.start && v.pos < z.start + 3) {
+          v.pos = z.start;
+          v.v = 0;
+        }
+      }
+    }
+    const oz = this.oncomingZone.get(lane.link.id);
+    if (oz) {
+      for (const o of oz.held) {
+        if (o.pos > oz.oStart && !o.conn && o.route[o.ri] === lane.link.id) {
+          o.pos = oz.oStart;
+          o.v = 0;
+        }
+      }
+    }
+  }
+
+  // For tests: a blocked car passing and an oncoming car are never in the zone together.
+  zoneConflicts(): string[] {
+    const errors: string[] = [];
+    for (const z of this.zones.values()) {
+      if (z.other < 0) continue;
+      const passing = this.lanes[z.lane].vehicles.filter((v) => v.pos > z.start && v.pos - v.len < z.end);
+      const oncoming = this.lanes[z.other].vehicles.filter((o) => o.pos > z.oStart && o.pos - o.len < z.oEnd);
+      if (passing.length > 0 && oncoming.length > 0) errors.push(`zone ${z.id}: passing and oncoming cars inside together`);
+    }
+    return errors;
+  }
+
   // True if any approach to this junction has a stop sign.
   isStopSign(node: number): boolean {
     return this.net.inLinks[node].some((id) => this.stopApproach[id] === 1);
@@ -618,8 +824,13 @@ export class TrafficModel {
   // Room for one more car on the lane after the junction, counting cars already granted into it.
   private exitHasRoom(v: Vehicle): boolean {
     const out = this.lanes[v.route[v.ri + 1]];
+    const oz = this.oncomingZone.get(out.link.id);
+    if (oz && (oz.turn || oz.passing.size > 0) && oz.oStart < ENTRY_HOLD_M) return false;
     const tail = this.tailFor(out, v);
-    return (tail ? tail.pos - tail.len : out.geom.length) - out.reserved >= this.slot(v);
+    let end = tail ? tail.pos - tail.len : out.geom.length;
+    const bz = this.blockedZone.get(out.link.id);
+    if (bz) end = Math.min(end, bz.start); // room only up to a blocked stretch
+    return end - out.reserved >= this.slot(v);
   }
 
   // Space reserved on an exit lane for a granted vehicle.
@@ -672,6 +883,19 @@ export class TrafficModel {
               if (g < gap) [gap, dv] = [g, veh.v - le.v];
             }
           }
+        }
+        // A blocked stretch: stop at the zone until allowed through, then pass it slowly. Held
+        // oncoming cars stop at the other end of the zone.
+        const bz = this.blockedZone.get(lane.link.id);
+        if (bz?.passing.has(veh)) v0 = Math.min(v0, Math.sqrt(bz.passSpeed ** 2 + 2 * IDM.b * Math.max(0, bz.start - veh.pos)));
+        else if (bz && veh.pos <= bz.start + 0.5) {
+          const g = bz.start - veh.pos + IDM.s0 - 0.5;
+          if (g < gap) [gap, dv] = [g, veh.v];
+        }
+        const oz = this.oncomingZone.get(lane.link.id);
+        if (oz?.held.has(veh)) {
+          const g = oz.oStart - veh.pos + IDM.s0 - 0.5;
+          if (g < gap) [gap, dv] = [g, veh.v];
         }
         if (veh.ri === veh.route.length - 1 && veh.arriveLeft && !veh.turnIn) {
           // Waits beside its driveway for a gap in the oncoming lane; the cars behind queue.
@@ -753,6 +977,7 @@ export class TrafficModel {
     for (const lane of this.activeLanes) {
       const vs = lane.vehicles;
       if (vs.length === 0) continue;
+      this.clampAtZone(lane);
       if (!this.sirenLanes.has(lane)) {
         this.clampAtLine(vs[0], lane);
         this.clampFollowers(vs);

@@ -1,4 +1,4 @@
-import { Simulation, FIXED_DT, DEFAULT_CONFIG, type Incident, type IncidentKind } from './sim';
+import { Simulation, FIXED_DT, DEFAULT_CONFIG, BLOCK_JUNCTION_M, type Incident, type IncidentKind } from './sim';
 import { View3D, INCIDENT_HEX } from './render3d/view3d';
 import { OdHeatmap } from './render3d/odHeatmap';
 import { DISTRICTS } from './demand/districts';
@@ -181,18 +181,32 @@ mapEl.addEventListener('pointerup', (e) => {
   downAt = null;
   if (moved > 5) return;
   if (placing !== null) {
-    const link = view.pickLink(e.clientX, e.clientY);
-    if (link === null) {
-      setPickHint('No street there · click on a road · Esc to cancel');
-      return;
+    let inc: Incident;
+    if (placing === 'closure') {
+      const link = view.pickLink(e.clientX, e.clientY);
+      if (link === null) {
+        setPickHint('No street there · click on a road · Esc to cancel');
+        return;
+      }
+      inc = sim.addIncident('closure', link);
+    } else {
+      // An accident goes where it is clicked, on the nearest lane. A lane closure takes two clicks
+      // along one lane: where it starts, then where it ends.
+      const hit = view.pickLane(e.clientX, e.clientY, laneStart?.link);
+      if (hit === null) {
+        setPickHint('No lane there · click on a road · Esc to cancel');
+        return;
+      }
+      if (placing === 'lane' && laneStart === null) {
+        laneStart = hit;
+        view.setLanePreview(hit.link, ...previewStretch(hit.link, hit.pos, hit.pos));
+        setPickHint('Now click where the closure ends, along the same lane · Esc to cancel');
+        return;
+      }
+      inc = placing === 'lane' ? sim.addIncident('lane', hit.link, laneStart!.pos, hit.pos) : sim.addIncident('accident', hit.link, hit.pos);
     }
-    const inc = sim.addIncident(placing, link);
     if (inc.kind === 'accident' && dispatch && dispatch.ended === null) {
-      const street = sim.grid.net.links[inc.links[0]];
-      const from = sim.grid.net.nodes[street.from];
-      const to = sim.grid.net.nodes[street.to];
-      const x = (from.x + to.x) / 2;
-      const y = (from.y + to.y) / 2;
+      const { x, y } = sim.incidentPoint(inc);
       const site = sim.sites.reduce((nearest, candidate) =>
         Math.hypot(candidate.door.x - x, candidate.door.y - y) <
         Math.hypot(nearest.door.x - x, nearest.door.y - y) ? candidate : nearest,
@@ -243,9 +257,24 @@ $('reset').onclick = () => location.reload();
 // listed in the sidebar, where each can be removed.
 const INCIDENT_LABEL: Record<IncidentKind, string> = { accident: 'Accident', lane: 'Lane closure', closure: 'Road closure' };
 let placing: IncidentKind | null = null;
+let laneStart: { link: number; pos: number } | null = null; // first click of a lane closure
+// The stretch a lane closure from `a` to `b` would block, kept clear of the junctions as sim does.
+function previewStretch(link: number, a: number, b: number): [number, number] {
+  const len = sim.traffic.lanes[link].geom.length;
+  const clamp = (x: number) => Math.min(len - BLOCK_JUNCTION_M, Math.max(BLOCK_JUNCTION_M, x));
+  const lo = clamp(Math.min(a, b));
+  return [lo, Math.max(clamp(Math.max(a, b)), Math.min(len - BLOCK_JUNCTION_M, lo + 12))];
+}
+mapEl.addEventListener('pointermove', (e) => {
+  if (placing !== 'lane' || laneStart === null) return;
+  const hit = view.pickLane(e.clientX, e.clientY, laneStart.link);
+  if (hit) view.setLanePreview(laneStart.link, ...previewStretch(laneStart.link, laneStart.pos, hit.pos));
+});
 function endPlacing(): void {
   if (placing === null) return;
   placing = null;
+  laneStart = null;
+  view.setLanePreview(null);
   incidentBtn.textContent = 'Place incident';
   incidentBtn.removeAttribute('aria-pressed');
   mapEl.style.cursor = '';
@@ -264,7 +293,11 @@ incidentBtn.onclick = () => {
   incidentBtn.textContent = 'Cancel';
   incidentBtn.setAttribute('aria-pressed', 'true');
   mapEl.style.cursor = 'crosshair';
-  setPickHint(`Click a street to place: ${INCIDENT_LABEL[placing].toLowerCase()} · Esc to cancel`);
+  setPickHint(
+    placing === 'lane'
+      ? 'Click on a lane where the closure starts · Esc to cancel'
+      : `Click ${placing === 'accident' ? 'on a lane' : 'a street'} to place: ${INCIDENT_LABEL[placing].toLowerCase()} · Esc to cancel`,
+  );
 };
 const hexCss = (hex: number) => `#${hex.toString(16).padStart(6, '0')}`;
 function incidentPlace(inc: Incident): string {

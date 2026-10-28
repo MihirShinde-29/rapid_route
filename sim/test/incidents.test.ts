@@ -88,28 +88,4 @@ describe('incidents', () => {
     sim.removeIncident(inc.id);
     for (const id of inc.links) expect(sim.traffic.isClosed(id)).toBe(false);
   }, 60_000);
-
-  it('an accident slows cars to a crawl and clears by itself', () => {
-    const sim = new Simulation({ ...DEFAULT_CONFIG, startHour: 7.5 });
-    while (sim.time < 7.75 * HOUR) sim.step();
-    const inc = sim.addIncident('accident', busyArterial(sim));
-    expect(inc.until).not.toBeNull();
-    // Every car that has been on the street for a few seconds is down to the accident speed.
-    let checked = 0;
-    while (sim.time < inc.placedAt + 120) {
-      sim.step();
-      for (const id of inc.links) {
-        for (const veh of sim.traffic.lanes[id].vehicles) {
-          if (sim.time - Math.max(veh.enteredLane, inc.placedAt) < 4) continue;
-          expect(veh.v).toBeLessThan(3);
-          checked++;
-        }
-      }
-    }
-    expect(checked).toBeGreaterThan(0);
-    expect(routesAreValid(sim)).toEqual([]);
-    while (sim.time < inc.until! + 1) sim.step();
-    expect(sim.incidents).toHaveLength(0);
-    for (const id of inc.links) expect(sim.traffic.isForcedJammed(id)).toBe(false);
-  }, 60_000);
 });

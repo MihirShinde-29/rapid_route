@@ -284,8 +284,8 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === 'Tab' && dispatch && dispatch.ended === null && !inControl) {
-    // Next waiting call, oldest first, wrapping round.
-    const waiting = dispatch.calls.filter((call) => call.state === 'created');
+    // Next waiting call, soonest to expire first (the list's order), wrapping round.
+    const waiting = dispatch.calls.filter((call) => call.state === 'created').sort((a, b) => a.expiresAt - b.expiresAt);
     if (waiting.length > 0) {
       const k = waiting.findIndex((call) => call.id === selectedCallId);
       selectedCallId = waiting[(k + 1) % waiting.length].id;
@@ -301,7 +301,7 @@ window.addEventListener('keydown', (e) => {
       lastSent = unitId;
       selectedEmergencyUnitId = unitId;
     }
-    selectedCallId = null;
+    selectedCallId = nextWaitingCall();
     selectedUnitId = null;
     syncDispatchPanel();
     return;
@@ -682,6 +682,12 @@ function syncIncidentList(): void {
   $('incidentsEmpty').hidden = sim.incidents.length > 0;
 }
 
+// The waiting call that expires first, to select after sending a unit.
+function nextWaitingCall(): number | null {
+  const waiting = dispatch?.calls.filter((call) => call.state === 'created') ?? [];
+  return waiting.length > 0 ? waiting.reduce((a, b) => (b.expiresAt < a.expiresAt ? b : a)).id : null;
+}
+
 function followEmergencyUnit(unitId: number): void {
   const info = dispatch?.unitTravel(unitId);
   if (!info) return;
@@ -694,29 +700,51 @@ function followEmergencyUnit(unitId: number): void {
 
 function syncDispatchPanel(): void {
   if (!dispatch) return;
-  const activeCalls = dispatch.calls.filter((call) => call.state !== 'resolved' && call.state !== 'missed');
-  const finishedCalls = dispatch.calls.filter((call) => call.state === 'resolved' || call.state === 'missed').slice(-3);
-  const visibleCalls = [...activeCalls, ...finishedCalls].reverse();
+  // Grouped: waiting calls first, the soonest to expire at the top; then calls with a unit
+  // on the way or on scene; then the last few finished.
+  const center = dispatch;
+  const waitingCalls = center.calls.filter((call) => call.state === 'created').sort((a, b) => a.expiresAt - b.expiresAt);
+  const servedCalls = center.calls.filter((call) => call.state === 'assigned' || call.state === 'en_route');
+  const finishedCalls = center.calls.filter((call) => call.state === 'resolved' || call.state === 'missed').slice(-3).reverse();
+  const callLabel = (call: EmergencyCall): string => {
+    if (call.state === 'created') return `waiting · ${Math.max(0, Math.ceil((call.expiresAt - sim.time) / 60))} min left`;
+    if (call.state === 'missed') return 'missed';
+    if (call.state === 'resolved') return `done · reached in ${formatMinutes(call.responseTime ?? 0)}`;
+    const unit = call.assignedUnitId === null ? undefined : center.units[call.assignedUnitId];
+    if (!unit) return 'unit assigned';
+    return `${unit.kind} ${unit.id + 1} ${unit.state === 'on_scene' ? 'on scene' : 'on the way'}`;
+  };
   const callItems: HTMLLIElement[] = [];
-  for (const call of visibleCalls) {
-    const li = document.createElement('li');
-    const button = document.createElement('button');
-    button.className = 'dispatch-call';
-    const stateLabel = call.state === 'assigned' ? 'en route' : call.state.replace('_', ' ');
-    button.textContent = `${call.kind.toUpperCase()} · ${call.site.address} · ${stateLabel}`;
-    button.setAttribute('aria-pressed', String(selectedCallId === call.id));
-    button.disabled = call.state === 'resolved' || call.state === 'missed';
-    button.onclick = () => {
-      selectedCallId = call.id;
-      selectedUnitId = null;
-      selectedEmergencyUnitId = call.assignedUnitId;
-      syncDispatchPanel();
-    };
-    li.append(button);
-    callItems.push(li);
+  const groups: [string, EmergencyCall[]][] = [['Waiting', waitingCalls], ['Unit on the way or on scene', servedCalls], ['Recent', finishedCalls]];
+  for (const [title, calls] of groups) {
+    if (calls.length === 0) continue;
+    const head = document.createElement('li');
+    head.className = 'call-group';
+    head.textContent = `${title} (${calls.length})`;
+    callItems.push(head);
+    for (const call of calls) {
+      const li = document.createElement('li');
+      const button = document.createElement('button');
+      button.className = `dispatch-call ${call.state === 'created' ? 'waiting' : ''}`;
+      const what = document.createElement('b');
+      what.textContent = `${call.kind.toUpperCase()} · ${call.site.address}`;
+      const state = document.createElement('span');
+      state.textContent = callLabel(call);
+      button.append(what, state);
+      button.setAttribute('aria-pressed', String(selectedCallId === call.id));
+      button.disabled = call.state === 'resolved' || call.state === 'missed';
+      button.onclick = () => {
+        selectedCallId = call.id;
+        selectedUnitId = null;
+        selectedEmergencyUnitId = call.assignedUnitId;
+        syncDispatchPanel();
+      };
+      li.append(button);
+      callItems.push(li);
+    }
   }
   setChildren($('dispatchCalls'), callItems);
-  $('dispatchCallsEmpty').hidden = visibleCalls.length > 0;
+  $('dispatchCallsEmpty').hidden = callItems.length > 0;
 
   const selectedCall = dispatch.calls.find((call) => call.id === selectedCallId && call.state !== 'resolved' && call.state !== 'missed');
   const candidateItems: HTMLLIElement[] = [];
@@ -767,6 +795,7 @@ function syncDispatchPanel(): void {
     if (selectedCall && selectedUnitId !== null && dispatch?.assign(selectedCall.id, selectedUnitId)) {
       lastSent = selectedUnitId;
       selectedEmergencyUnitId = selectedUnitId;
+      selectedCallId = nextWaitingCall() ?? selectedCallId;
     }
     selectedUnitId = null;
     syncDispatchPanel();

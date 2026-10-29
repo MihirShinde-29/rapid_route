@@ -148,6 +148,11 @@
       .dispatch-call, .dispatch-candidate { width: 100%; text-align: left; white-space: normal; line-height: 1.35; }
       .dispatch-call[aria-pressed='true'] { border-color: var(--accent); color: var(--text); }
       .dispatch-call:disabled { cursor: default; opacity: 0.65; }
+      .dispatch-call b { display: block; font-weight: 500; }
+      .dispatch-call span { display: block; font-size: 10px; color: var(--text-dim); margin-top: 1px; }
+      .dispatch-call.waiting { border-left: 3px solid #fab219; }
+      .dispatch-call.waiting span { color: #fab219; }
+      .dispatch-list li.call-group { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px; }
       .dispatch-candidate[aria-pressed='true'] { border-color: var(--accent); color: var(--text); }
       .dispatch-status { margin: 0 0 8px; font-family: var(--font-mono); font-size: 10px; color: var(--text-dim); }
       .dispatch-travel-status { margin: 10px 0; padding: 8px; border-left: 2px solid #35d7ff; background: var(--panel-2); color: #b6ecfa; font-family: var(--font-mono); font-size: 10px; line-height: 1.45; }

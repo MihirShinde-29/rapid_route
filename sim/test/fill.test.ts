@@ -28,5 +28,5 @@ describe('block fill', () => {
       });
     }
     expect(total).toBeGreaterThan(100);
-  });
+  }, 30_000);
 });

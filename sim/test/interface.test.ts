@@ -200,7 +200,8 @@ describe('emergency units', () => {
       arrived = s.arrivals.some((t) => t.id === trip.id);
     }
     expect(arrived).toBe(true);
-    expect(veh.route[veh.route.length - 1]).toBe(second.entrance.link);
+    // On the entrance's lane, or the other lane with a left turn in.
+    expect([second.entrance.link, s.grid.net.reverse(second.entrance.link)]).toContain(veh.route[veh.route.length - 1]);
   });
 
   it('can turn the siren off on the way back', () => {

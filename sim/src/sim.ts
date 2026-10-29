@@ -39,6 +39,9 @@ const CLOSED_COST = 1e5; // s, so routes avoid a closed street unless there is n
 // Routing cost of crossing the other lane at a driveway (s), standing for the wait for a gap;
 // four times that across an arterial. Cars still turn left when going round is much longer.
 const LEFT_TURN_S = 15;
+// A unit with its siren on takes a short gap to turn left across traffic, so its routes are not
+// steered round the block to avoid one.
+const UNIT_LEFT_TURN_S = 3;
 const UNIT_TURNS_S = 8; // a unit pulling out of its station and turning in at the call
 const ARTERIAL_LEFT_FACTOR = 4;
 
@@ -201,12 +204,12 @@ export class Simulation {
   // Route from a site, or from a car where it is now, to a site's entrance, on live link costs
   // (or on `router`'s). Tries both lanes at each end and keeps the cheapest, counting a wait for
   // each left turn across the other lane.
-  planTrip(from: Site | Vehicle, to: Site, router: Router = this.router): TripPlan {
+  planTrip(from: Site | Vehicle, to: Site, router: Router = this.router, unit = false): TripPlan {
     const net = this.grid.net;
     const len = (id: number) => this.traffic.lanes[id].geom.length;
     const cost = (id: number) => router.pathCost([id]);
     const leftWait = (id: number, left: boolean) =>
-      !left || router !== this.router ? 0 : LEFT_TURN_S * (net.links[id].arterial ? ARTERIAL_LEFT_FACTOR : 1);
+      !left || router !== this.router ? 0 : (unit ? UNIT_LEFT_TURN_S : LEFT_TURN_S) * (net.links[id].arterial ? ARTERIAL_LEFT_FACTOR : 1);
     type Start = { prefix: number[]; pos: number; left: boolean };
     let starts: Start[];
     if ('entrance' in from) {
@@ -261,12 +264,17 @@ export class Simulation {
     };
   }
 
+  // A unit's route with its siren on: left turns across traffic cost it little (see UNIT_LEFT_TURN_S).
+  planUnitTrip(from: Site | Vehicle, to: Site): TripPlan {
+    return this.planTrip(from, to, this.router, true);
+  }
+
   // Send an emergency unit from a site (its station, or a call it just finished) or from where it
   // is on the road, to a site. Returns its trip, or null if there is no route.
   sendUnit(kind: EmergencyKind, from: Site | Vehicle, to: Site, opts: { siren?: boolean } = {}): Trip | null {
-    const plan = this.planTrip(from, to);
-    if (plan.route.length === 0) return null;
     const siren = opts.siren ?? true;
+    const plan = siren ? this.planUnitTrip(from, to) : this.planTrip(from, to);
+    if (plan.route.length === 0) return null;
     if (!('entrance' in from)) {
       if (!this.traffic.redirect(from.trip.id, plan.route, plan.arrivePos, plan.arriveLeft)) return null;
       from.trip.destZone = to.zone;

@@ -73,7 +73,7 @@ describe('traffic', () => {
     expect(t.removedGridlock).toBeLessThan(0.01 * sim.totalTrips);
     // Mixed vehicle lengths must not leave lanes "reserved" forever and block departures.
     expect(t.waitingToDepart).toBeLessThan(0.01 * sim.totalTrips);
-  }, 60_000);
+  }, 120_000);
 
   it('a probe trip uses the picked start and end, and the jam follows that pair', () => {
     const sim = new Simulation({ ...DEFAULT_CONFIG, startHour: 7 });

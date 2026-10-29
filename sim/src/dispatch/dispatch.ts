@@ -240,7 +240,7 @@ export class DispatchCenter {
     if (!call || call.state !== 'created') return [];
     return this.units
       .filter((unit) => this.isFree(unit) && unit.kind === CALL_UNIT[call.kind])
-      .map((unit) => ({ unitId: unit.id, eta: this.sim.planTrip(this.startOf(unit), call.site).unitEta }))
+      .map((unit) => ({ unitId: unit.id, eta: this.sim.planUnitTrip(this.startOf(unit), call.site).unitEta }))
       .filter((candidate) => Number.isFinite(candidate.eta))
       .sort((a, b) => a.eta - b.eta || a.unitId - b.unitId);
   }
@@ -251,7 +251,7 @@ export class DispatchCenter {
     const call = this.calls.find((item) => item.id === unit.callId);
     if (!call) return null;
     const vehicle = this.sim.traffic.vehicleOf(unit.tripId);
-    const plan = this.sim.planTrip(vehicle ?? unit.location, call.site);
+    const plan = this.sim.planUnitTrip(vehicle ?? unit.location, call.site);
     return {
       tripId: unit.tripId,
       origin: unit.station.site,

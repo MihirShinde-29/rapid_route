@@ -10,6 +10,7 @@ describe('unit ETAs', () => {
     const rng = mulberry32(3);
     const stations = sim.sites.filter((s) => s.kind === 'hospital' || s.kind.endsWith('_station'));
     const sent = new Map<number, { eta: number; unitEta: number; at: number }>();
+    let arriveLeft = 0;
     const ratios: { unit: number; live: number }[] = [];
     const collect = () => {
       for (const a of sim.arrivals) {
@@ -20,9 +21,10 @@ describe('unit ETAs', () => {
     for (let k = 0; k < 24; k++) {
       const from = stations[Math.floor(rng() * stations.length)];
       const to = sim.sites[Math.floor(rng() * sim.sites.length)];
-      const plan = sim.planTrip(from, to);
+      const plan = sim.planUnitTrip(from, to);
       const trip = sim.sendUnit('ambulance', from, to);
       if (trip) sent.set(trip.id, { eta: plan.eta, unitEta: plan.unitEta, at: sim.time });
+      if (trip?.arriveLeft) arriveLeft++;
       for (let s = 0; s < 300; s++) {
         sim.step();
         collect();
@@ -38,5 +40,7 @@ describe('unit ETAs', () => {
     expect(median(ratios.map((r) => r.unit))).toBeLessThan(1.15);
     // The live-traffic ETA, meant for ordinary cars, overstates a unit's trip.
     expect(median(ratios.map((r) => r.live))).toBeLessThan(0.8);
+    // Units turn left into the call's driveway rather than going round the block to avoid it.
+    expect(arriveLeft).toBeGreaterThanOrEqual(3);
   }, 120_000);
 });

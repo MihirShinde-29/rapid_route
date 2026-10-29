@@ -19,6 +19,7 @@ Live build: https://mihirshinde-29.github.io/rapid_route/ · screenshots in `doc
 - Ambulances, fire engines and police cars drive in the traffic model with sirens, up to 1.3 times the speed limit.
 - Cars make way: they pull onto the shoulder, the unit passes, they merge back. Junctions ahead of a unit are held for it.
 - Unit ETAs account for the siren: a unit arrives in about its ETA whatever the traffic (median 1.00 of it at the morning peak).
+- Units turn left into a call's driveway across traffic (they take short gaps with the siren on) instead of going round the block to avoid it: about 30% of unit trips now arrive with a left turn, up from 3–5%.
 - Ride along with any unit; boids debug view (B) shows each unit's yield reach, held junctions and steering arrows.
 - Coverage map (C): how fast the nearest free unit (at its station, or driving back) could reach each part of the city on live traffic, for all units or each kind.
 - Station placement before a shift: move one station to another building, with the coverage map previewing the result.

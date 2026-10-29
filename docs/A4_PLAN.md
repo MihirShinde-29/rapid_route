@@ -2,7 +2,7 @@
 
 Group Rapid Route: Mihir Shinde, Ananya Das Hullumane Neelameghashyam
 
-Status: draft for discussion. Nothing below is built yet. Dates assume A4 is due Mon Nov 2 and the final is due around Dec 10; fix them once confirmed.
+Status (Oct 29): built. Everything below is implemented, except that station placement moves any station to a building or car park (not a fire station to any junction) and works in both modes. Dates assume A4 is due Mon Nov 2 and the final is due around Dec 10; fix them once confirmed.
 
 ## 1. What A4 asks for, and our answer
 
@@ -208,7 +208,7 @@ Mihir's side is now about twice a normal week. It fits only because most of that
 5. lane closures (accidents on a lane stay);
 6. left turns into and out of entrances (fall back to right-in, right-out).
 
-Status (Oct 29): everything in the plan is built, nothing was cut. Ananya's remaining items (end-screen chart, best scores, random accidents, call alerts and chime, release notes and screenshots) were finished by Mihir on Oct 29, with siren-aware unit ETAs brought forward from W10. Status (Oct 28): nothing on Mihir's list was cut. Station placement went in too: the sim swaps the chosen site's kind with the station's before the shift, so the dispatch side needed no `moveStation`.
+Status (Oct 29): everything in the plan is built, nothing was cut. Ananya's remaining items (end-screen chart, best scores, random accidents, call alerts and chime, release notes and screenshots) were finished by Mihir on Oct 29, with siren-aware unit ETAs brought forward from W10. Then the rest of the plan was matched: 2-hour shifts at 20×, Easy loses at 4 missed calls, crash-call accidents stay until handled, grade from the mean score, returning units can be reassigned, the fastest candidate is marked, the A3 traffic panels sit in a second tab, a how-to-play card, and Esc on the end screen returns to the menu. Status (Oct 28): nothing on Mihir's list was cut. Station placement went in too: the sim swaps the chosen site's kind with the station's before the shift, so the dispatch side needed no `moveStation`.
 
 The core loop, yielding, sites with entrance-to-entrance trips, sound, alerts and shortcuts stay.
 

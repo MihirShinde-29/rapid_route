@@ -73,14 +73,14 @@ pauseBtn.disabled = true;
 const startDispatchBtn = $('startDispatch') as HTMLButtonElement;
 startDispatchBtn.onclick = () => {
   const shifts: Record<string, { start: number; duration: number }> = {
-    am: { start: 6, duration: 4 },
-    midday: { start: 10, duration: 5 },
-    pm: { start: 15, duration: 4 },
-    night: { start: 22, duration: 8 },
+    am: { start: 7, duration: 2 },
+    midday: { start: 11, duration: 2 },
+    pm: { start: 16.5, duration: 2 },
+    night: { start: 23, duration: 2 },
   };
   // Random accidents are per sim hour at peak demand, fewer when the roads are quiet.
   const difficulties: Record<string, { callsPerHour: number; missedLimit: number; unitCounts?: Partial<Record<EmergencyKind, number>>; accidentsPerHour: number }> = {
-    easy: { callsPerHour: 12, missedLimit: 5, unitCounts: { ambulance: 3 }, accidentsPerHour: 0.7 },
+    easy: { callsPerHour: 12, missedLimit: 4, unitCounts: { ambulance: 3 }, accidentsPerHour: 0.7 },
     normal: { callsPerHour: 20, missedLimit: 3, accidentsPerHour: 1 },
     hard: { callsPerHour: 30, missedLimit: 2, unitCounts: { police: 1 }, accidentsPerHour: 1.5 },
   };
@@ -122,6 +122,7 @@ startDispatchBtn.onclick = () => {
   paused = false;
   pauseBtn.disabled = false;
   pauseBtn.textContent = 'Pause';
+  speedSel.value = '20'; // a 2-hour shift in about 6 real minutes
   endDispatchBtn.textContent = modeValue === 'sandbox' ? 'End session' : 'End shift';
   $('dispatchMenu').hidden = true;
   $('dispatchActive').hidden = false;
@@ -329,6 +330,10 @@ window.addEventListener('keydown', (e) => {
     setPickHint(null);
     return;
   }
+  if (e.key === 'Escape' && dispatch?.ended != null && !$('dispatchResult').hidden) {
+    $('returnMenu').click();
+    return;
+  }
   if (e.key === 'Escape') {
     if (placing !== null) {
       endPlacing();
@@ -416,7 +421,11 @@ function coverageSources(kind: EmergencyKind | 'all'): number[] {
   const nodes = new Set<number>();
   if (dispatch) {
     for (const u of dispatch.units) {
-      if (u.state === 'idle' && (kind === 'all' || u.kind === kind)) nodes.add(links[u.location.entrance.link].to);
+      if (kind !== 'all' && u.kind !== kind) continue;
+      if (u.state === 'idle') nodes.add(links[u.location.entrance.link].to);
+      // A unit driving back can be sent from where it is (its next junction).
+      const veh = u.state === 'returning' && u.tripId !== null ? sim.traffic.vehicleOf(u.tripId) : undefined;
+      if (veh) nodes.add(links[veh.route[veh.ri]].to);
     }
   } else {
     // Before a shift: every station, with the move being previewed (if any) applied.
@@ -739,7 +748,8 @@ function syncDispatchPanel(): void {
       const li = document.createElement('li');
       const button = document.createElement('button');
       button.className = 'dispatch-candidate';
-      button.textContent = `${unit.kind.toUpperCase()} ${unit.id + 1} · ${Math.round(candidate.eta)} s`;
+      const notes = [candidateItems.length === 0 ? 'fastest' : '', unit.state === 'returning' ? 'on its way back' : ''].filter(Boolean);
+      button.textContent = `${unit.kind.toUpperCase()} ${unit.id + 1} · ${Math.round(candidate.eta)} s${notes.length > 0 ? ` · ${notes.join(' · ')}` : ''}`;
       button.setAttribute('aria-pressed', String(selectedUnitId === unit.id));
       button.onclick = () => {
         selectedUnitId = unit.id;
@@ -810,6 +820,20 @@ function syncDispatchPanel(): void {
   setChildren($('dispatchUnits'), unitRows);
 }
 
+// Sidebar tabs: the dispatch panel, or the traffic panels from the A3 build.
+const trafficPanels = [...document.querySelectorAll<HTMLElement>('aside > section.panel:not(#dispatchPanel)')];
+const tabDispatch = $('tabDispatch');
+const tabTraffic = $('tabTraffic');
+function showTab(traffic: boolean): void {
+  tabDispatch.setAttribute('aria-selected', String(!traffic));
+  tabTraffic.setAttribute('aria-selected', String(traffic));
+  $('dispatchPanel').hidden = traffic;
+  for (const panel of trafficPanels) panel.hidden = !traffic;
+}
+tabDispatch.onclick = () => showTab(false);
+tabTraffic.onclick = () => showTab(true);
+showTab(false);
+
 // Lists are rebuilt only when what they show changes, so a click is not lost to a rebuild
 // between pressing and releasing the button.
 const listSignatures = new WeakMap<Element, string>();
@@ -844,19 +868,22 @@ function showBest(): void {
 for (const select of [dispatchModeSelect, shiftSelect, difficultySelect]) select.addEventListener('change', showBest);
 showBest();
 
-// Grade: the share of finished calls reached within their target time. Losing the shift is an F.
-function gradeOf(center: DispatchCenter, outcome: string): { letter: string; within: number; finished: number } {
+// Grade from the mean score per finished call (100 within target, down to 20 when late, -50
+// missed). Losing the shift is an F.
+function gradeOf(center: DispatchCenter, outcome: string): { letter: string; within: number; finished: number; mean: number } {
   const finished = center.calls.filter((c) => c.state === 'resolved' || c.state === 'missed');
   const within = finished.filter((c) => c.state === 'resolved' && (c.responseTime ?? Infinity) <= c.targetResponseTime).length;
-  const share = finished.length > 0 ? within / finished.length : 0;
-  const letter = outcome === 'loss' ? 'F' : finished.length === 0 ? '—' : share >= 0.9 ? 'A' : share >= 0.75 ? 'B' : share >= 0.6 ? 'C' : share >= 0.4 ? 'D' : 'F';
-  return { letter, within, finished: finished.length };
+  const mean = finished.length > 0 ? center.score.points / finished.length : 0;
+  const letter = outcome === 'loss' ? 'F' : finished.length === 0 ? '—' : mean >= 90 ? 'A' : mean >= 75 ? 'B' : mean >= 60 ? 'C' : mean >= 40 ? 'D' : 'F';
+  return { letter, within, finished: finished.length, mean };
 }
 
 function showResult(center: DispatchCenter, outcome: string): void {
-  const { letter, within, finished } = gradeOf(center, outcome);
+  const { letter, within, finished, mean } = gradeOf(center, outcome);
   $('resultGrade').textContent = letter;
-  $('resultGradeNote').textContent = finished > 0 ? `${within} of ${finished} calls reached within target` : 'No calls finished';
+  $('resultGradeNote').textContent = finished > 0
+    ? `${Math.round(mean)} points per call · ${within} of ${finished} reached within target`
+    : 'No calls finished';
   const points = center.score.points;
   const all = loadBest();
   const prev = all[playedKey];

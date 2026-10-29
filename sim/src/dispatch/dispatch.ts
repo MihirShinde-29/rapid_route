@@ -2,6 +2,7 @@ import { HOUR } from '../core/time';
 import { mulberry32 } from '../core/rng';
 import type { Site } from '../city/sites';
 import type { EmergencyKind } from '../traffic/vehicleTypes';
+import type { Vehicle } from '../traffic/traffic';
 import { BLOCK_JUNCTION_M, type Incident, type Simulation } from '../sim';
 
 export type DispatchMode = 'dispatcher' | 'sandbox';
@@ -65,6 +66,7 @@ export interface DispatchEvent {
   callId?: number;
   unitId?: number;
 }
+const ACCIDENT_CLEARS_AFTER_MISS_S = 20 * 60; // nobody came: it is cleared eventually anyway
 const MAX_EVENTS = 200; // kept if nobody drains them (tests, headless runs)
 
 const DEFAULT_CALLS_PER_HOUR = 20;
@@ -196,6 +198,8 @@ export class DispatchCenter {
         ? candidate
         : nearest,
     );
+    // The accident stays until the call is handled (or missed), not on its own timer.
+    incident.until = null;
     return this.addCall('crash', site, incident.id);
   }
 
@@ -235,8 +239,8 @@ export class DispatchCenter {
     const call = this.calls.find((item) => item.id === callId);
     if (!call || call.state !== 'created') return [];
     return this.units
-      .filter((unit) => unit.state === 'idle' && unit.kind === CALL_UNIT[call.kind])
-      .map((unit) => ({ unitId: unit.id, eta: this.sim.planTrip(unit.location, call.site).unitEta }))
+      .filter((unit) => this.isFree(unit) && unit.kind === CALL_UNIT[call.kind])
+      .map((unit) => ({ unitId: unit.id, eta: this.sim.planTrip(this.startOf(unit), call.site).unitEta }))
       .filter((candidate) => Number.isFinite(candidate.eta))
       .sort((a, b) => a.eta - b.eta || a.unitId - b.unitId);
   }
@@ -257,11 +261,22 @@ export class DispatchCenter {
     };
   }
 
+  // Idle at its station, or driving back to it (it turns round from where it is).
+  isFree(unit: EmergencyUnit): boolean {
+    if (unit.state === 'idle') return true;
+    return unit.state === 'returning' && unit.tripId !== null && this.sim.traffic.vehicleOf(unit.tripId) !== undefined;
+  }
+
+  // Where a unit would set off from: its site, or its vehicle if it is on the road.
+  private startOf(unit: EmergencyUnit): Site | Vehicle {
+    return (unit.state === 'returning' && unit.tripId !== null && this.sim.traffic.vehicleOf(unit.tripId)) || unit.location;
+  }
+
   assign(callId: number, unitId: number): boolean {
     const call = this.calls.find((item) => item.id === callId);
     const unit = this.units.find((item) => item.id === unitId);
-    if (!call || call.state !== 'created' || !unit || unit.state !== 'idle' || unit.kind !== CALL_UNIT[call.kind]) return false;
-    const trip = this.sim.sendUnit(unit.kind, unit.location, call.site);
+    if (!call || call.state !== 'created' || !unit || !this.isFree(unit) || unit.kind !== CALL_UNIT[call.kind]) return false;
+    const trip = this.sim.sendUnit(unit.kind, this.startOf(unit), call.site);
     if (!trip) return false;
     call.state = 'assigned';
     call.assignedUnitId = unit.id;
@@ -418,6 +433,8 @@ export class DispatchCenter {
     if (call.state === 'missed' || call.state === 'resolved') return;
     call.state = 'missed';
     this.emit({ type: 'missed', t: this.sim.time, callId: call.id });
+    const accident = call.incidentId === null ? undefined : this.sim.incidents.find((i) => i.id === call.incidentId);
+    if (accident) accident.until = this.sim.time + ACCIDENT_CLEARS_AFTER_MISS_S;
     this.missedCalls++;
     this.points -= 50;
   }

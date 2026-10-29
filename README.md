@@ -25,7 +25,7 @@ TypeScript + Vite + Three.js. The sim core has no DOM access and runs headless i
 cd sim
 npm install
 npm run dev     # open the printed localhost URL
-npm test        # 61 tests: demand, car-following, junctions, signals, routing, incidents, blocked lanes, sites, trips, units, unit ETAs, yielding, coverage, station placement, block fill and dispatch
+npm test        # 63 tests: demand, car-following, junctions, signals, routing, incidents, blocked lanes, sites, trips, units, unit ETAs, yielding, coverage, station placement, block fill and dispatch
 npm run build   # type-check and build a static site into sim/dist
 ```
 Needs Node 20+. Vite is pinned to 6 / Vitest to 3 because newer releases need a newer Node.
@@ -63,8 +63,8 @@ M mute, Esc back). If anything throws, an error panel replaces the frozen page.
 
 The game: pick a mode, shift and difficulty and press `Start shift` (the city reloads at the shift's hour with traffic
 on the roads). In Dispatcher mode, select a call (from the list, its pop-up, its pin on the map or the arrow at the screen
-edge), pick a unit by ETA and assign it, or press Enter to send the fastest. Random accidents block a lane and bring crash
-calls, more at rush hour. The end screen shows a grade, the score and each call's response time against its target; the
+edge), pick a unit by ETA (a unit driving back to its station counts too) and assign it, or press Enter to send the fastest. Shifts are 2 sim hours at 20×. The A3 traffic panels are in the `Traffic panels` tab. Random accidents block a lane and bring crash
+calls, more at rush hour, and stay until a unit has dealt with them. The end screen shows a grade, the score and each call's response time against its target; the
 best score per mode, shift and difficulty is kept in the browser. Release notes: `docs/A4_RELEASE_NOTES.md`.
 
 Before a shift, `Move a station (optional)` moves one hospital, fire station or police station to another building or

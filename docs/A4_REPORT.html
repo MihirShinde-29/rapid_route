@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dispatch: A4 MVP 2.0 Alpha</title>
+<style>
+  @page { size: Letter; margin: 0.5in 0.55in; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 9pt; line-height: 1.32; color: #111; margin: 0; }
+  h1 { font-size: 15pt; margin: 0 0 2px; }
+  h2 { font-size: 10.5pt; margin: 10px 0 4px; border-bottom: 1px solid #999; padding-bottom: 1px; }
+  h3 { font-size: 9pt; margin: 6px 0 2px; }
+  .meta { color: #333; margin-bottom: 4px; }
+  a { color: #0645ad; }
+  table { border-collapse: collapse; width: 100%; font-size: 7.8pt; }
+  th, td { border: 1px solid #aaa; padding: 2px 4px; vertical-align: top; text-align: left; }
+  th { background: #eee; }
+  tr.buffer td { background: #f3f3f3; font-weight: 600; }
+  ul { margin: 2px 0 4px; padding-left: 16px; }
+  li { margin: 1px 0; }
+  .shots { display: flex; gap: 8px; margin-top: 6px; }
+  .shots figure { margin: 0; flex: 1; }
+  .shots img { width: 100%; border: 1px solid #999; display: block; }
+  .shots figcaption { font-size: 7.5pt; color: #333; margin-top: 2px; }
+  .page2 { break-before: page; }
+</style>
+</head>
+<body>
+<h1>Dispatch: MVP 2.0 Alpha (Assignment 4)</h1>
+<div class="meta">Group Rapid Route: Mihir Shinde, Ananya Das Hullumane Neelameghashyam · CS 549 · Live build: <a href="https://mihirshinde-29.github.io/rapid_route/">mihirshinde-29.github.io/rapid_route</a> · Code: <a href="https://github.com/MihirShinde-29/rapid_route">github.com/MihirShinde-29/rapid_route</a></div>
+
+<h2>Weekly schedule to the final</h2>
+<table>
+<thead><tr><th style="width:13%">Week</th><th style="width:38%">Engineering</th><th style="width:20%">Assets</th><th style="width:16%">Integration / milestone</th><th style="width:13%">Owner</th></tr></thead>
+<tbody>
+<tr><td>W9 (Oct 26 – Nov 1), done</td><td>Emergency units in traffic; yielding (pull over, pass, merge back) and junction pre-emption; boids debug view; every building an address with its own entrance; door-to-door trips with left turns in and out; leisure trips; accidents and lane closures on one lane; dispatch core, scoring, difficulty, best scores; menu, HUD, end screen with response chart; random accidents; call alerts and edge arrows; reassigning returning units; shortcuts; ride along; coverage map; station placement; siren-aware unit ETAs</td><td>Ambulance, fire engine and police models; siren lights; station buildings; drawn entrances; block fill; siren audio, chime and UI sounds (all procedural)</td><td>MVP 2.0 integrated Oct 29, submitted Nov 2</td><td>Both</td></tr>
+<tr><td>W10 (Nov 2 – 8)</td><td>Mutual aid (send from further away when local units are busy); smarter turn-round for reassigned units</td><td>Anything left from A4</td><td>Merge mid-week; play-test</td><td>Ananya: mutual aid; Mihir: turn-round, A4 fixes</td></tr>
+<tr><td>W11 (Nov 9 – 15)</td><td>Multi-unit calls (crash needs police and ambulance; fire needs engine and ambulance); severity priority</td><td>UI icons; sound mix and volume settings</td><td>Merge end of week</td><td>Ananya: multi-unit; Mihir: sound, icons</td></tr>
+<tr><td>W12 (Nov 16 – 22)</td><td>Ordinary cars reroute mid-trip when a closure appears; yielding tuning at intersections and on arterials</td><td>Night lighting of units, call markers</td><td>Feature-complete build</td><td>Mihir: rerouting; Ananya: polish</td></tr>
+<tr><td>W13 (Nov 23 – 29)</td><td>Thanksgiving, light week: performance pass (1000 cars plus units), difficulty tuning</td><td>Final UI pass</td><td>Feature freeze Nov 29</td><td>Both</td></tr>
+<tr><td>W14 (Nov 30 – Dec 6)</td><td>Could-have only if ahead: adaptive signals, severity-weighted dispatch</td><td>Video recording, report figures</td><td>Release candidate Dec 6</td><td>Both</td></tr>
+<tr class="buffer"><td>W15 (Dec 7 – 13): buffer</td><td>No new features. Bug fixes, documentation, README, final report and video</td><td></td><td>Final submission</td><td>Both</td></tr>
+</tbody>
+</table>
+
+<h2>Release notes since A3 (Oct 13)</h2>
+<h3>The game</h3>
+<ul>
+<li><b>Start:</b> menu over the live city with a how-to-play card. Mode (Dispatcher or Sandbox), shift (AM rush, midday, PM rush, night; 2 sim hours, played at 20×, about 6 real minutes) and difficulty. The best score for that choice is shown. Optional: move one station before the shift, with the coverage map previewing the result.</li>
+<li><b>Active:</b> calls (medical, fire, crime, crash) come in at real addresses with a pop-up and a chime; off-screen calls get an arrow at the screen edge. Select a call, pick a unit from the list (ETA, fastest marked) or press Enter, and the unit drives there through traffic with its siren on. Units driving back can be sent again. Random accidents block a lane and bring crash calls, more at rush hour.</li>
+<li><b>End:</b> the shift ends on time (win) or after too many missed calls (loss); Sandbox has End session. The end screen shows a grade, score, calls handled and missed, mean response, a chart of each call's response time against its target, and the best score. Play again or return to the menu.</li>
+<li><b>Difficulty:</b> Easy / Normal / Hard set calls per hour (12 / 20 / 30), missed calls allowed (4 / 3 / 2), units (Easy +1 ambulance per hospital, Hard −1 police car per station) and accident rate.</li>
+</ul>
+<h3>Simulation and pillars</h3>
+<ul>
+<li><b>Swarm and boids:</b> cars ahead of a unit pull onto the shoulder, the unit passes, they merge back; junctions ahead are held for it. A boids debug view (B) draws each unit's yield reach, held junctions and steering arrows. With yielding a unit crossed a test route in 120 s against 265 s stuck behind the same cars.</li>
+<li><b>Pathfinding, made visible:</b> a coverage map (C) shades the city by how fast the nearest free unit could get there on live traffic (multi-source shortest paths). Unit ETAs now account for the siren: units arrive in a median 1.00 of their ETA at the morning peak.</li>
+<li><b>City:</b> every building, park and car park is an address with its own entrance; trips run door to door with left turns on gaps in oncoming traffic; leisure trips to parks and the mall. Accidents and lane closures block one lane and cars pass one side at a time. Unit and station models, drawn entrances, filler structures between buildings.</li>
+<li><b>Also:</b> ride along with any unit; procedural siren sound and UI sounds with mute; keyboard shortcuts with a help overlay; an error panel instead of a frozen page; the A3 traffic panels moved to a second tab. From A3 grader feedback: the OD matrix redrawn as 9 districts with live counts, and incidents on any street with rerouting.</li>
+<li><b>Stability:</b> 63 automated tests (Vitest), including a unit passing a full queue, pre-emption, coverage matching single-source A*, unit ETAs against real trips, call lifecycle, scoring and loss, random accidents, and the morning peak (about 700 cars) with no gridlock.</li>
+</ul>
+
+<div class="page2">
+<h2>Known issues</h2>
+<ul>
+<li><b>One lane per direction.</b> Making way for a siren is drawn as a 2 m move onto the shoulder; units pass only cars that have pulled over.</li>
+<li><b>Lane closures are slow.</b> One side goes at a time, so a 65 m closure carries about 650–700 cars an hour; on a busy arterial at the peak, queues build. Cars reroute when the incident is placed, not while they wait.</li>
+<li><b>A unit sent while driving back turns round at its next junction</b>, so its first few hundred metres can go the wrong way. Coverage counts it from that junction.</li>
+<li><b>Starting a shift reloads the page</b> at the shift's hour with half an hour of traffic run first. A station move is kept; incidents placed before are not.</li>
+<li><b>Station placement</b> is one move per shift, onto a building or car park on a block laid out lot by lot.</li>
+<li><b>At 300× the browser drops sim time</b> when it falls behind (a step takes about 0.5 ms at the peak).</li>
+<li><b>Best scores are kept in this browser only.</b> Call pop-ups last 6 real seconds whatever the speed; at 300× only the newest 3 show (every call still has a pin and a list entry).</li>
+<li><b>The gridlock guard</b> (removes a car stopped for 3 minutes) stays as a last resort; it removed none in the tests or in a sweep of 5 scenarios with 24 units each.</li>
+<li><b>After an error the page has to be reloaded.</b></li>
+</ul>
+
+<h2>Screenshots</h2>
+<div class="shots">
+<figure><img src="screenshots/alerts.jpg" alt="Call pop-ups, call pins and an edge arrow over the city"><figcaption>Call alerts: pop-ups, pins over calls in view, an arrow to an off-screen call.</figcaption></figure>
+<figure><img src="screenshots/ride_along.jpg" alt="Riding along with an ambulance on its way to a call"><figcaption>Ride along with an ambulance on its way to a medical call.</figcaption></figure>
+</div>
+<div class="shots">
+<figure><img src="screenshots/coverage.jpg" alt="Coverage map shading the city by time for the nearest free unit"><figcaption>Coverage map: time for the nearest free unit, on live traffic.</figcaption></figure>
+<figure><img src="screenshots/end_screen.jpg" alt="End screen with grade, score and response-time chart"><figcaption>End screen: grade, score, response time per call against its target.</figcaption></figure>
+</div>
+</div>
+</body>
+</html>

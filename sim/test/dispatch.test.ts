@@ -243,4 +243,40 @@ describe('dispatch', () => {
     expect(new Set(streets).size).toBe(sim.incidents.length);
     expect(center.calls.map((c) => c.incidentId)).toEqual(sim.incidents.map((i) => i.id));
   }, 120_000);
+
+  it('keeps an accident with a crash call until the call is handled, and clears it later if missed', () => {
+    const sim = quietSimulation();
+    const center = new DispatchCenter(sim, { mode: 'dispatcher', callsPerHour: 0, missedLimit: 10 });
+    const accident = sim.addIncident('accident', sim.grid.net.links.find((link) => link.arterial)!.id);
+    const call = center.createCrashCall(accident);
+    while (sim.time < accident.placedAt + 25 * 60) sim.step();
+    expect(call.state).toBe('missed');
+    expect(sim.incidents).toContain(accident); // its own 20-minute timer no longer applies
+    while (sim.time < accident.placedAt + 41 * 60) sim.step();
+    expect(sim.incidents).not.toContain(accident);
+  });
+
+  it('sends a unit that is driving back to its station to a new call, from where it is', () => {
+    const sim = quietSimulation();
+    const center = new DispatchCenter(sim, { mode: 'dispatcher', callsPerHour: 0 });
+    const first = center.createCall('crime', nonStationSite(sim));
+    const unitId = center.candidates(first.id)[0].unitId;
+    center.assign(first.id, unitId);
+    const unit = center.units[unitId];
+    for (let step = 0; step < 40 * 60 * 10 && !(unit.state === 'returning' && unit.tripId !== null && sim.traffic.vehicleOf(unit.tripId)); step++) sim.step();
+    expect(unit.state).toBe('returning');
+    for (let step = 0; step < 100; step++) sim.step();
+    const veh = sim.traffic.vehicleOf(unit.tripId!)!;
+    expect(veh.siren).toBe(false);
+    const second = center.createCall('crime', sim.sites[(first.site.id + 400) % sim.sites.length]);
+    const offer = center.candidates(second.id).find((c) => c.unitId === unitId);
+    expect(offer).toBeDefined();
+    expect(center.assign(second.id, unitId)).toBe(true);
+    expect(unit.state).toBe('en_route');
+    expect(veh.siren).toBe(true);
+    for (let step = 0; step < 30 * 60 * 10 && unit.state === 'en_route'; step++) sim.step();
+    expect(unit.state).toBe('on_scene');
+    expect(unit.location).toBe(second.site);
+    expect(second.responseTime).not.toBeNull();
+  });
 });

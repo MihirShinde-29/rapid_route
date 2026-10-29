@@ -39,6 +39,7 @@ const CLOSED_COST = 1e5; // s, so routes avoid a closed street unless there is n
 // Routing cost of crossing the other lane at a driveway (s), standing for the wait for a gap;
 // four times that across an arterial. Cars still turn left when going round is much longer.
 const LEFT_TURN_S = 15;
+const UNIT_TURNS_S = 8; // a unit pulling out of its station and turning in at the call
 const ARTERIAL_LEFT_FACTOR = 4;
 
 export interface RouteDecision {
@@ -83,6 +84,10 @@ export interface TripPlan {
   departLeft: boolean;
   arriveLeft: boolean;
   eta: number; // s on live link costs; Infinity if unreachable
+  // s for a unit with its siren on: the free-flow time along the route at the speed limit. Cars
+  // make way, so units take about this whatever the traffic (measured: 0.93-1.16 of it at the
+  // morning peak, 10th to 90th percentile), where `eta` reads about 1.7 times too high.
+  unitEta: number;
 }
 
 // Owns all sim state. No DOM access, so it runs headless in tests.
@@ -238,8 +243,13 @@ export class Simulation {
       best = { route: [...s.prefix.slice(0, -1), ...found.links], start: s, end: e, eta: found.cost };
     }
     if (!best) {
-      return { route: [], departPos: starts[0]?.pos ?? 0, arrivePos: to.entrance.pos, departLeft: false, arriveLeft: false, eta: Infinity };
+      return { route: [], departPos: starts[0]?.pos ?? 0, arrivePos: to.entrance.pos, departLeft: false, arriveLeft: false, eta: Infinity, unitEta: Infinity };
     }
+    const limit = (id: number) => net.links[id].speedLimit;
+    let unitEta = best.route.reduce((t, id) => t + net.links[id].length / limit(id), 0);
+    unitEta -= best.start.pos / limit(best.route[0]);
+    const last = best.route[best.route.length - 1];
+    unitEta -= (len(last) - best.end.pos) / limit(last);
     return {
       route: best.route,
       departPos: best.start.pos,
@@ -247,6 +257,7 @@ export class Simulation {
       departLeft: best.start.left,
       arriveLeft: best.end.left,
       eta: Math.max(0, best.eta),
+      unitEta: Math.max(0, unitEta) + UNIT_TURNS_S,
     };
   }
 

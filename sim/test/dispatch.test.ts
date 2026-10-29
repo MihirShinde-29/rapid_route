@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_CONFIG, Simulation } from '../src/sim';
+import { BLOCK_JUNCTION_M, DEFAULT_CONFIG, Simulation } from '../src/sim';
+import { HOUR } from '../src/core/time';
 import { DispatchCenter } from '../src/dispatch/dispatch';
 
 function quietSimulation(): Simulation {
@@ -189,4 +190,57 @@ describe('dispatch', () => {
     expect(call.state).toBe('assigned');
     expect(call.assignedUnitId).toBe(fastest);
   });
+
+  it('reports call, assigned, arrived, resolved and ended events in order', () => {
+    const sim = quietSimulation();
+    const center = new DispatchCenter(sim, { mode: 'dispatcher', callsPerHour: 0 });
+    const call = center.createCall('medical', nonStationSite(sim));
+    const unitId = center.candidates(call.id)[0].unitId;
+    center.assign(call.id, unitId);
+    for (let step = 0; step < 30 * 60 * 10 && call.state !== 'resolved'; step++) sim.step();
+    center.end();
+    const events = center.drainEvents();
+    expect(events.map((e) => e.type)).toEqual(['call', 'assigned', 'arrived', 'resolved', 'ended']);
+    expect(events.slice(0, 4).every((e) => e.callId === call.id)).toBe(true);
+    expect(events[1].unitId).toBe(unitId);
+    expect(center.drainEvents()).toEqual([]);
+  });
+
+  it('sets the number of units per station by difficulty', () => {
+    const sim = quietSimulation();
+    const easy = new DispatchCenter(sim, { mode: 'dispatcher', unitCounts: { ambulance: 3, police: 2 } });
+    const hard = new DispatchCenter(sim, { mode: 'dispatcher', unitCounts: { police: 1 } });
+    for (const station of easy.stations) expect(station.unitIds.length).toBe(station.kind === 'ambulance' ? 3 : station.kind === 'police' ? 2 : 1);
+    for (const station of hard.stations) expect(station.unitIds.length).toBe(station.kind === 'police' ? 1 : station.kind === 'ambulance' ? 2 : 1);
+  });
+
+  it('places random accidents on busy streets, each with its own crash call, more at rush hour', () => {
+    const count = (hour: number) => {
+      const sim = new Simulation({ ...DEFAULT_CONFIG, startHour: hour });
+      const center = new DispatchCenter(sim, { mode: 'dispatcher', callsPerHour: 0, accidentsPerHour: 12, missedLimit: 1000 });
+      while (sim.time < (hour + 1) * HOUR) sim.step();
+      for (const call of center.calls) {
+        expect(call.kind).toBe('crash');
+        const inc = sim.incidents.find((i) => i.id === call.incidentId);
+        if (!inc) continue; // cleared on its own after 20 minutes
+        expect(inc.kind).toBe('accident');
+        const len = sim.traffic.lanes[inc.lane!].geom.length;
+        expect(inc.from).toBeGreaterThanOrEqual(BLOCK_JUNCTION_M - 1e-9);
+        expect(inc.to).toBeLessThanOrEqual(len - BLOCK_JUNCTION_M + 1e-9);
+      }
+      return center.calls.length;
+    };
+    const rush = count(7.5);
+    const night = count(2);
+    expect(rush).toBeGreaterThanOrEqual(5);
+    expect(rush).toBeLessThanOrEqual(20);
+    expect(night).toBeLessThan(rush);
+    // Never two on one street.
+    const sim = quietSimulation();
+    const center = new DispatchCenter(sim, { mode: 'sandbox' });
+    for (let k = 0; k < 30; k++) center.randomAccident();
+    const streets = sim.incidents.map((i) => Math.min(i.links[0], sim.grid.net.reverse(i.links[0]) ?? Infinity));
+    expect(new Set(streets).size).toBe(sim.incidents.length);
+    expect(center.calls.map((c) => c.incidentId)).toEqual(sim.incidents.map((i) => i.id));
+  }, 120_000);
 });

@@ -30,6 +30,7 @@ export const ZONE_HEX: Record<ZoneType, number> = {
 const WORLD_PER_M = 0.14; // 100 m block spacing -> 14 world units, as in the prototype
 const BLOCK_INSET = 1.4;
 const MAX_CARS = 4000;
+const BEACON_NEAR = 40; // world units: siren beacons show beyond this distance from the camera
 const MAX_BOID_VERTS = 24000; // boids debug view line vertices
 // Coverage map: seconds from the nearest free unit, green at or under the first stop, red at or
 // over the last.
@@ -1185,7 +1186,7 @@ export class View3D {
     }
     this.sirenMesh = new THREE.InstancedMesh(
       new THREE.SphereGeometry(0.32, 10, 8),
-      new THREE.MeshBasicMaterial({ vertexColors: true, depthTest: false }),
+      new THREE.MeshBasicMaterial({ depthTest: false }),
       MAX_CARS,
     );
     this.sirenMesh.count = 0;
@@ -1248,8 +1249,10 @@ export class View3D {
     for (const veh of traffic.vehicles) {
       const kind = veh.trip.kind ?? 'sedan';
       const p = traffic.pose(veh);
-      if (veh.siren && this.sirenCount < MAX_CARS) {
-        this.tmp.position.set(this.wx(p.x), 0.68, this.wz(p.y));
+      // A flashing beacon over each unit with its siren on, for the overview; close up, the
+      // model's own light bar shows instead.
+      this.tmp.position.set(this.wx(p.x), 0.68, this.wz(p.y));
+      if (veh.siren && this.sirenCount < MAX_CARS && this.camera.position.distanceTo(this.tmp.position) > BEACON_NEAR) {
         this.tmp.rotation.set(0, 0, 0);
         this.tmp.scale.setScalar(1);
         this.tmp.updateMatrix();
@@ -1774,12 +1777,17 @@ export class View3D {
 
   // Swing the camera over an incident's street, keeping the current viewing angle.
   focusIncident(inc: Incident): void {
-    this.follow(null);
     const net = this.sim.grid.net;
     const link = net.links[inc.links[0]];
     const a = net.nodes[link.from];
     const b = net.nodes[link.to];
-    const target = new THREE.Vector3(this.wx((a.x + b.x) / 2), 0, this.wz((a.y + b.y) / 2));
+    this.focusPoint((a.x + b.x) / 2, (a.y + b.y) / 2);
+  }
+
+  // Swing the camera over a map point (m), keeping the current viewing angle.
+  focusPoint(x: number, y: number): void {
+    this.follow(null);
+    const target = new THREE.Vector3(this.wx(x), 0, this.wz(y));
     // Steep and high enough to see the street between downtown towers.
     const theta = new THREE.Spherical().setFromVector3(this.camera.position.clone().sub(this.controls.target)).theta;
     this.controls.target.copy(target);
@@ -1798,6 +1806,17 @@ export class View3D {
     this.tags = { start: make('tag-start'), end: make('tag-end'), car: make('tag-car') };
     this.tags.start.textContent = 'Start';
     this.tags.end.textContent = 'Destination';
+  }
+
+  // Where a map point (m), `lift` world units above the ground, is on the map, in px from the
+  // map's top left; `ahead` is false when it is behind the camera (x and y are then mirrored).
+  screenPoint(x: number, y: number, lift = 0): { x: number; y: number; ahead: boolean } {
+    const v = this.tagV.set(this.wx(x), lift, this.wz(y)).project(this.camera);
+    return {
+      x: ((v.x + 1) / 2) * this.container.clientWidth,
+      y: ((1 - v.y) / 2) * this.container.clientHeight,
+      ahead: v.z < 1,
+    };
   }
 
   // Pin a label above a world point; hidden when the point is behind the camera or off screen.

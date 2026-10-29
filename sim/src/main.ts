@@ -6,7 +6,8 @@ import { DISTRICTS } from './demand/districts';
 import { formatClock, periodAt, HOUR, type Period } from './core/time';
 import type { ZoneType } from './demand/zones';
 import { VEHICLE_KINDS, VEHICLE_SPECS, type EmergencyKind, type VehicleKind } from './traffic/vehicleTypes';
-import { DispatchCenter, type DispatchMode } from './dispatch/dispatch';
+import { DispatchCenter, type DispatchMode, type EmergencyCall } from './dispatch/dispatch';
+import { responseChart, formatMinutes } from './ui/responseChart';
 import { SirenAudio } from './render3d/sirenAudio';
 import type { Vehicle } from './traffic/traffic';
 
@@ -77,10 +78,11 @@ startDispatchBtn.onclick = () => {
     pm: { start: 15, duration: 4 },
     night: { start: 22, duration: 8 },
   };
-  const difficulties: Record<string, { callsPerHour: number; missedLimit: number }> = {
-    easy: { callsPerHour: 12, missedLimit: 5 },
-    normal: { callsPerHour: 20, missedLimit: 3 },
-    hard: { callsPerHour: 30, missedLimit: 2 },
+  // Random accidents are per sim hour at peak demand, fewer when the roads are quiet.
+  const difficulties: Record<string, { callsPerHour: number; missedLimit: number; unitCounts?: Partial<Record<EmergencyKind, number>>; accidentsPerHour: number }> = {
+    easy: { callsPerHour: 12, missedLimit: 5, unitCounts: { ambulance: 3 }, accidentsPerHour: 0.7 },
+    normal: { callsPerHour: 20, missedLimit: 3, accidentsPerHour: 1 },
+    hard: { callsPerHour: 30, missedLimit: 2, unitCounts: { police: 1 }, accidentsPerHour: 1.5 },
   };
   const shift = shifts[shiftSelect.value];
   const difficulty = difficulties[difficultySelect.value];
@@ -89,7 +91,21 @@ startDispatchBtn.onclick = () => {
     throw new RangeError('Invalid dispatch setup');
   }
   endMoving();
-  sim.time = shift.start * HOUR;
+  if (stationMove) pageParams.set('move', `${stationMove.from.id}.${stationMove.to.id}`);
+  else pageParams.delete('move');
+  // The shift starts at its own time of day with traffic already on the roads: unless the city is
+  // there already, reload at that hour (half an hour of traffic is run first) and start again.
+  if (pageParams.get('start') !== String(shift.start) || Math.abs(sim.time - shift.start * HOUR) > 15 * 60) {
+    pageParams.set('mode', modeValue);
+    pageParams.set('shift', shiftSelect.value);
+    pageParams.set('difficulty', difficultySelect.value);
+    pageParams.set('start', String(shift.start));
+    pageParams.set('replay', '1');
+    location.search = pageParams.toString();
+    return;
+  }
+  playedKey = bestKey();
+  resultShown = false;
   dispatch = new DispatchCenter(sim, {
     mode: modeValue,
     shiftDurationSeconds: shift.duration * HOUR,
@@ -106,6 +122,7 @@ startDispatchBtn.onclick = () => {
   paused = false;
   pauseBtn.disabled = false;
   pauseBtn.textContent = 'Pause';
+  endDispatchBtn.textContent = modeValue === 'sandbox' ? 'End session' : 'End shift';
   $('dispatchMenu').hidden = true;
   $('dispatchActive').hidden = false;
   syncDispatchPanel();
@@ -453,6 +470,7 @@ moveBtn.onclick = () => {
     sim.moveStation(to, from);
     view.redrawSites([from, to]);
     stationMove = null;
+    pageParams.delete('move');
     $('moveStationNote').hidden = true;
     moveBtn.textContent = 'Move a station (optional)';
     syncCoverage();
@@ -513,6 +531,20 @@ mapEl.addEventListener('pointermove', (e) => {
     syncCoverage();
   }
 });
+// A move made before a reload into the shift's hour (?move=from.to) is made again.
+{
+  const [a, b] = (pageParams.get('move') ?? '').split('.').map(Number);
+  const from = sim.sites[a];
+  const to = sim.sites[b];
+  if (from && to && sim.moveStation(from, to)) {
+    view.redrawSites([from, to]);
+    stationMove = { from, to };
+    const note = $('moveStationNote');
+    note.textContent = `${SITE_LABEL[to.kind]} moved from ${from.address} to ${to.address}.`;
+    note.hidden = false;
+    moveBtn.textContent = 'Undo station move';
+  }
+}
 
 // Siren sound (M mutes). Audio starts with the first click or key press, as browsers require.
 const sirens = new SirenAudio();
@@ -656,8 +688,7 @@ function syncDispatchPanel(): void {
   const activeCalls = dispatch.calls.filter((call) => call.state !== 'resolved' && call.state !== 'missed');
   const finishedCalls = dispatch.calls.filter((call) => call.state === 'resolved' || call.state === 'missed').slice(-3);
   const visibleCalls = [...activeCalls, ...finishedCalls].reverse();
-  const callsList = $('dispatchCalls');
-  callsList.replaceChildren();
+  const callItems: HTMLLIElement[] = [];
   for (const call of visibleCalls) {
     const li = document.createElement('li');
     const button = document.createElement('button');
@@ -673,13 +704,13 @@ function syncDispatchPanel(): void {
       syncDispatchPanel();
     };
     li.append(button);
-    callsList.append(li);
+    callItems.push(li);
   }
+  setChildren($('dispatchCalls'), callItems);
   $('dispatchCallsEmpty').hidden = visibleCalls.length > 0;
 
   const selectedCall = dispatch.calls.find((call) => call.id === selectedCallId && call.state !== 'resolved' && call.state !== 'missed');
-  const candidatesList = $('dispatchCandidates');
-  candidatesList.replaceChildren();
+  const candidateItems: HTMLLIElement[] = [];
   const assignedUnit = selectedCall?.assignedUnitId === null || selectedCall?.assignedUnitId === undefined
     ? undefined
     : dispatch.units[selectedCall.assignedUnitId];
@@ -715,10 +746,11 @@ function syncDispatchPanel(): void {
         syncDispatchPanel();
       };
       li.append(button);
-      candidatesList.append(li);
+      candidateItems.push(li);
     }
   }
-  $('dispatchCandidatesEmpty').hidden = candidatesList.childElementCount > 0;
+  setChildren($('dispatchCandidates'), candidateItems);
+  $('dispatchCandidatesEmpty').hidden = candidateItems.length > 0;
   const assignBtn = $('assignDispatch') as HTMLButtonElement;
   assignBtn.disabled = selectedCall === undefined || selectedUnitId === null;
   assignBtn.onclick = () => {
@@ -737,7 +769,8 @@ function syncDispatchPanel(): void {
   $('dispatchResponse').textContent = dispatch.score.resolvedCalls > 0
     ? `${Math.round(dispatch.score.meanResponseTime)} s`
     : '—';
-  $('dispatchStatus').textContent = `${dispatch.mode === 'sandbox' ? 'Sandbox' : 'Dispatcher'} · shift ends ${formatClock(dispatch.shiftEndsAt)}`;
+  const left = Math.max(0, dispatch.shiftEndsAt - sim.time);
+  $('dispatchStatus').textContent = `${dispatch.mode === 'sandbox' ? 'Sandbox' : 'Dispatcher'} · ends ${formatClock(dispatch.shiftEndsAt)} · ${Math.floor(left / HOUR)}:${String(Math.floor((left % HOUR) / 60)).padStart(2, '0')} left`;
   const outcome = dispatch.ended;
   endDispatchBtn.hidden = outcome !== null;
   const isEnded = outcome !== null;
@@ -751,6 +784,10 @@ function syncDispatchPanel(): void {
     $('resultMissed').textContent = dispatch.score.missedCalls.toLocaleString();
     $('resultResponse').textContent = dispatch.score.resolvedCalls > 0 ? `${Math.round(dispatch.score.meanResponseTime)} s` : '—';
     $('resultScore').textContent = dispatch.score.points.toLocaleString();
+    if (!resultShown) {
+      resultShown = true;
+      showResult(dispatch, outcome);
+    }
     paused = true;
     pauseBtn.textContent = 'Resume';
   }
@@ -770,8 +807,203 @@ function syncDispatchPanel(): void {
     li.append(follow);
     return li;
   });
-  $('dispatchUnits').replaceChildren(...unitRows);
+  setChildren($('dispatchUnits'), unitRows);
 }
+
+// Lists are rebuilt only when what they show changes, so a click is not lost to a rebuild
+// between pressing and releasing the button.
+const listSignatures = new WeakMap<Element, string>();
+function setChildren(el: Element, items: HTMLElement[]): void {
+  const signature = items.map((item) => item.outerHTML).join('');
+  if (listSignatures.get(el) === signature) return;
+  listSignatures.set(el, signature);
+  el.replaceChildren(...items);
+}
+
+// Best score per mode, shift and difficulty, kept in this browser.
+const BEST_KEY = 'dispatch.best.v1';
+interface BestScore { points: number; grade: string; date: string }
+let playedKey = '';
+let resultShown = false;
+function bestKey(): string {
+  return `${dispatchModeSelect.value}:${shiftSelect.value}:${difficultySelect.value}`;
+}
+function loadBest(): Record<string, BestScore> {
+  try {
+    return JSON.parse(localStorage.getItem(BEST_KEY) ?? '{}') ?? {};
+  } catch {
+    return {};
+  }
+}
+function showBest(): void {
+  const best = loadBest()[bestKey()];
+  $('bestScore').textContent = best
+    ? `Best here: ${best.points.toLocaleString()} points, grade ${best.grade} (${best.date})`
+    : 'No best score yet for this mode, shift and difficulty.';
+}
+for (const select of [dispatchModeSelect, shiftSelect, difficultySelect]) select.addEventListener('change', showBest);
+showBest();
+
+// Grade: the share of finished calls reached within their target time. Losing the shift is an F.
+function gradeOf(center: DispatchCenter, outcome: string): { letter: string; within: number; finished: number } {
+  const finished = center.calls.filter((c) => c.state === 'resolved' || c.state === 'missed');
+  const within = finished.filter((c) => c.state === 'resolved' && (c.responseTime ?? Infinity) <= c.targetResponseTime).length;
+  const share = finished.length > 0 ? within / finished.length : 0;
+  const letter = outcome === 'loss' ? 'F' : finished.length === 0 ? '—' : share >= 0.9 ? 'A' : share >= 0.75 ? 'B' : share >= 0.6 ? 'C' : share >= 0.4 ? 'D' : 'F';
+  return { letter, within, finished: finished.length };
+}
+
+function showResult(center: DispatchCenter, outcome: string): void {
+  const { letter, within, finished } = gradeOf(center, outcome);
+  $('resultGrade').textContent = letter;
+  $('resultGradeNote').textContent = finished > 0 ? `${within} of ${finished} calls reached within target` : 'No calls finished';
+  const points = center.score.points;
+  const all = loadBest();
+  const prev = all[playedKey];
+  const best = $('resultBest');
+  if (finished > 0 && (!prev || points > prev.points)) {
+    all[playedKey] = { points, grade: letter, date: new Date().toISOString().slice(0, 10) };
+    try {
+      localStorage.setItem(BEST_KEY, JSON.stringify(all));
+    } catch {
+      // Storage blocked (private window): the best score is just not kept.
+    }
+    best.textContent = prev ? `New best score! (was ${prev.points.toLocaleString()})` : 'New best score!';
+    best.classList.add('new');
+  } else {
+    best.textContent = prev ? `Best: ${prev.points.toLocaleString()} points, grade ${prev.grade}` : '';
+    best.classList.remove('new');
+  }
+  const chartBox = $('responseChart');
+  chartBox.replaceChildren(responseChart(center.calls, Math.max(200, chartBox.clientWidth || 288)));
+  const done = center.calls.filter((c) => c.state === 'resolved' || c.state === 'missed');
+  $('responseRows').replaceChildren(
+    ...done.map((call, k) => {
+      const tr = document.createElement('tr');
+      const cells = [String(k + 1), CALL_LABEL[call.kind], call.site.address, call.state === 'missed' ? 'missed' : formatMinutes(call.responseTime ?? 0), formatMinutes(call.targetResponseTime)];
+      cells.forEach((text, i) => {
+        const td = document.createElement('td');
+        td.textContent = text;
+        if (i >= 3) td.className = 'num';
+        tr.append(td);
+      });
+      return tr;
+    }),
+  );
+}
+
+// Call alerts: a pop-up and a chime for each new call (a low tone for a missed one); a pin over
+// each open call on the map, and an arrow at the edge for waiting calls out of view. Clicking a
+// pop-up, pin or arrow selects the call and moves the camera there.
+const CALL_LABEL: Record<EmergencyCall['kind'], string> = { medical: 'Medical', fire: 'Fire', crime: 'Crime', crash: 'Crash' };
+const ALERT_MS = 6000;
+const MAX_ALERTS = 3;
+function districtOf(call: EmergencyCall): string {
+  const name = DISTRICTS[sim.district[call.site.zone]];
+  return name === 'Downtown' ? name : `${name} side`;
+}
+function selectCall(callId: number, focus: boolean): void {
+  const call = dispatch?.calls.find((c) => c.id === callId);
+  if (!call) return;
+  selectedCallId = call.id;
+  selectedUnitId = null;
+  selectedEmergencyUnitId = call.assignedUnitId;
+  if (focus) {
+    followingEmergency = false;
+    view.focusPoint(call.site.door.x, call.site.door.y);
+  }
+  syncDispatchPanel();
+}
+function showAlert(call: EmergencyCall, missed: boolean): void {
+  const box = $('callAlerts');
+  const alert = document.createElement('button');
+  alert.className = missed ? 'call-alert missed' : 'call-alert';
+  const head = document.createElement('b');
+  head.textContent = missed ? `Missed: ${CALL_LABEL[call.kind].toLowerCase()} call` : `${CALL_LABEL[call.kind]} call · ${districtOf(call)}`;
+  const body = document.createElement('span');
+  body.textContent = missed ? `${call.site.address} · no unit got there in time` : `${call.site.address} · click to show`;
+  alert.append(head, body);
+  alert.onclick = () => {
+    if (!missed) selectCall(call.id, true);
+    alert.remove();
+  };
+  box.prepend(alert);
+  while (box.childElementCount > MAX_ALERTS) box.lastElementChild!.remove();
+  setTimeout(() => alert.remove(), ALERT_MS);
+}
+function handleDispatchEvents(): void {
+  if (!dispatch) return;
+  let chime = false;
+  let alarm = false;
+  for (const e of dispatch.drainEvents()) {
+    const call = e.callId === undefined ? undefined : dispatch.calls.find((c) => c.id === e.callId);
+    if (!call) continue;
+    if (e.type === 'call' && dispatch.mode === 'dispatcher') {
+      showAlert(call, false);
+      chime = true;
+    } else if (e.type === 'missed') {
+      showAlert(call, true);
+      alarm = true;
+    }
+  }
+  if (alarm) sirens.alarm();
+  else if (chime) sirens.chime();
+}
+const markers = new Map<number, HTMLButtonElement>();
+const EDGE_PX = 22;
+function syncCallMarkers(): void {
+  const layer = $('callMarkers');
+  const open = dispatch && dispatch.ended === null ? dispatch.calls.filter((c) => c.state !== 'resolved' && c.state !== 'missed') : [];
+  const w = layer.clientWidth;
+  const h = layer.clientHeight;
+  const set = (el: HTMLElement, key: 'className' | 'title', value: string) => {
+    if (el[key] !== value) el[key] = value;
+  };
+  for (const call of open) {
+    let el = markers.get(call.id);
+    if (!el) {
+      el = document.createElement('button');
+      el.onclick = () => selectCall(call.id, true);
+      el.append(document.createElement('span'));
+      layer.append(el);
+      markers.set(call.id, el);
+    }
+    const label = el.firstElementChild as HTMLSpanElement;
+    const p = view.screenPoint(call.site.door.x, call.site.door.y, 2);
+    const waiting = call.state === 'created';
+    set(el, 'title', `${CALL_LABEL[call.kind]} call · ${call.site.address} · ${waiting ? 'waiting' : 'unit on the way'}`);
+    if (p.ahead && p.x >= 0 && p.x <= w && p.y >= 0 && p.y <= h) {
+      set(el, 'className', `call-pin${waiting ? '' : ' assigned'}${selectedCallId === call.id ? ' selected' : ''}`);
+      if (label.textContent !== CALL_LABEL[call.kind]) label.textContent = CALL_LABEL[call.kind];
+      label.style.transform = '';
+      el.style.transform = `translate(${p.x.toFixed(1)}px, ${p.y.toFixed(1)}px) translate(-50%, -100%)`;
+      el.hidden = false;
+    } else if (waiting) {
+      // On the edge, on the line from the middle of the map towards the call.
+      let dx = p.x - w / 2;
+      let dy = p.y - h / 2;
+      if (!p.ahead) [dx, dy] = [-dx, -dy];
+      const scale = Math.min((w / 2 - EDGE_PX) / Math.max(1e-6, Math.abs(dx)), (h / 2 - EDGE_PX) / Math.max(1e-6, Math.abs(dy)));
+      set(el, 'className', 'call-arrow');
+      if (label.textContent !== '➜') label.textContent = '➜';
+      label.style.transform = `rotate(${Math.atan2(dy, dx).toFixed(3)}rad)`;
+      el.style.transform = `translate(${(w / 2 + dx * scale).toFixed(1)}px, ${(h / 2 + dy * scale).toFixed(1)}px)`;
+      el.hidden = false;
+    } else {
+      el.hidden = true;
+    }
+  }
+  const openIds = new Set(open.map((c) => c.id));
+  for (const [id, el] of markers) {
+    if (openIds.has(id)) continue;
+    el.remove();
+    markers.delete(id);
+  }
+}
+// A quiet tick on every button press.
+document.addEventListener('click', (e) => {
+  if (e.target instanceof Element && e.target.closest('button')) sirens.tick();
+});
 
 function listItem(color: string, name: string, num: string): HTMLLIElement {
   const li = document.createElement('li');
@@ -890,6 +1122,7 @@ function frame(now: number): void {
   const simStart = performance.now();
   const warming = sim.time < warmUntil;
   $('warmup').hidden = !warming;
+  startDispatchBtn.disabled = warming; // the shift starts once the roads are loaded
   if (warming) {
     for (let k = 0; k < WARMUP_STEPS_PER_FRAME && sim.time < warmUntil; k++) sim.step(FIXED_DT);
   } else if (!paused) {
@@ -906,6 +1139,8 @@ function frame(now: number): void {
   perf.simMs = smooth(perf.simMs, drawStart - simStart);
   view.render(now);
   sirens.update(view.nearestSiren(), !paused && !warming);
+  handleDispatchEvents();
+  syncCallMarkers();
   perf.drawMs = smooth(perf.drawMs, performance.now() - drawStart);
   if (now - lastSidebar > SIDEBAR_MS) {
     lastSidebar = now;
@@ -916,6 +1151,6 @@ function frame(now: number): void {
       `${view.renderer.info.render.calls} draw calls · ${sim.traffic.vehicles.size} cars`;
   }
   requestAnimationFrame(frame);
-  if (pageParams.get('replay') === '1') startDispatchBtn.click();
+  if (!warming && pageParams.get('replay') === '1') startDispatchBtn.click();
 }
 requestAnimationFrame(frame);

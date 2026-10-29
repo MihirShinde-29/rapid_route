@@ -25,7 +25,7 @@ TypeScript + Vite + Three.js. The sim core has no DOM access and runs headless i
 cd sim
 npm install
 npm run dev     # open the printed localhost URL
-npm test        # 54 tests: demand, car-following, junctions, signals, routing, incidents, blocked lanes, sites, trips, units, yielding, coverage, station placement, block fill and dispatch
+npm test        # 61 tests: demand, car-following, junctions, signals, routing, incidents, blocked lanes, sites, trips, units, unit ETAs, yielding, coverage, station placement, block fill and dispatch
 npm run build   # type-check and build a static site into sim/dist
 ```
 Needs Node 20+. Vite is pinned to 6 / Vitest to 3 because newer releases need a newer Node.
@@ -60,6 +60,12 @@ arrow). `Coverage` shades the city by how fast the nearest free unit could get t
 each kind). Sirens are procedural Web Audio, louder near the camera; `Sound on` mutes them. Press `?` for the keyboard
 shortcuts (Space pause, 1–5 speed, Tab next call, Enter send the fastest unit, F ride along, C coverage, B boids,
 M mute, Esc back). If anything throws, an error panel replaces the frozen page.
+
+The game: pick a mode, shift and difficulty and press `Start shift` (the city reloads at the shift's hour with traffic
+on the roads). In Dispatcher mode, select a call (from the list, its pop-up, its pin on the map or the arrow at the screen
+edge), pick a unit by ETA and assign it, or press Enter to send the fastest. Random accidents block a lane and bring crash
+calls, more at rush hour. The end screen shows a grade, the score and each call's response time against its target; the
+best score per mode, shift and difficulty is kept in the browser. Release notes: `docs/A4_RELEASE_NOTES.md`.
 
 Before a shift, `Move a station (optional)` moves one hospital, fire station or police station to another building or
 car park: click the station, then hover the map to see the coverage from each spot, and click to place it. The button

@@ -2,7 +2,7 @@ import { HOUR } from '../core/time';
 import { mulberry32 } from '../core/rng';
 import type { Site } from '../city/sites';
 import type { EmergencyKind } from '../traffic/vehicleTypes';
-import type { Incident, Simulation } from '../sim';
+import { BLOCK_JUNCTION_M, type Incident, type Simulation } from '../sim';
 
 export type DispatchMode = 'dispatcher' | 'sandbox';
 export type CallKind = 'medical' | 'fire' | 'crime' | 'crash';
@@ -54,7 +54,18 @@ export interface DispatchOptions {
   callsPerHour?: number;
   shiftDurationSeconds?: number;
   missedLimit?: number;
+  unitCounts?: Partial<Record<EmergencyKind, number>>; // units per station of each kind
+  accidentsPerHour?: number; // random accidents per sim hour at peak demand (fewer when quieter)
 }
+
+// What happened since the UI last looked: for call alerts, sounds and the camera.
+export interface DispatchEvent {
+  type: 'call' | 'assigned' | 'arrived' | 'resolved' | 'missed' | 'ended';
+  t: number;
+  callId?: number;
+  unitId?: number;
+}
+const MAX_EVENTS = 200; // kept if nobody drains them (tests, headless runs)
 
 const DEFAULT_CALLS_PER_HOUR = 20;
 const DEFAULT_SHIFT_SECONDS = 2 * HOUR;
@@ -109,6 +120,7 @@ export class DispatchCenter {
   readonly shiftEndsAt: number;
   readonly missedLimit: number;
   ended: DispatchEnd = null;
+  readonly events: DispatchEvent[] = [];
 
   private readonly rng: () => number;
   private readonly callsPerHour: number;
@@ -119,6 +131,8 @@ export class DispatchCenter {
   private totalResponseTime = 0;
   private resolvedCalls = 0;
   private missedCalls = 0;
+  private readonly accidentsPerHour: number;
+  private readonly accidentRng: () => number;
 
   constructor(private readonly sim: Simulation, opts: DispatchOptions) {
     this.mode = opts.mode;
@@ -127,13 +141,17 @@ export class DispatchCenter {
     this.missedLimit = Math.max(1, Math.floor(opts.missedLimit ?? DEFAULT_MISSED_LIMIT));
     this.rng = mulberry32(opts.seed ?? sim.config.seed ^ 0xa4d15);
     this.lastStepTime = sim.time;
+    this.accidentsPerHour = Math.max(0, opts.accidentsPerHour ?? 0);
+    // Its own stream, so random accidents do not change which calls come in.
+    this.accidentRng = mulberry32((opts.seed ?? sim.config.seed) ^ 0x5eed);
+    const unitCounts = { ...UNIT_COUNTS, ...opts.unitCounts };
 
     for (const site of sim.sites) {
       const kind = SITE_TO_UNIT[site.kind];
       if (!kind) continue;
       const station: Station = { id: this.stations.length, kind, site, unitIds: [] };
       this.stations.push(station);
-      for (let count = 0; count < UNIT_COUNTS[kind]; count++) {
+      for (let count = 0; count < Math.max(1, unitCounts[kind]); count++) {
         const unit: EmergencyUnit = {
           id: this.units.length,
           kind,
@@ -199,7 +217,18 @@ export class DispatchCenter {
       responseTime: null,
     };
     this.calls.push(call);
+    this.emit({ type: 'call', t: this.sim.time, callId: call.id });
     return call;
+  }
+
+  // Take the events since the last call.
+  drainEvents(): DispatchEvent[] {
+    return this.events.splice(0);
+  }
+
+  private emit(e: DispatchEvent): void {
+    this.events.push(e);
+    if (this.events.length > MAX_EVENTS) this.events.shift();
   }
 
   candidates(callId: number): DispatchCandidate[] {
@@ -207,7 +236,7 @@ export class DispatchCenter {
     if (!call || call.state !== 'created') return [];
     return this.units
       .filter((unit) => unit.state === 'idle' && unit.kind === CALL_UNIT[call.kind])
-      .map((unit) => ({ unitId: unit.id, eta: this.sim.planTrip(unit.location, call.site).eta }))
+      .map((unit) => ({ unitId: unit.id, eta: this.sim.planTrip(unit.location, call.site).unitEta }))
       .filter((candidate) => Number.isFinite(candidate.eta))
       .sort((a, b) => a.eta - b.eta || a.unitId - b.unitId);
   }
@@ -223,7 +252,7 @@ export class DispatchCenter {
       tripId: unit.tripId,
       origin: unit.station.site,
       destination: call.site,
-      eta: plan.eta,
+      eta: plan.unitEta,
       route: vehicle ? vehicle.route.slice(vehicle.ri) : plan.route,
     };
   }
@@ -239,6 +268,7 @@ export class DispatchCenter {
     unit.state = 'en_route';
     unit.tripId = trip.id;
     unit.callId = call.id;
+    this.emit({ type: 'assigned', t: this.sim.time, callId: call.id, unitId: unit.id });
     return true;
   }
 
@@ -253,6 +283,11 @@ export class DispatchCenter {
         this.generationProgress--;
         this.createCall();
       }
+    }
+    if (t < this.shiftEndsAt && this.accidentsPerHour > 0) {
+      // More at rush hour: the rate follows trip demand.
+      const busy = this.sim.trips.ratePerHour(t) / this.sim.config.peakTripsPerHour;
+      if (this.accidentRng() < (dt * this.accidentsPerHour * busy) / HOUR) this.randomAccident();
     }
 
     this.expireCalls(t);
@@ -270,10 +305,39 @@ export class DispatchCenter {
 
     if (this.missedCalls >= this.missedLimit && this.mode === 'dispatcher') this.ended = 'loss';
     else if (t >= this.shiftEndsAt && this.mode === 'dispatcher') this.ended = 'win';
+    if (this.ended !== null) this.emit({ type: 'ended', t });
   }
 
   end(): void {
-    if (this.ended === null) this.ended = 'ended';
+    if (this.ended !== null) return;
+    this.ended = 'ended';
+    this.emit({ type: 'ended', t: this.sim.time });
+  }
+
+  // An accident on a random street, more likely where there is traffic, with its crash call.
+  // Returns null if no street is free for one.
+  randomAccident(): EmergencyCall | null {
+    const { sim } = this;
+    const net = sim.grid.net;
+    const stationLinks = new Set(this.stations.flatMap((s) => [s.site.entrance.link, net.reverse(s.site.entrance.link)]));
+    const minLength = 2 * BLOCK_JUNCTION_M + 12;
+    let total = 0;
+    const options: { link: number; weight: number }[] = [];
+    for (const link of net.links) {
+      const lane = sim.traffic.lanes[link.id];
+      const back = net.reverse(link.id);
+      if (lane.geom.length < minLength || stationLinks.has(link.id)) continue;
+      if (sim.incidentOn(link.id) || (back !== undefined && sim.incidentOn(back))) continue;
+      const weight = 1 + lane.vehicles.length;
+      options.push({ link: link.id, weight });
+      total += weight;
+    }
+    if (options.length === 0) return null;
+    let pick = this.accidentRng() * total;
+    const chosen = options.find((o) => (pick -= o.weight) < 0) ?? options[options.length - 1];
+    const len = sim.traffic.lanes[chosen.link].geom.length;
+    const at = BLOCK_JUNCTION_M + 6 + this.accidentRng() * (len - minLength);
+    return this.createCrashCall(sim.addIncident('accident', chosen.link, at));
   }
 
   private expireCalls(t: number): void {
@@ -315,6 +379,7 @@ export class DispatchCenter {
 
       unit.location = call.site;
       call.responseTime = Math.max(0, t - call.createdAt);
+      this.emit({ type: 'arrived', t, callId: call.id, unitId: unit.id });
       unit.state = 'on_scene';
       unit.sceneUntil = t + CALL_TIMING[call.kind].scene;
       unit.callId = call.id;
@@ -352,19 +417,21 @@ export class DispatchCenter {
   private markMissed(call: EmergencyCall): void {
     if (call.state === 'missed' || call.state === 'resolved') return;
     call.state = 'missed';
+    this.emit({ type: 'missed', t: this.sim.time, callId: call.id });
     this.missedCalls++;
     this.points -= 50;
   }
 
   private resolveCall(call: EmergencyCall): void {
     call.state = 'resolved';
+    this.emit({ type: 'resolved', t: this.sim.time, callId: call.id, unitId: call.assignedUnitId ?? undefined });
     if (call.incidentId !== null) this.sim.removeIncident(call.incidentId);
     const responseTime = call.responseTime ?? 0;
     this.totalResponseTime += responseTime;
     this.resolvedCalls++;
     this.points += responseTime <= call.targetResponseTime
       ? 100
-      : Math.max(20, 100 - (80 * (responseTime - call.targetResponseTime)) / (call.expiresAt - call.createdAt - call.targetResponseTime));
+      : Math.round(Math.max(20, 100 - (80 * (responseTime - call.targetResponseTime)) / (call.expiresAt - call.createdAt - call.targetResponseTime)));
   }
 
   private resetUnit(unit: EmergencyUnit): void {

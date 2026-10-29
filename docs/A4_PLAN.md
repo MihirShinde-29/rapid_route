@@ -208,7 +208,7 @@ Mihir's side is now about twice a normal week. It fits only because most of that
 5. lane closures (accidents on a lane stay);
 6. left turns into and out of entrances (fall back to right-in, right-out).
 
-Status (Oct 28): nothing on Mihir's list was cut. Station placement went in too: the sim swaps the chosen site's kind with the station's before the shift, so the dispatch side needed no `moveStation`.
+Status (Oct 29): everything in the plan is built, nothing was cut. Ananya's remaining items (end-screen chart, best scores, random accidents, call alerts and chime, release notes and screenshots) were finished by Mihir on Oct 29, with siren-aware unit ETAs brought forward from W10. Status (Oct 28): nothing on Mihir's list was cut. Station placement went in too: the sim swaps the chosen site's kind with the station's before the shift, so the dispatch side needed no `moveStation`.
 
 The core loop, yielding, sites with entrance-to-entrance trips, sound, alerts and shortcuts stay.
 

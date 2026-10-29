@@ -160,6 +160,44 @@
       .dispatch-result .stat-grid { text-align: left; margin: 12px 0; }
       .dispatch-result-actions { display: flex; gap: 8px; }
       .dispatch-result-actions button { flex: 1; }
+      .best-score { margin-top: 0; }
+      .result-grade { font-family: var(--font-mono); font-size: 36px; font-weight: 600; line-height: 1; margin: 6px 0 2px; }
+      .result-best { font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+      .result-best.new { color: #fab219; }
+      .response-chart { text-align: left; margin: 4px 0 6px; }
+      .response-chart svg { display: block; overflow: visible; }
+      .chart-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-family: var(--font-mono); font-size: 10px; color: var(--text-dim); margin: 4px 0 8px; text-align: left; }
+      .chart-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 4px; }
+      .chart-legend i.tick { height: 2px; vertical-align: 3px; background: #dce4ea; }
+      .chart-legend i.cross { background: none; color: #d03b3b; font-style: normal; width: auto; height: auto; font-weight: 700; }
+      .result-table { text-align: left; margin-bottom: 12px; font-size: 11px; }
+      .result-table summary { cursor: pointer; color: var(--text-dim); font-family: var(--font-mono); font-size: 10.5px; }
+      .result-table table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 10px; margin-top: 6px; }
+      .result-table th, .result-table td { text-align: left; padding: 2px 4px; border-bottom: 1px solid var(--line-soft); }
+      .result-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+      .call-alerts { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 4; display: flex; flex-direction: column; gap: 6px; align-items: center; width: min(360px, calc(100% - 32px)); }
+      .call-alert {
+        width: 100%; text-align: left; font-family: var(--font-mono); font-size: 11px; line-height: 1.4; color: var(--text);
+        background: rgba(6, 9, 13, 0.92); border: 1px solid #fab219; border-left-width: 4px; border-radius: 4px; padding: 7px 10px;
+        animation: alert-in 0.18s ease-out;
+      }
+      .call-alert.missed { border-color: #d03b3b; }
+      .call-alert b { display: block; font-size: 12px; }
+      @keyframes alert-in { from { opacity: 0; transform: translateY(-6px); } }
+      @media (prefers-reduced-motion: reduce) { .call-alert { animation: none; } }
+      .call-markers { position: absolute; inset: 0; z-index: 3; pointer-events: none; overflow: hidden; }
+      .call-pin {
+        position: absolute; left: 0; top: 0; pointer-events: auto; cursor: pointer; padding: 2px 6px; min-width: 0;
+        font-family: var(--font-mono); font-size: 10px; font-weight: 600; color: #08131c; background: #fab219;
+        border: 1px solid rgba(0, 0, 0, 0.4); border-radius: 10px; white-space: nowrap;
+      }
+      .call-pin.assigned { background: #35d7ff; }
+      .call-pin.selected { outline: 2px solid #fff; outline-offset: 1px; }
+      .call-arrow {
+        position: absolute; left: 0; top: 0; width: 30px; height: 30px; margin: -15px 0 0 -15px; padding: 0; pointer-events: auto; cursor: pointer;
+        border-radius: 50%; background: rgba(6, 9, 13, 0.85); border: 1px solid #fab219; color: #fab219; font-size: 15px; line-height: 28px; text-align: center;
+      }
+      .call-arrow span { display: inline-block; }
       .list li.incident { cursor: pointer; }
       .list li.rideable { cursor: pointer; border-color: var(--accent); }
       .list li.incident strong { display: block; font-weight: 500; }
@@ -226,6 +264,8 @@
         <div id="three-container" role="img" aria-label="3D city: cars follow IDM and junction rules; buildings follow zone density; arcs show new trips"></div>
         <div class="warmup" id="warmup" hidden>Fast-forwarding to start time…</div>
         <div class="pick" id="pickHint" role="status" hidden></div>
+        <div class="call-markers" id="callMarkers"></div>
+        <div class="call-alerts" id="callAlerts" aria-live="polite"></div>
         <div class="perf" id="perf" aria-live="off"></div>
         <div class="coverage-legend" id="coverageLegend" hidden>
           <div id="coverageTitle">Coverage · nearest free unit</div>
@@ -261,6 +301,7 @@
                   <option value="hard">Hard</option>
                 </select>
               </label>
+              <div class="note best-score" id="bestScore"></div>
               <button id="moveStation" title="Before the shift: move one station to another building; the coverage map shows the effect">Move a station (optional)</button>
               <div class="note" id="moveStationNote" hidden></div>
               <button id="startDispatch" class="primary">Start shift</button>
@@ -294,12 +335,27 @@
           <div id="dispatchResult" class="dispatch-result" hidden>
             <h3 id="dispatchResultTitle">Shift complete</h3>
             <div class="dispatch-status" id="dispatchResultState"></div>
+            <div class="result-grade" id="resultGrade" title="Share of calls reached within their target time">—</div>
+            <div class="note" id="resultGradeNote"></div>
+            <div class="result-best" id="resultBest"></div>
             <div class="stat-grid">
               <div class="stat"><div class="val" id="resultResolved">0</div><div class="lbl">Calls handled</div></div>
               <div class="stat"><div class="val" id="resultMissed">0</div><div class="lbl">Missed calls</div></div>
               <div class="stat"><div class="val" id="resultResponse">—</div><div class="lbl">Mean response</div></div>
               <div class="stat"><div class="val" id="resultScore">0</div><div class="lbl">Score</div></div>
             </div>
+            <div class="dispatch-subhead" style="text-align: left">Response time per call (minutes)</div>
+            <div class="response-chart" id="responseChart"></div>
+            <div class="chart-legend">
+              <span><i style="background: #0ca30c"></i>within target</span>
+              <span><i style="background: #fab219"></i>over target</span>
+              <span><i class="cross">×</i>missed</span>
+              <span><i class="tick"></i>target</span>
+            </div>
+            <details class="result-table">
+              <summary>Show as a table</summary>
+              <table><thead><tr><th>#</th><th>Call</th><th>Address</th><th>Response</th><th>Target</th></tr></thead><tbody id="responseRows"></tbody></table>
+            </details>
             <div class="dispatch-result-actions">
               <button id="playAgain" class="primary">Play Again</button>
               <button id="returnMenu">Return to Menu</button>

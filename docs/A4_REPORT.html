@@ -5,7 +5,7 @@
 <title>Dispatch: A4 MVP 2.0 Alpha</title>
 <style>
   @page { size: Letter; margin: 0.5in 0.55in; }
-  body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 9pt; line-height: 1.32; color: #111; margin: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 8.8pt; line-height: 1.3; color: #111; margin: 0; }
   h1 { font-size: 15pt; margin: 0 0 2px; }
   h2 { font-size: 10.5pt; margin: 10px 0 4px; border-bottom: 1px solid #999; padding-bottom: 1px; }
   h3 { font-size: 9pt; margin: 6px 0 2px; }
@@ -46,17 +46,18 @@
 <h3>The game</h3>
 <ul>
 <li><b>Start:</b> menu over the live city with a how-to-play card. Mode (Dispatcher or Sandbox), shift (AM rush, midday, PM rush, night; 2 sim hours, played at 20×, about 6 real minutes) and difficulty. The best score for that choice is shown. Optional: move one station before the shift, with the coverage map previewing the result.</li>
-<li><b>Active:</b> calls (medical, fire, crime, crash) come in at real addresses with a pop-up and a chime; off-screen calls get an arrow at the screen edge. Select a call, pick a unit from the list (ETA, fastest marked) or press Enter, and the unit drives there through traffic with its siren on. Units driving back can be sent again. Random accidents block a lane and bring crash calls, more at rush hour.</li>
-<li><b>End:</b> the shift ends on time (win) or after too many missed calls (loss); Sandbox has End session. The end screen shows a grade, score, calls handled and missed, mean response, a chart of each call's response time against its target, and the best score. Play again or return to the menu.</li>
+<li><b>Active:</b> calls (medical, fire, crime, crash) come in at real addresses with a pop-up and a chime; off-screen calls get an arrow at the screen edge. Select a call, pick a unit from the list (ETA, fastest marked) or press Enter, and the unit drives there through traffic with its siren on. Units driving back can be sent again. Random accidents block a lane and bring crash calls, more at rush hour. Calls can also be placed by hand.</li>
+<li><b>Sandbox:</b> free play like the A3 build, with no score or call list. Calls and accidents still bring units, sent automatically; place your own accidents, closures and calls and watch the response.</li>
+<li><b>End:</b> the shift ends on time (win) or after too many missed calls (loss). The end screen shows a grade, score, calls handled and missed, mean response, a chart of each call's response time against its target, and the best score. Play again or return to the menu.</li>
 <li><b>Difficulty:</b> Easy / Normal / Hard set calls per hour (12 / 20 / 30), missed calls allowed (4 / 3 / 2), units (Easy +1 ambulance per hospital, Hard −1 police car per station) and accident rate.</li>
 </ul>
 <h3>Simulation and pillars</h3>
 <ul>
 <li><b>Swarm and boids:</b> cars ahead of a unit pull onto the shoulder, the unit passes, they merge back; junctions ahead are held for it. A boids debug view (B) draws each unit's yield reach, held junctions and steering arrows. With yielding a unit crossed a test route in 120 s against 265 s stuck behind the same cars.</li>
 <li><b>Pathfinding, made visible:</b> a coverage map (C) shades the city by how fast the nearest free unit could get there on live traffic (multi-source shortest paths). Unit ETAs now account for the siren: units arrive in a median 1.00 of their ETA at the morning peak.</li>
-<li><b>City:</b> every building, park and car park is an address with its own entrance; trips run door to door with left turns on gaps in oncoming traffic; leisure trips to parks and the mall. Accidents and lane closures block one lane and cars pass one side at a time. Unit and station models, drawn entrances, filler structures between buildings.</li>
-<li><b>Also:</b> ride along with any unit; procedural siren sound and UI sounds with mute; keyboard shortcuts with a help overlay; an error panel instead of a frozen page; the A3 traffic panels moved to a second tab. From A3 grader feedback: the OD matrix redrawn as 9 districts with live counts, and incidents on any street with rerouting.</li>
-<li><b>Stability:</b> 63 automated tests (Vitest), including a unit passing a full queue, pre-emption, coverage matching single-source A*, unit ETAs against real trips, call lifecycle, scoring and loss, random accidents, and the morning peak (about 700 cars) with no gridlock.</li>
+<li><b>City:</b> every building, park and car park is an address with its own entrance; trips run door to door, turning left on gaps in oncoming traffic. Accidents and lane closures block one lane; cars pass one side at a time. Unit and station models, drawn entrances, filler between buildings.</li>
+<li><b>Also:</b> ride along with any unit; siren and UI sounds with mute; shortcuts with a help overlay; an error panel instead of a frozen page. From A3 feedback: the OD matrix as 9 districts with live counts, and incidents on any street with rerouting.</li>
+<li><b>Stability:</b> 63 automated tests (Vitest): yielding, pre-emption, coverage against A*, unit ETAs against real trips, the call lifecycle, scoring, random accidents, and the morning peak (about 700 cars) with no gridlock.</li>
 </ul>
 
 <div class="page2">

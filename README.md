@@ -45,7 +45,8 @@ Work split: `docs/MVP_WORK_SPLIT.md`.
 
 Assignment 3 recording plan and evidence checklist: `docs/ASSIGNMENT3_DEMO_SCRIPT.md`.
 
-Incidents: pick Accident, Lane closure or Road closure in the toolbar and click `Place incident`. An accident goes where
+Incidents: pick Accident, Lane closure or Road closure in the toolbar and click `Place on map`. During a shift or in
+sandbox the same menu places a Medical, Fire or Crime call: click a building. An accident goes where
 you click and blocks 12 m of that lane for 20 sim minutes. A lane closure takes two clicks along one lane, its start and
 its end. Cars get past either one through the oncoming lane, one side at a time, like a one-lane bridge: the oncoming side
 has priority, a blocked car goes when no oncoming car would reach the stretch before it is through, and after 10 s of
@@ -63,7 +64,8 @@ M mute, Esc back). If anything throws, an error panel replaces the frozen page.
 
 The game: pick a mode, shift and difficulty and press `Start shift` (the city reloads at the shift's hour with traffic
 on the roads). In Dispatcher mode, select a call (from the list, its pop-up, its pin on the map or the arrow at the screen
-edge), pick a unit by ETA (a unit driving back to its station counts too) and assign it, or press Enter to send the fastest. Shifts are 2 sim hours at 20×. The A3 traffic panels are in the `Traffic panels` tab. Random accidents block a lane and bring crash
+edge), pick a unit by ETA (a unit driving back to its station counts too) and assign it, or press Enter to send the fastest. Shifts are 2 sim hours at 20×. The A3 traffic panels are in the `Traffic panels` tab. Sandbox is free play like the A3 build: no score or call
+list, all the traffic panels shown, and calls and accidents still bring units, sent automatically. Random accidents block a lane and bring crash
 calls, more at rush hour, and stay until a unit has dealt with them. The end screen shows a grade, the score and each call's response time against its target; the
 best score per mode, shift and difficulty is kept in the browser. Release notes: `docs/A4_RELEASE_NOTES.md`.
 

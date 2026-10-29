@@ -164,6 +164,7 @@
       .how-to li + li { margin-top: 3px; }
       .how-to b { color: var(--text); font-weight: 500; }
       .side-tabs { display: flex; position: sticky; top: 0; z-index: 1; background: var(--panel); border-bottom: 1px solid var(--line); }
+      .side-tabs[hidden] { display: none; }
       .side-tabs button { flex: 1; border: 0; border-radius: 0; border-bottom: 2px solid transparent; background: transparent; padding: 9px 8px; }
       .side-tabs button[aria-selected='true'] { color: var(--text); border-bottom-color: var(--accent); }
       .side-tabs button[aria-selected='false'] { color: var(--text-dim); }
@@ -257,11 +258,18 @@
         <button id="probe">Probe trip</button>
         <button id="jam">Jam short route</button>
         <select id="incidentKind" aria-label="Incident to place">
-          <option value="accident">Accident</option>
-          <option value="lane">Lane closure</option>
-          <option value="closure">Road closure</option>
+          <optgroup label="Incidents">
+            <option value="accident">Accident</option>
+            <option value="lane">Lane closure</option>
+            <option value="closure">Road closure</option>
+          </optgroup>
+          <optgroup label="Calls (during a shift or sandbox)">
+            <option value="call:medical">Medical call</option>
+            <option value="call:fire">Fire call</option>
+            <option value="call:crime">Crime call</option>
+          </optgroup>
         </select>
-        <button id="incident">Place incident</button>
+        <button id="incident" title="Place the chosen incident or call on the map">Place on map</button>
         <button id="arcs" aria-pressed="true">OD arcs</button>
         <button id="boids" aria-pressed="false" title="Boids debug view (B)">Boids</button>
         <button id="coverage" aria-pressed="false" title="Coverage map (C)">Coverage</button>
@@ -355,6 +363,13 @@
             <h3 class="dispatch-subhead">Units</h3>
             <ul class="list" id="dispatchUnits"></ul>
           </div>
+          <div id="sandboxActive" hidden>
+            <div class="dispatch-head">
+              <div class="dispatch-status" id="sandboxStatus">Sandbox</div>
+              <button id="endSandbox">Back to menu</button>
+            </div>
+            <p class="dispatch-instructions">Free play. Calls and accidents happen on their own and the nearest free unit is sent automatically. Place accidents, closures or calls from the toolbar, and click a unit to ride along.</p>
+          </div>
           <div id="dispatchResult" class="dispatch-result" hidden>
             <h3 id="dispatchResultTitle">Shift complete</h3>
             <div class="dispatch-status" id="dispatchResultState"></div>
@@ -398,7 +413,7 @@
         <section class="panel">
           <h2>Incidents</h2>
           <ul class="list" id="incidents"></ul>
-          <div class="note" id="incidentsEmpty">None. Pick a kind, click Place incident, then click a lane. An accident blocks that lane for 20 sim min; a lane closure blocks a stretch of it (click its start, then its end). Cars get past through the oncoming lane, one side at a time. A road closure shuts the whole street. Cars heading that way reroute if a faster way exists.</div>
+          <div class="note" id="incidentsEmpty">None. Pick a kind, click Place on map, then click a lane. An accident blocks that lane for 20 sim min (during a shift, until a unit has dealt with it); a lane closure blocks a stretch of it (click its start, then its end). Cars get past through the oncoming lane, one side at a time. A road closure shuts the whole street. Cars heading that way reroute if a faster way exists.</div>
         </section>
         <section class="panel">
           <h2>Demand</h2>

@@ -28,6 +28,7 @@ Run it: `cd sim && npm run dev`, open http://localhost:5173/ (or the live build)
 - [ ] After assigning, the pin turns blue, the status line shows the unit and its ETA, and the cyan route line appears.
 - [ ] The unit reaches the call in about its ETA (within ~20%).
 - [ ] Let a call expire: a red "Missed" pop-up and a low tone; Missed calls goes up.
+- [ ] Place a call yourself (toolbar menu → Medical / Fire / Crime call → Place on map → click a building): it is added and selected.
 
 ## 5. Units and sirens
 - [ ] Cars ahead of a unit pull onto the shoulder, the unit passes, they merge back. Cross traffic waits at junctions for it.
@@ -56,8 +57,10 @@ Run it: `cd sim && npm run dev`, open http://localhost:5173/ (or the live build)
 - [ ] **Play Again** restarts the same mode, shift and difficulty; **Return to Menu** (or Esc) goes back, and the menu shows the best score.
 
 ## 9. Sandbox
-- [ ] Calls are assigned automatically to the nearest unit; no pop-ups or chime for new calls.
-- [ ] Place accidents and closures and watch units respond; there is no loss; End session shows the summary.
+- [ ] Looks like the A3 build: no score, call list or assignment, no tabs, all traffic panels shown; speed 60×; the menu says "Sandbox is free play: no score."
+- [ ] Units drive to calls and accidents on their own (the status line counts units out); no pop-ups, chime or pins.
+- [ ] Pick Medical / Fire / Crime call in the toolbar, **Place on map**, click a building: the nearest free unit goes there.
+- [ ] Place accidents and closures and watch units respond; it never ends; **Back to menu** returns to the menu.
 
 ## 10. Difficulty
 - [ ] Easy: 3 ambulances per hospital, 12 calls an hour, lose at 4 missed.

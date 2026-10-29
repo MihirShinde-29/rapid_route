@@ -6,7 +6,7 @@ import { DISTRICTS } from './demand/districts';
 import { formatClock, periodAt, HOUR, type Period } from './core/time';
 import type { ZoneType } from './demand/zones';
 import { VEHICLE_KINDS, VEHICLE_SPECS, type EmergencyKind, type VehicleKind } from './traffic/vehicleTypes';
-import { DispatchCenter, type DispatchMode, type EmergencyCall } from './dispatch/dispatch';
+import { DispatchCenter, type CallKind, type DispatchMode, type EmergencyCall } from './dispatch/dispatch';
 import { responseChart, formatMinutes } from './ui/responseChart';
 import { SirenAudio } from './render3d/sirenAudio';
 import type { Vehicle } from './traffic/traffic';
@@ -108,7 +108,7 @@ startDispatchBtn.onclick = () => {
   resultShown = false;
   dispatch = new DispatchCenter(sim, {
     mode: modeValue,
-    shiftDurationSeconds: shift.duration * HOUR,
+    shiftDurationSeconds: modeValue === 'sandbox' ? Infinity : shift.duration * HOUR, // sandbox runs until the menu
     ...difficulty,
   });
   pageParams.set('mode', dispatchModeSelect.value);
@@ -122,10 +122,11 @@ startDispatchBtn.onclick = () => {
   paused = false;
   pauseBtn.disabled = false;
   pauseBtn.textContent = 'Pause';
-  speedSel.value = '20'; // a 2-hour shift in about 6 real minutes
+  speedSel.value = modeValue === 'sandbox' ? '60' : '20'; // a 2-hour shift in about 6 real minutes
   endDispatchBtn.textContent = modeValue === 'sandbox' ? 'End session' : 'End shift';
   $('dispatchMenu').hidden = true;
-  $('dispatchActive').hidden = false;
+  $('dispatchActive').hidden = modeValue === 'sandbox';
+  if (modeValue === 'sandbox') showSandbox();
   syncDispatchPanel();
   updateSidebar();
 };
@@ -209,6 +210,19 @@ mapEl.addEventListener('pointerup', (e) => {
     pickForMove(e.clientX, e.clientY);
     return;
   }
+  if (placingCall !== null) {
+    const site = view.pickSite(e.clientX, e.clientY, () => true);
+    if (!site || !dispatch || dispatch.ended !== null) {
+      setPickHint('No address there · click a building, park or car park · Esc to cancel');
+      return;
+    }
+    const kind = placingCall;
+    const call = dispatch.createCall(kind, site);
+    endPlacing();
+    setPickHint(`${CALL_LABEL[kind]} call placed at ${site.address}${dispatch.mode === 'sandbox' ? ' · the nearest free unit is on its way' : ''}`, 4000);
+    if (dispatch.mode === 'dispatcher') selectCall(call.id, false);
+    return;
+  }
   if (probeMode === 'idle' && placing === null) {
     // A click on a unit rides along with it.
     const unit = view.pickVehicle(e.clientX, e.clientY, isUnit);
@@ -283,7 +297,7 @@ window.addEventListener('keydown', (e) => {
     speedSel.selectedIndex = Number(e.key) - 1;
     return;
   }
-  if (e.key === 'Tab' && dispatch && dispatch.ended === null && !inControl) {
+  if (e.key === 'Tab' && dispatch?.mode === 'dispatcher' && dispatch.ended === null && !inControl) {
     // Next waiting call, soonest to expire first (the list's order), wrapping round.
     const waiting = dispatch.calls.filter((call) => call.state === 'created').sort((a, b) => a.expiresAt - b.expiresAt);
     if (waiting.length > 0) {
@@ -295,7 +309,7 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     return;
   }
-  if (e.key === 'Enter' && probeMode === 'idle' && !inControl && dispatch && dispatch.ended === null && selectedCallId !== null) {
+  if (e.key === 'Enter' && probeMode === 'idle' && !inControl && dispatch?.mode === 'dispatcher' && dispatch.ended === null && selectedCallId !== null) {
     const unitId = selectedUnitId ?? dispatch.candidates(selectedCallId)[0]?.unitId;
     if (unitId !== undefined && dispatch.assign(selectedCallId, unitId)) {
       lastSent = unitId;
@@ -335,7 +349,7 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === 'Escape') {
-    if (placing !== null) {
+    if (placing !== null || placingCall !== null) {
       endPlacing();
     } else if (probeMode !== 'idle') {
       endPicking();
@@ -572,7 +586,7 @@ $('helpOverlay').addEventListener('click', (e) => {
   if (e.target === e.currentTarget) $('helpOverlay').hidden = true;
 });
 
-// Incidents: pick a kind, click Place incident, then click a street. Placed incidents are
+// Incidents: pick a kind, click Place on map, then click a street. Placed incidents are
 // listed in the sidebar, where each can be removed.
 const INCIDENT_LABEL: Record<IncidentKind, string> = { accident: 'Accident', lane: 'Lane closure', closure: 'Road closure' };
 let placing: IncidentKind | null = null;
@@ -585,21 +599,25 @@ function previewStretch(link: number, a: number, b: number): [number, number] {
   return [lo, Math.max(clamp(Math.max(a, b)), Math.min(len - BLOCK_JUNCTION_M, lo + 12))];
 }
 mapEl.addEventListener('pointermove', (e) => {
+  if (placingCall !== null) view.setSiteHighlight(view.pickSite(e.clientX, e.clientY, () => true), true);
   if (placing !== 'lane' || laneStart === null) return;
   const hit = view.pickLane(e.clientX, e.clientY, laneStart.link);
   if (hit) view.setLanePreview(laneStart.link, ...previewStretch(laneStart.link, laneStart.pos, hit.pos));
 });
+let placingCall: CallKind | null = null;
 function endPlacing(): void {
-  if (placing === null) return;
+  if (placing === null && placingCall === null) return;
+  if (placingCall !== null) view.setSiteHighlight(null);
+  placingCall = null;
   placing = null;
   laneStart = null;
   view.setLanePreview(null);
-  incidentBtn.textContent = 'Place incident';
+  incidentBtn.textContent = 'Place on map';
   incidentBtn.removeAttribute('aria-pressed');
   mapEl.style.cursor = '';
 }
 incidentBtn.onclick = () => {
-  if (placing !== null) {
+  if (placing !== null || placingCall !== null) {
     endPlacing();
     setPickHint(null);
     return;
@@ -607,6 +625,19 @@ incidentBtn.onclick = () => {
   if (probeMode !== 'idle') {
     endPicking();
     view.setProbePins(null, null);
+  }
+  if (incidentKind.value.startsWith('call:')) {
+    // A call at a building or other address: during a shift or in sandbox.
+    if (!dispatch || dispatch.ended !== null) {
+      setPickHint('Calls can be placed during a shift or in sandbox', 3000);
+      return;
+    }
+    placingCall = incidentKind.value.slice(5) as CallKind;
+    incidentBtn.textContent = 'Cancel';
+    incidentBtn.setAttribute('aria-pressed', 'true');
+    mapEl.style.cursor = 'crosshair';
+    setPickHint(`Click a building or other address for the ${placingCall} call · Esc to cancel`);
+    return;
   }
   placing = incidentKind.value as IncidentKind;
   incidentBtn.textContent = 'Cancel';
@@ -700,6 +731,12 @@ function followEmergencyUnit(unitId: number): void {
 
 function syncDispatchPanel(): void {
   if (!dispatch) return;
+  if (dispatch.mode === 'sandbox') {
+    // Free play: no score, calls or assignment, just how many units are out.
+    const out = dispatch.units.filter((u) => u.state !== 'idle').length;
+    $('sandboxStatus').textContent = `Sandbox · ${out} of ${dispatch.units.length} units out`;
+    return;
+  }
   // Grouped: waiting calls first, the soonest to expire at the top; then calls with a unit
   // on the way or on scene; then the last few finished.
   const center = dispatch;
@@ -809,7 +846,7 @@ function syncDispatchPanel(): void {
     ? `${Math.round(dispatch.score.meanResponseTime)} s`
     : '—';
   const left = Math.max(0, dispatch.shiftEndsAt - sim.time);
-  $('dispatchStatus').textContent = `${dispatch.mode === 'sandbox' ? 'Sandbox' : 'Dispatcher'} · ends ${formatClock(dispatch.shiftEndsAt)} · ${Math.floor(left / HOUR)}:${String(Math.floor((left % HOUR) / 60)).padStart(2, '0')} left`;
+  $('dispatchStatus').textContent = `Dispatcher · ends ${formatClock(dispatch.shiftEndsAt)} · ${Math.floor(left / HOUR)}:${String(Math.floor((left % HOUR) / 60)).padStart(2, '0')} left`;
   const outcome = dispatch.ended;
   endDispatchBtn.hidden = outcome !== null;
   const isEnded = outcome !== null;
@@ -859,6 +896,14 @@ function showTab(traffic: boolean): void {
   $('dispatchPanel').hidden = traffic;
   for (const panel of trafficPanels) panel.hidden = !traffic;
 }
+// Sandbox: no tabs; its short panel sits above all the traffic panels.
+function showSandbox(): void {
+  $('sandboxActive').hidden = false;
+  document.querySelector<HTMLElement>('.side-tabs')!.hidden = true;
+  $('dispatchPanel').hidden = false;
+  for (const panel of trafficPanels) panel.hidden = false;
+}
+$('endSandbox').addEventListener('click', () => $('returnMenu').click());
 tabDispatch.onclick = () => showTab(false);
 tabTraffic.onclick = () => showTab(true);
 showTab(false);
@@ -889,6 +934,10 @@ function loadBest(): Record<string, BestScore> {
   }
 }
 function showBest(): void {
+  if (dispatchModeSelect.value === 'sandbox') {
+    $('bestScore').textContent = 'Sandbox is free play: no score.';
+    return;
+  }
   const best = loadBest()[bestKey()];
   $('bestScore').textContent = best
     ? `Best here: ${best.points.toLocaleString()} points, grade ${best.grade} (${best.date})`
@@ -989,6 +1038,10 @@ function showAlert(call: EmergencyCall, missed: boolean): void {
 }
 function handleDispatchEvents(): void {
   if (!dispatch) return;
+  if (dispatch.mode === 'sandbox') {
+    dispatch.drainEvents(); // units go on their own; no alerts
+    return;
+  }
   let chime = false;
   let alarm = false;
   for (const e of dispatch.drainEvents()) {
@@ -1009,7 +1062,7 @@ const markers = new Map<number, HTMLButtonElement>();
 const EDGE_PX = 22;
 function syncCallMarkers(): void {
   const layer = $('callMarkers');
-  const open = dispatch && dispatch.ended === null ? dispatch.calls.filter((c) => c.state !== 'resolved' && c.state !== 'missed') : [];
+  const open = dispatch && dispatch.ended === null && dispatch.mode === 'dispatcher' ? dispatch.calls.filter((c) => c.state !== 'resolved' && c.state !== 'missed') : [];
   const w = layer.clientWidth;
   const h = layer.clientHeight;
   const set = (el: HTMLElement, key: 'className' | 'title', value: string) => {

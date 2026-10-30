@@ -212,18 +212,18 @@ Status (Oct 29): everything in the plan is built, nothing was cut. Ananya's rema
 
 The core loop, yielding, sites with entrance-to-entrance trips, sound, alerts and shortcuts stay.
 
-## 6. Schedule to the final (the current version for the PDF is in `docs/A4_REPORT_MIHIR.md`)
+## 6. Schedule to the final (detailed plan with work items: `docs/FINAL_PLAN.md`)
 
-Semester weeks counted from Aug 31 (week 9 = Oct 26). Assets are procedural (built in code); we are not using AI-generated assets.
+Semester weeks counted from Aug 31 (week 9 = Oct 26). Assets are procedural (built in code), plus CC0 low-poly vehicle and building models from Kenney from W11; we are not using AI-generated assets.
 
 | Week | Engineering | Assets | Integration / milestone | Owner |
 |---|---|---|---|---|
 | W9 (Oct 26 – Nov 1) | Emergency vehicles, yielding, pre-emption, boids debug view; sites with entrances, entrance-to-entrance trips with turns both ways, leisure trips; lane-level accident and lane closure; dispatch core, scoring, difficulty; menu, HUD, end screen; alerts, shortcuts, ride along; coverage map; station placement | Ambulance, fire engine, police models; siren lights; station buildings; drawn entrances; block fill structures; call pins; siren audio, chime and UI sounds (procedural) | MVP 2.0 integrated Oct 29, submitted Nov 2 | Both (split above) |
-| W10 (Nov 2 – 8) | Mutual aid (send from further away when local units are busy); returning units can be reassigned mid-route; anything cut from A4 | Anything cut from A4 | Merge mid-week; play-test | Ananya: mutual aid; Mihir: A4 carry-over |
-| W11 (Nov 9 – 15) | Multi-unit calls (crash needs police and ambulance; fire needs engine and ambulance); severity priority | UI icons; sound mix and volume settings | Merge end of week | Ananya: multi-unit; Mihir: sound and icons |
-| W12 (Nov 16 – 22) | Ordinary cars reroute mid-trip when a closure appears; yielding tuning at intersections and on arterials | Polish: night lighting of units, call markers | Feature-complete build | Mihir: rerouting; Ananya: polish |
-| W13 (Nov 23 – 29) | Thanksgiving, light week: performance pass (1000 cars plus units), difficulty tuning | Final UI pass | Final feature freeze Nov 29 | Both |
-| W14 (Nov 30 – Dec 6) | Could-have only if ahead: adaptive signals, severity-weighted dispatch | Video recording, report figures | Release candidate Dec 6 | Both |
+| W10 (Nov 2 – 8) | Mid-crit feedback; mutual aid (send from further away when local units are busy); smarter turn-round for re-sent units; cars queued at a closure reroute | Incident animations (smoke, hazard lights, flares) | Play-test with 3+ outside players | Ananya: mutual aid, play-test; Mihir: turn-round, closure rerouting |
+| W11 (Nov 9 – 15) | Multi-unit calls (crash: police and ambulance; fire: engine and ambulance); severity priority; ambulances take patients to hospital | Icons; sound mix; on-scene animations; Kenney model pipeline | Merge end of week | Ananya: multi-unit, severity; Mihir: hospital trips, sound, icons |
+| W12 (Nov 16 – 22) | Cars reroute mid-trip on live costs; yielding tuned at junctions and on arterials; first-shift tutorial | Kenney vehicles (animated) and buildings; night lighting; rain and fog; buses | Feature-complete build | Mihir: rerouting, yielding, vehicles; Ananya: tutorial, buildings |
+| W13 (Nov 23 – 29) | Thanksgiving, light week: performance (1000 cars plus units), difficulty tuning, experiments for the report (yielding on/off, ETA accuracy, dispatch policy) | UI pass; pedestrians, parked cars, ambient sound; quality setting | Feature freeze Nov 29 | Mihir: performance, experiments; Ananya: tuning, map |
+| W14 (Nov 30 – Dec 6) | Could-have only if ahead: adaptive signals, two-lane arterials | Video, report figures, final slides | Release candidate Dec 6 | Both |
 | **W15 (Dec 7 – 13): Buffer** | **No new features.** Bug fixes, documentation, README, final report and video | | Final submission | Both |
 
 ## 7. Release notes so far (since A3, Oct 13)

@@ -30,14 +30,14 @@
 
 <h2>Weekly schedule to the final</h2>
 <table>
-<thead><tr><th style="width:13%">Week</th><th style="width:38%">Engineering</th><th style="width:20%">Assets</th><th style="width:16%">Integration / milestone</th><th style="width:13%">Owner</th></tr></thead>
+<thead><tr><th style="width:11%">Week</th><th style="width:40%">Engineering</th><th style="width:17%">Assets</th><th style="width:12%">Milestone</th><th style="width:20%">Owner</th></tr></thead>
 <tbody>
 <tr><td>W9 (Oct 26 – Nov 1), done</td><td>Emergency units in traffic; yielding (pull over, pass, merge back) and junction pre-emption; boids debug view; every building an address with its own entrance; door-to-door trips with left turns in and out; leisure trips; accidents and lane closures on one lane; dispatch core, scoring, difficulty, best scores; menu, HUD, end screen with response chart; random accidents; call alerts and edge arrows; reassigning returning units; shortcuts; ride along; coverage map; station placement; siren-aware unit ETAs</td><td>Ambulance, fire engine and police models; siren lights; station buildings; drawn entrances; block fill; siren audio, chime and UI sounds (all procedural)</td><td>MVP 2.0 integrated Oct 29, submitted Nov 2</td><td>Both</td></tr>
-<tr><td>W10 (Nov 2 – 8)</td><td>Mutual aid (send from further away when local units are busy); smarter turn-round for reassigned units</td><td>Anything left from A4</td><td>Merge mid-week; play-test</td><td>Ananya: mutual aid; Mihir: turn-round, A4 fixes</td></tr>
-<tr><td>W11 (Nov 9 – 15)</td><td>Multi-unit calls (crash needs police and ambulance; fire needs engine and ambulance); severity priority</td><td>UI icons; sound mix and volume settings</td><td>Merge end of week</td><td>Ananya: multi-unit; Mihir: sound, icons</td></tr>
-<tr><td>W12 (Nov 16 – 22)</td><td>Ordinary cars reroute mid-trip when a closure appears; yielding tuning at intersections and on arterials</td><td>Night lighting of units, call markers</td><td>Feature-complete build</td><td>Mihir: rerouting; Ananya: polish</td></tr>
-<tr><td>W13 (Nov 23 – 29)</td><td>Thanksgiving, light week: performance pass (1000 cars plus units), difficulty tuning</td><td>Final UI pass</td><td>Feature freeze Nov 29</td><td>Both</td></tr>
-<tr><td>W14 (Nov 30 – Dec 6)</td><td>Could-have only if ahead: adaptive signals, severity-weighted dispatch</td><td>Video recording, report figures</td><td>Release candidate Dec 6</td><td>Both</td></tr>
+<tr><td>W10 (Nov 2 – 8)</td><td>Mid-crit feedback; mutual aid (send from further away when local units are busy); smarter turn-round for re-sent units; cars queued at a closure reroute</td><td>Incident animations (smoke, hazard lights, flares)</td><td>Play-test with 3+ outside players</td><td>Ananya: mutual aid, play-test; Mihir: turn-round, rerouting</td></tr>
+<tr><td>W11 (Nov 9 – 15)</td><td>Multi-unit calls (crash: police and ambulance; fire: engine and ambulance); severity priority; ambulances take patients to hospital</td><td>Icons; sound; on-scene animations; model pipeline</td><td>Merge end of week</td><td>Ananya: multi-unit, severity; Mihir: hospital trips, sound, icons</td></tr>
+<tr><td>W12 (Nov 16 – 22)</td><td>Cars reroute mid-trip on live costs; yielding tuned at junctions and on arterials; first-shift tutorial</td><td>Kenney cars and buildings; rain, fog; buses</td><td>Feature-complete build</td><td>Mihir: rerouting, yielding, vehicles; Ananya: tutorial, buildings</td></tr>
+<tr><td>W13 (Nov 23 – 29)</td><td>Thanksgiving, light week: performance (1000 cars plus units), difficulty tuning, report experiments (yielding on/off, ETA accuracy, dispatch policy)</td><td>UI pass; pedestrians, parked cars; quality setting</td><td>Feature freeze Nov 29</td><td>Mihir: performance, experiments; Ananya: tuning, map</td></tr>
+<tr><td>W14 (Nov 30 – Dec 6)</td><td>Could-have only if ahead: adaptive signals, two-lane arterials</td><td>Video, report figures, final slides</td><td>Release candidate Dec 6</td><td>Both</td></tr>
 <tr class="buffer"><td>W15 (Dec 7 – 13): buffer</td><td>No new features. Bug fixes, documentation, README, final report and video</td><td></td><td>Final submission</td><td>Both</td></tr>
 </tbody>
 </table>
@@ -64,8 +64,8 @@
 <h2>Known issues</h2>
 <ul>
 <li><b>One lane per direction.</b> Making way for a siren is drawn as a 2 m move onto the shoulder; units pass only cars that have pulled over.</li>
-<li><b>Lane closures are slow.</b> One side goes at a time, so a 65 m closure carries about 650–700 cars an hour; on a busy arterial at the peak, queues build. Cars reroute when the incident is placed, not while they wait.</li>
-<li><b>A unit sent while driving back turns round at its next junction</b>, so its first few hundred metres can go the wrong way. Coverage counts it from that junction.</li>
+<li><b>Lane closures are slow.</b> One side goes at a time, so a 65 m closure carries about 650–700 cars an hour; on a busy arterial at the peak, queues build. Cars reroute when the incident is placed, not while they wait (fix planned for W10).</li>
+<li><b>A unit sent while driving back turns round at its next junction</b>, so its first few hundred metres can go the wrong way. Coverage counts it from that junction. Fix planned for W10.</li>
 <li><b>Starting a shift reloads the page</b> at the shift's hour with half an hour of traffic run first. A station move is kept; incidents placed before are not.</li>
 <li><b>Station placement</b> is one move per shift, onto a building or car park on a block laid out lot by lot.</li>
 <li><b>At 300× the browser drops sim time</b> when it falls behind (a step takes about 0.5 ms at the peak).</li>
@@ -74,12 +74,21 @@
 <li><b>After an error the page has to be reloaded.</b></li>
 </ul>
 
+<h2>Plan to the final</h2>
+<p style="margin:2px 0">Full plan with work items, risks and cut order: <code>docs/FINAL_PLAN.md</code>. Feature freeze Nov 29, release candidate Dec 6.</p>
+<ul>
+<li><b>Deeper game (W10–W11):</b> mutual aid, multi-unit calls, severity (Ananya); ambulances take patients to hospital (Mihir).</li>
+<li><b>Smarter traffic (W10–W12, Mihir):</b> sensible turn-round, cars queued at a closure reroute, mid-trip rerouting on live costs with a margin so routes don't flip, yielding tuned at junctions.</li>
+<li><b>Livelier city (W10–W13):</b> animated incidents (smoke, hazard lights, flares) and on-scene work (flames, hose spray, police tape). CC0 low-poly models from Kenney: vehicles with spinning and steering wheels, body pitch and roll, doors opening on scene (Mihir); buildings fitted to lots by site kind, with lit windows and fire damage (Ananya). Rain and fog that slow traffic, buses, pedestrians, parked cars. A quality setting keeps the current models as a fallback.</li>
+<li><b>Evidence (W13):</b> experiments over many city trips: yielding on vs off, ETA accuracy per shift, dispatch by distance vs ETA, coverage before and after a station move.</li>
+<li><b>Finish (W12–W15):</b> tutorial, icons, sound mix, night lighting, 1000 cars at 60×, video and final report.</li>
+<li><b>If late,</b> the visuals are cut first (pedestrians, buses, Kenney buildings); mutual aid, multi-unit calls, rerouting and the experiments stay.</li>
+</ul>
+
 <h2>Screenshots</h2>
 <div class="shots">
 <figure><img src="screenshots/alerts.jpg" alt="Call pop-ups, call pins and an edge arrow over the city"><figcaption>Call alerts: pop-ups, pins over calls in view, an arrow to an off-screen call.</figcaption></figure>
 <figure><img src="screenshots/ride_along.jpg" alt="Riding along with an ambulance on its way to a call"><figcaption>Ride along with an ambulance on its way to a medical call.</figcaption></figure>
-</div>
-<div class="shots">
 <figure><img src="screenshots/coverage.jpg" alt="Coverage map shading the city by time for the nearest free unit"><figcaption>Coverage map: time for the nearest free unit, on live traffic.</figcaption></figure>
 <figure><img src="screenshots/end_screen.jpg" alt="End screen with grade, score and response-time chart"><figcaption>End screen: grade, score, response time per call against its target.</figcaption></figure>
 </div>

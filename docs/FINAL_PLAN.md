@@ -4,6 +4,8 @@ Group Rapid Route: Mihir Shinde, Ananya Das Hullumane Neelameghashyam
 
 Status (Oct 29): A4 (MVP 2.0) is built, mid-crit slides are done. This plan covers Nov 2 to the final. Dates assume the final is due around Dec 10; fix them once confirmed. Semester weeks count from Aug 31. Assets: procedural (built in code) plus CC0 low-poly models from Kenney for vehicles and buildings; no AI-generated assets, no runtime LLMs.
 
+Nov 9: A5 (Beta) pulls items from W10–W12 forward into Nov 9–22; see `docs/A5_PLAN.md`.
+
 ## Goals for the final
 
 1. **A deeper game:** calls that need more than one unit, severity, ambulances that take patients to hospital, and help from further away when local units are busy.

@@ -339,6 +339,10 @@ window.addEventListener('keydown', (e) => {
     muteBtn.click();
     return;
   }
+  if (!inControl && key === 'g') {
+    graphicsBtn.click();
+    return;
+  }
   if (e.key === 'Escape' && moving !== 'off') {
     endMoving();
     setPickHint(null);
@@ -579,6 +583,27 @@ muteBtn.onclick = () => {
   muteBtn.textContent = sirens.muted ? 'Muted' : 'Sound on';
 };
 window.addEventListener('pointerdown', () => sirens.unlock());
+// Graphics quality (G): high draws the Kenney vehicle models, low the simple built-in ones. Kept
+// for this browser.
+const graphicsBtn = $('graphics') as HTMLButtonElement;
+function setGraphics(high: boolean): void {
+  view.setVehicleStyle(high ? 'models' : 'classic');
+  view.effects.enabled = high;
+  graphicsBtn.textContent = `Graphics: ${high ? 'high' : 'low'}`;
+  try {
+    localStorage.setItem('dispatch.graphics', high ? 'high' : 'low');
+  } catch {
+    // storage blocked: the choice lasts this visit only
+  }
+}
+let savedGraphics: string | null = null;
+try {
+  savedGraphics = localStorage.getItem('dispatch.graphics');
+} catch {
+  savedGraphics = null;
+}
+setGraphics(savedGraphics !== 'low');
+graphicsBtn.onclick = () => setGraphics(view.vehicleStyle !== 'models');
 $('help').onclick = () => {
   $('helpOverlay').hidden = false;
 };

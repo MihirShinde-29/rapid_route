@@ -15,6 +15,8 @@ import { Sky, Terrain } from './environment';
 import { StaticBatch } from './batch';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { vehicleGeometry, vehiclePaint } from './vehicles';
+import { loadKenneyKit, type KenneyKit } from './kenney';
+import { Effects } from './effects';
 import { fillBlock, type FillItem } from './fill';
 import { isEmergency, VEHICLE_KINDS, type VehicleKind } from '../traffic/vehicleTypes';
 
@@ -45,6 +47,15 @@ const DEPART_S = 4; // sim s a new car takes to pull out of its lot onto the roa
 const PARK_SPEED = 6; // m/s driving off the road into the destination lot
 const DRIVEWAY_M = 13; // how far beside the lane a car's driveway starts
 const SHOULDER_M = 2; // how far a car pulls over for a siren
+const INCIDENT_FADE_MS = 400; // an incident's marker grows in when placed and shrinks away when cleared
+// Model vehicles (Kenney): front wheels steer up to this (rad); the body pitches this much per m/s²
+// of braking or acceleration and rolls this much per m/s² of cornering, up to the caps.
+const MAX_STEER = 0.55;
+const PITCH_PER_ACC = 0.012;
+const MAX_PITCH = 0.05;
+const ROLL_PER_ACC = 0.01;
+const MAX_ROLL = 0.06;
+export type VehicleStyle = 'models' | 'classic';
 
 type Area = { x0: number; x1: number; z0: number; z1: number }; // world units
 
@@ -209,8 +220,20 @@ export class View3D {
       right: THREE.InstancedMesh;
       sirens: [THREE.InstancedMesh, THREE.InstancedMesh] | null;
       n: number;
+      classic: { body: THREE.BufferGeometry; sirens: [THREE.BufferGeometry, THREE.BufferGeometry] | null };
+      // With the Kenney models: wheels drawn separately, left and right.
+      wheels: { left: THREE.InstancedMesh; right: THREE.InstancedMesh; nl: number; nr: number } | null;
     }
   >();
+  private kit: KenneyKit | null = null;
+  private bodyMat!: THREE.MeshStandardMaterial;
+  vehicleStyle: VehicleStyle = 'models';
+  // Per trip, for model animation: last heading, wheel spin and steer, body pitch and roll.
+  private motion = new Map<number, { h: number; t: number; spin: number; steer: number; pitch: number; roll: number; seen: number }>();
+  private motionFrame = 0;
+  private wheelMatrix = new THREE.Matrix4();
+  private baseMatrix = new THREE.Matrix4();
+  private partMatrix = new THREE.Matrix4();
   private blinkOn = false;
   private brakeMat = new THREE.MeshBasicMaterial({ transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
   private signals: Signal[] = [];
@@ -250,8 +273,8 @@ export class View3D {
   private chase = { heading: 0, look: 0, pitch: 1.05, dist: 16, dragging: false, released: 0, frame: 0 };
   private raycaster = new THREE.Raycaster();
   private incidentGroup = new THREE.Group();
-  private incidentKey = '';
-  private beacons: THREE.MeshBasicMaterial[] = [];
+  private incidentMarkers = new Map<number, { g: THREE.Group; born: number; gone: number }>(); // by incident id, real ms
+  readonly effects: Effects;
   private lanePreview: THREE.Mesh | null = null;
   private siteHighlight: THREE.Mesh | null = null;
   private sirenPhase = -1; // which siren lamps are lit this frame: 0 red, 1 blue, -1 neither
@@ -346,6 +369,7 @@ export class View3D {
     this.facadesMesh = this.facades.build(this.facadeMat, true, true);
     this.scene.add(this.facadesMesh);
     this.buildArcPool();
+    this.effects = new Effects(this.scene);
     this.buildCars();
     this.emergencyRouteHighlight = new THREE.LineSegments(
       new THREE.BufferGeometry(),
@@ -1159,6 +1183,7 @@ export class View3D {
   private buildCars(): void {
     const W = CAR_WIDTH * WORLD_PER_M;
     const bodyMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.4, metalness: 0.2 });
+    this.bodyMat = bodyMat;
     for (const kind of VEHICLE_KINDS) {
       const geo = vehicleGeometry(kind, WORLD_PER_M, W);
       const body = new THREE.InstancedMesh(geo.body, bodyMat, MAX_CARS);
@@ -1182,8 +1207,16 @@ export class View3D {
         this.scene.add(m);
       }
       this.carLights.push(lights);
-      this.fleet.set(kind, { body, lights, brake, left, right, sirens, n: 0 });
+      const classic = { body: geo.body, sirens: geo.sirenA && geo.sirenB ? ([geo.sirenA, geo.sirenB] as [THREE.BufferGeometry, THREE.BufferGeometry]) : null };
+      this.fleet.set(kind, { body, lights, brake, left, right, sirens, n: 0, classic, wheels: null });
     }
+    // The Kenney models load in the background; until then (or if they fail) the classic ones show.
+    loadKenneyKit(`${import.meta.env.BASE_URL}models/kenney-car-kit/`, WORLD_PER_M, W)
+      .then((kit) => {
+        this.kit = kit;
+        this.setVehicleStyle(this.vehicleStyle);
+      })
+      .catch((e) => console.warn('Vehicle models failed to load; keeping the classic ones.', e));
     this.sirenMesh = new THREE.InstancedMesh(
       new THREE.SphereGeometry(0.32, 10, 8),
       new THREE.MeshBasicMaterial({ depthTest: false }),
@@ -1202,13 +1235,90 @@ export class View3D {
     return { x: p.x - p.hy * DRIVEWAY_M, y: p.y + p.hx * DRIVEWAY_M, hx: p.hx, hy: p.hy };
   }
 
-  private placeCar(kind: VehicleKind, trip: Trip, x: number, y: number, hx: number, hy: number, lift: number, scale: number, braking: boolean, turn: Turn = null, siren = false): void {
+  // Model vehicles (Kenney) or the classic built-in ones. Switching swaps the body geometry and
+  // material; the lights stay as they are, with the siren glows moved up onto the model's roof.
+  setVehicleStyle(style: VehicleStyle): void {
+    this.vehicleStyle = style;
+    const kit = style === 'models' ? this.kit : null;
+    for (const [kind, f] of this.fleet) {
+      const model = kit?.vehicles.get(kind);
+      f.body.geometry = model ? model.body : f.classic.body;
+      f.body.material = model ? kit!.material : this.bodyMat;
+      if (f.sirens && f.classic.sirens) {
+        const lift = model ? Math.max(0, model.top - this.topOf(f.classic.body)) : 0;
+        f.sirens.forEach((m, k) => {
+          m.geometry = lift > 0 ? f.classic.sirens![k].clone().translate(0, lift, 0) : f.classic.sirens![k];
+        });
+      }
+      if (model && !f.wheels) {
+        const make = (g: THREE.BufferGeometry) => {
+          const m = new THREE.InstancedMesh(g, kit!.material, MAX_CARS * 2);
+          m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+          m.count = 0;
+          m.frustumCulled = false;
+          this.scene.add(m);
+          return m;
+        };
+        f.wheels = { left: make(model.wheelL), right: make(model.wheelR), nl: 0, nr: 0 };
+      }
+      if (f.wheels) f.wheels.left.visible = f.wheels.right.visible = model !== undefined;
+    }
+  }
+
+  private topOf(g: THREE.BufferGeometry): number {
+    g.computeBoundingBox();
+    return g.boundingBox!.max.y;
+  }
+
+  private placeCar(kind: VehicleKind, trip: Trip, x: number, y: number, hx: number, hy: number, lift: number, scale: number, braking: boolean, turn: Turn = null, siren = false, v = 0, acc = 0): void {
     const f = this.fleet.get(kind)!;
     if (f.n >= MAX_CARS) return;
+    const yaw = -Math.atan2(hy, hx);
     this.tmp.position.set(this.wx(x), lift, this.wz(y));
-    this.tmp.rotation.set(0, -Math.atan2(hy, hx), 0);
     this.tmp.scale.setScalar(scale);
+    const model = f.wheels?.left.visible ? this.kit?.vehicles.get(kind) : undefined;
+    if (model && f.wheels) {
+      // Steer and roll from how fast the heading turns per metre driven; spin from the distance.
+      const now = this.sim.time;
+      let st = this.motion.get(trip.id);
+      if (!st) {
+        st = { h: yaw, t: now, spin: 0, steer: 0, pitch: 0, roll: 0, seen: 0 };
+        this.motion.set(trip.id, st);
+      }
+      st.seen = this.motionFrame;
+      const dt = Math.min(1, Math.max(0, now - st.t));
+      let dh = yaw - st.h;
+      dh = Math.atan2(Math.sin(dh), Math.cos(dh));
+      const ds = v * dt; // m
+      const k = ds > 0.05 ? dh / ds : 0; // rad per m, positive turning left
+      const ease = Math.min(1, dt * 5);
+      const wheelbase = Math.abs(model.slots[0].x - model.slots[model.slots.length - 1].x) / WORLD_PER_M;
+      st.steer += (THREE.MathUtils.clamp(Math.atan(wheelbase * k), -MAX_STEER, MAX_STEER) - st.steer) * ease;
+      st.pitch += (THREE.MathUtils.clamp(acc * PITCH_PER_ACC, -MAX_PITCH, MAX_PITCH) - st.pitch) * ease;
+      st.roll += (THREE.MathUtils.clamp(v * v * k * ROLL_PER_ACC, -MAX_ROLL, MAX_ROLL) - st.roll) * ease;
+      st.spin = (st.spin + (ds * WORLD_PER_M) / (model.radius * scale)) % (2 * Math.PI);
+      st.h = yaw;
+      st.t = now;
+      // Wheels: on the car's frame without the body's pitch and roll.
+      this.tmp.rotation.set(0, yaw, 0);
+      this.tmp.updateMatrix();
+      this.baseMatrix.copy(this.tmp.matrix);
+      const w = f.wheels;
+      for (const slot of model.slots) {
+        const mesh = slot.right ? w.right : w.left;
+        const n = slot.right ? w.nr++ : w.nl++;
+        if (n >= MAX_CARS * 2) continue;
+        this.wheelMatrix.makeTranslation(slot.x, slot.y, slot.z);
+        if (slot.front) this.wheelMatrix.multiply(this.partMatrix.makeRotationY(st.steer));
+        this.wheelMatrix.multiply(this.partMatrix.makeRotationZ(-st.spin));
+        mesh.setMatrixAt(n, this.partMatrix.multiplyMatrices(this.baseMatrix, this.wheelMatrix));
+      }
+      this.tmp.rotation.set(st.roll, yaw, st.pitch, 'YZX');
+    } else {
+      this.tmp.rotation.set(0, yaw, 0);
+    }
     this.tmp.updateMatrix();
+    this.tmp.rotation.order = 'XYZ';
     f.body.setMatrixAt(f.n, this.tmp.matrix);
     f.body.setColorAt(f.n, vehiclePaint(trip, kind, this.tmpColor));
     f.brake.setColorAt(f.n, braking ? BRAKE_ON : BRAKE_OFF);
@@ -1244,8 +1354,12 @@ export class View3D {
     this.blinkOn = performance.now() % 700 < 380; // real time, so the blink rate ignores sim speed
     const flash = performance.now() % 600;
     this.sirenPhase = flash < 80 || (flash > 140 && flash < 220) ? 0 : flash > 300 && (flash < 380 || (flash > 440 && flash < 520)) ? 1 : -1;
-    for (const f of this.fleet.values()) f.n = 0;
+    for (const f of this.fleet.values()) {
+      f.n = 0;
+      if (f.wheels) f.wheels.nl = f.wheels.nr = 0;
+    }
     this.sirenCount = 0;
+    this.motionFrame++;
     for (const veh of traffic.vehicles) {
       const kind = veh.trip.kind ?? 'sedan';
       const p = traffic.pose(veh);
@@ -1277,14 +1391,14 @@ export class View3D {
         bezier(lot, c, road, s, this.bp, this.bd);
         // Indicates towards the road it is pulling onto.
         const turn = s < 0.7 ? this.sideOf(this.bp.x, this.bp.y, this.bd.x, this.bd.y, p.x + p.hx * 20, p.y + p.hy * 20) : null;
-        this.placeCar(kind, veh.trip, this.bp.x, this.bp.y, this.bd.x, this.bd.y, 0.08 + 0.18 * s, 0.6 + 0.4 * s, false, turn, veh.siren);
+        this.placeCar(kind, veh.trip, this.bp.x, this.bp.y, this.bd.x, this.bd.y, 0.08 + 0.18 * s, 0.6 + 0.4 * s, false, turn, veh.siren, (DRIVEWAY_M + 6) / DEPART_S);
       } else {
         // On the road surface; brake lights while slowing down or held at a stop. A car making way
         // for a siren sits up to SHOULDER_M to the right, indicating while it pulls over; one
         // passing a blocked stretch drives out in the oncoming lane.
         const off = veh.shift * SHOULDER_M - veh.pass * 2 * LANE_OFFSET;
         const turn = veh.yielding && veh.shift < 1 ? 'right' : this.turnAhead(veh);
-        this.placeCar(kind, veh.trip, p.x - p.hy * off, p.y + p.hx * off, p.hx, p.hy, 0.26, 1, veh.acc < -0.8 || veh.v < 0.5, turn, veh.siren);
+        this.placeCar(kind, veh.trip, p.x - p.hy * off, p.y + p.hx * off, p.hx, p.hy, 0.26, 1, veh.acc < -0.8 || veh.v < 0.5, turn, veh.siren, veh.v, veh.acc);
       }
     }
     // Cars that reached their destination this frame turn off into their lot.
@@ -1305,7 +1419,7 @@ export class View3D {
     for (const pk of this.parking) {
       const s = ease((now - pk.start) / pk.dur);
       bezier(pk.p0, pk.c, pk.p2, s, this.bp, this.bd);
-      this.placeCar(pk.kind, pk.trip, this.bp.x, this.bp.y, this.bd.x, this.bd.y, 0.26 - 0.18 * s, 1 - 0.4 * s, true, s < 0.6 ? pk.turn : null);
+      this.placeCar(pk.kind, pk.trip, this.bp.x, this.bp.y, this.bd.x, this.bd.y, 0.26 - 0.18 * s, 1 - 0.4 * s, true, s < 0.6 ? pk.turn : null, false, PARK_SPEED);
     }
     for (const f of this.fleet.values()) {
       f.body.count = f.n;
@@ -1314,10 +1428,17 @@ export class View3D {
       f.left.count = f.n;
       f.right.count = f.n;
       for (const m of f.sirens ?? []) m.count = f.n;
+      if (f.wheels) {
+        f.wheels.left.count = Math.min(f.wheels.nl, MAX_CARS * 2);
+        f.wheels.right.count = Math.min(f.wheels.nr, MAX_CARS * 2);
+        f.wheels.left.instanceMatrix.needsUpdate = true;
+        f.wheels.right.instanceMatrix.needsUpdate = true;
+      }
       f.body.instanceMatrix.needsUpdate = true;
       if (f.body.instanceColor) f.body.instanceColor.needsUpdate = true;
       for (const m of [f.brake, f.left, f.right, ...(f.sirens ?? [])]) if (m.instanceColor) m.instanceColor.needsUpdate = true;
     }
+    for (const [id, st] of this.motion) if (st.seen !== this.motionFrame) this.motion.delete(id);
     this.sirenMesh.count = this.sirenCount;
     this.sirenMesh.instanceMatrix.needsUpdate = true;
     if (this.sirenMesh.instanceColor) this.sirenMesh.instanceColor.needsUpdate = true;
@@ -1683,27 +1804,64 @@ export class View3D {
     this.scene.add(m);
   }
 
-  // Markers for the placed incidents; rebuilt when the set changes.
+  // Markers for the placed incidents. A new one grows in over INCIDENT_FADE_MS and a cleared one
+  // shrinks away; their lamps, flares and smoke run in `effects`.
   private syncIncidents(now: number): void {
-    const incidents = this.sim.incidents;
-    const key = incidents.map((i) => i.id).join(',');
-    if (key !== this.incidentKey) {
-      this.incidentKey = key;
-      for (const child of [...this.incidentGroup.children]) {
-        this.incidentGroup.remove(child);
-        child.traverse((o) => {
+    const live = new Set<number>();
+    for (const inc of this.sim.incidents) {
+      live.add(inc.id);
+      if (!this.incidentMarkers.has(inc.id)) {
+        const g = this.incidentMarker(inc);
+        this.incidentGroup.add(g);
+        this.incidentMarkers.set(inc.id, { g, born: now, gone: -1 });
+        this.incidentEffects(inc, g);
+      }
+    }
+    for (const [id, m] of this.incidentMarkers) {
+      if (!live.has(id) && m.gone < 0) {
+        m.gone = now;
+        this.effects.clear(`inc:${id}`);
+      }
+      const grow = Math.min(1, (now - m.born) / INCIDENT_FADE_MS);
+      const shrink = m.gone < 0 ? 1 : 1 - (now - m.gone) / INCIDENT_FADE_MS;
+      if (shrink <= 0) {
+        this.incidentGroup.remove(m.g);
+        m.g.traverse((o) => {
           if (o instanceof THREE.Mesh) {
             o.geometry.dispose();
             (o.material as THREE.Material).dispose();
           }
         });
+        this.incidentMarkers.delete(id);
+        continue;
       }
-      this.beacons = [];
-      for (const inc of incidents) this.incidentGroup.add(this.incidentMarker(inc));
+      m.g.scale.setScalar(Math.max(0.001, ease(Math.min(grow, shrink))));
     }
-    // Beacons flash in real time, so they still read when paused.
-    const on = now % 800 < 400;
-    for (const m of this.beacons) m.color.setHex(on ? 0xfff1c2 : 0x6a4a10);
+    this.effects.update();
+  }
+
+  // Lamps, flares and smoke for an incident's marker, found by the names incidentMarker gives.
+  private incidentEffects(inc: Incident, g: THREE.Group): void {
+    const id = `inc:${inc.id}`;
+    const named = (prefix: string) => {
+      const out: THREE.Mesh[] = [];
+      g.traverse((o) => {
+        if (o instanceof THREE.Mesh && o.name.startsWith(prefix)) out.push(o);
+      });
+      return out;
+    };
+    const mats = (meshes: THREE.Mesh[]) => meshes.map((m) => m.material as THREE.MeshBasicMaterial);
+    // Hazard lights blink together; the arrow board lights in sequence; barrier lamps alternate.
+    this.effects.flash(`${id}:hazard`, mats(named('hazard')), 0xffb21a, 0x4a3008, 900, 450);
+    this.effects.flash(`${id}:beacon`, mats(named('beacon')), 0xfff1c2, 0x6a4a10, 800, 400);
+    this.effects.flash(`${id}:arrow`, mats(named('arrow')), 0xffc23a, 0x2a1e08, 1200, 700, 140);
+    const lamps = named('lamp');
+    this.effects.flash(`${id}:lampA`, mats(lamps.filter((_, k) => k % 2 === 0)), 0xff3a2a, 0x3a0a08, 1000, 500);
+    this.effects.flash(`${id}:lampB`, mats(lamps.filter((_, k) => k % 2 === 1)), 0xff3a2a, 0x3a0a08, 1000, 500, 0, 500);
+    this.effects.flicker(`${id}:flare`, named('flare'));
+    g.updateMatrixWorld(true);
+    const smoke = named('smoke')[0];
+    if (smoke) this.effects.emit(id, 'smoke', smoke.getWorldPosition(new THREE.Vector3()), { rate: 7, size: 0.4 });
   }
 
   private incidentMarker(inc: Incident): THREE.Group {
@@ -1736,33 +1894,75 @@ export class View3D {
       m.position.set(x, 0.85, z);
       local.add(m);
     };
-    const beacon = (x: number, y: number, z: number) => {
-      const m = new THREE.MeshBasicMaterial({ color: 0xfff1c2 });
-      this.beacons.push(m);
-      const s = new THREE.Mesh(new THREE.SphereGeometry(0.9, 10, 8), m);
+    // A lamp (switched by `effects`), found later by its name: beacon, hazard, arrow or lamp.
+    const lamp = (name: string, geometry: THREE.BufferGeometry, x: number, y: number, z: number, parent: THREE.Object3D = local) => {
+      const s = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color: 0x333333 }));
+      s.name = name;
       s.position.set(x, y, z);
-      local.add(s);
+      parent.add(s);
+      return s;
     };
     const stretch = inc.to - inc.from;
     if (inc.kind === 'accident') {
-      // Two cars at an angle in the lane, with cones tapering in behind them.
-      box(6.7, 2.1, 2.9, 0xe8e8e8, -2.5, 0.2, 0.2, 0.4);
-      box(6.6, 2.1, 2.9, 0x8a1c1c, 3, 0.2, -0.3, -0.3);
-      beacon(-2.5, 3.4, 0.2);
-      for (const k of [0, 1, 2]) cone(-stretch / 2 - 1 - 3 * k, -1.2 + 0.9 * k);
+      // Two cars at an angle in the lane with their hazard lights on, smoke from the front one,
+      // debris on the road, flares and cones tapering in behind them.
+      const wreck = (color: number, x: number, z: number, rot: number) => {
+        const car = new THREE.Group();
+        car.position.set(x, 0.2, z);
+        car.rotation.y = rot;
+        local.add(car);
+        const m = new THREE.Mesh(new THREE.BoxGeometry(6.7, 1.3, 2.9), mat(color));
+        m.position.y = 0.65;
+        const cab = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.9, 2.6), mat(0x2a3038));
+        cab.position.set(-0.3, 1.75, 0);
+        car.add(m, cab);
+        for (const end of [-3.4, 3.4]) for (const side of [-1.1, 1.1]) lamp('hazard', new THREE.BoxGeometry(0.2, 0.35, 0.5), end, 0.9, side, car);
+        return car;
+      };
+      wreck(0xe8e8e8, -2.5, 0.2, 0.4);
+      const front = wreck(0x8a1c1c, 3, -0.3, -0.3);
+      // Where the smoke comes from: the front car's bonnet.
+      const smoke = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ visible: false }));
+      smoke.name = 'smoke';
+      smoke.position.set(2.6, 1.6, 0);
+      front.add(smoke);
+      lamp('beacon', new THREE.SphereGeometry(0.9, 10, 8), -2.5, 3.4, 0.2);
+      const rng = mulberry32(inc.id * 7919);
+      for (let k = 0; k < 7; k++) {
+        box(0.4 + rng() * 0.9, 0.12, 0.3 + rng() * 0.6, k % 3 === 0 ? 0x8a1c1c : 0x2b2f36, -1 + rng() * 6, 0, -1.6 + rng() * 3.2, rng() * Math.PI);
+      }
+      for (const k of [0, 1, 2]) {
+        cone(-stretch / 2 - 1 - 3 * k, -1.2 + 0.9 * k);
+        const flare = new THREE.Mesh(
+          new THREE.SphereGeometry(0.45, 8, 6),
+          new THREE.MeshBasicMaterial({ color: 0xff3a1a, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }),
+        );
+        flare.name = 'flare';
+        flare.position.set(-stretch / 2 - 2.5 - 3.5 * k, 0.25, -0.6 + 0.9 * k);
+        local.add(flare);
+      }
     } else if (inc.kind === 'lane') {
-      // Cones along the lane's inner edge, tapering in from the kerb, and a flashing arrow board.
+      // Cones along the lane's inner edge, tapering in from the kerb, and an arrow board whose
+      // lamps light in sequence towards the open lane.
       const n = Math.max(2, Math.round(stretch / 6));
       for (let k = 0; k <= n; k++) cone(-stretch / 2 + (k * stretch) / n, -1.6);
       for (const k of [1, 2]) cone(-stretch / 2 - 3 * k, -1.6 + 1.3 * k);
-      box(0.3, 1.6, 2.2, 0x222222, -stretch / 2 - 9, 0.2, 0.6);
-      beacon(-stretch / 2 - 9, 2.4, 0.6);
+      const bx = -stretch / 2 - 9;
+      box(0.3, 2.2, 3.2, 0x1c1c1c, bx, 0.6, 0.6);
+      box(0.25, 0.6, 0.25, 0x444444, bx, 0, 0.6);
+      // An arrow pointing left (towards -z, the open lane): a shaft then the head.
+      const dot = new THREE.BoxGeometry(0.12, 0.32, 0.32);
+      for (const [z, y] of [[1.7, 1.7], [1.2, 1.7], [0.7, 1.7], [0.2, 1.7], [-0.3, 1.7], [0.2, 2.2], [0.2, 1.2], [-0.3, 1.95], [-0.3, 1.45]] as const) {
+        lamp('arrow', dot, bx - 0.2, y, z);
+      }
+      lamp('beacon', new THREE.SphereGeometry(0.6, 10, 8), bx, 3.3, 0.6);
     } else {
-      // Red and white barriers across the street at both ends.
+      // Red and white barriers across the street at both ends, with red lamps flashing in turn.
       for (const x of [-len / 2 + 14, len / 2 - 14]) {
         box(0.5, 0.45, 9, 0xd8d8d8, x, 0.7, 0);
         box(0.5, 0.45, 9, 0xc82828, x, 1.15, 0);
         for (const z of [-4.2, 4.2]) box(0.3, 1.6, 0.3, 0x444444, x, 0, z);
+        for (const z of [-3.6, -1.2, 1.2, 3.6]) lamp('lamp', new THREE.SphereGeometry(0.3, 8, 6), x, 1.85, z);
       }
     }
     // A pin above, drawn over buildings so it reads from city zoom.

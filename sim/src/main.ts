@@ -856,7 +856,11 @@ function syncDispatchPanel(): void {
       const li = document.createElement('li');
       const button = document.createElement('button');
       button.className = 'dispatch-candidate';
-      const notes = [candidateItems.length === 0 ? 'fastest' : '', unit.state === 'returning' ? 'on its way back' : ''].filter(Boolean);
+      const notes = [
+        candidateItems.length === 0 ? 'fastest' : '',
+        candidate.mutualAid ? 'Mutual aid' : '',
+        unit.state === 'returning' ? 'on its way back' : '',
+      ].filter(Boolean);
       button.textContent = `${unit.kind.toUpperCase()} ${unit.id + 1} · ${Math.round(candidate.eta)} s${notes.length > 0 ? ` · ${notes.join(' · ')}` : ''}`;
       button.setAttribute('aria-pressed', String(selectedUnitId === unit.id));
       button.onclick = () => {

@@ -122,6 +122,7 @@ export function sortCallsByPriority(calls: EmergencyCall[], now: number): Emerge
 export interface DispatchCandidate {
   unitId: number;
   eta: number;
+  mutualAid: boolean;
 }
 
 export interface UnitTravelInfo {
@@ -265,11 +266,40 @@ export class DispatchCenter {
     const call = this.calls.find((item) => item.id === callId);
     if (!call || !this.isActive(call)) return [];
     const needed = this.outstandingNeeds(call, call.assignedUnitIds);
-    return this.units
-      .filter((unit) => this.isFree(unit) && !this.isCommitted(unit) && needed.includes(unit.kind))
-      .map((unit) => ({ unitId: unit.id, eta: this.sim.planUnitTrip(this.startOf(unit), call.site).unitEta }))
-      .filter((candidate) => Number.isFinite(candidate.eta))
-      .sort((a, b) => a.eta - b.eta || a.unitId - b.unitId);
+    const candidates: DispatchCandidate[] = [];
+    for (const kind of needed) {
+      const localStation = this.stations
+        .filter((station) => station.kind === kind)
+        .map((station) => ({
+          station,
+          eta: this.sim.planUnitTrip(station.site, call.site).unitEta,
+        }))
+        .sort((a, b) => a.eta - b.eta || a.station.id - b.station.id)[0]?.station;
+      if (!localStation) continue;
+
+      const eligible = this.units.filter((unit) =>
+        unit.kind === kind &&
+        this.isFree(unit) &&
+        !this.isCommitted(unit),
+      );
+      const local = eligible.filter((unit) => unit.station === localStation);
+      const available = local.length > 0
+        ? [
+          ...local.map((unit) => ({ unit, mutualAid: false })),
+          ...eligible
+            .filter((unit) => unit.station !== localStation && unit.state === 'returning')
+            .map((unit) => ({ unit, mutualAid: true })),
+        ]
+        : eligible
+          .filter((unit) => unit.station !== localStation)
+          .map((unit) => ({ unit, mutualAid: true }));
+
+      for (const { unit, mutualAid } of available) {
+        const eta = this.sim.planUnitTrip(this.startOf(unit), call.site).unitEta;
+        if (Number.isFinite(eta)) candidates.push({ unitId: unit.id, eta, mutualAid });
+      }
+    }
+    return candidates.sort((a, b) => a.eta - b.eta || a.unitId - b.unitId);
   }
 
   unitTravel(unitId: number): UnitTravelInfo | null {

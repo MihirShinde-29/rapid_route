@@ -149,6 +149,33 @@ describe('dispatch', () => {
     expect(center.assign(second.id, unitId)).toBe(false);
   });
 
+  it('offers and assigns a suitable unit from another station as mutual aid when local units are busy', () => {
+    const sim = quietSimulation();
+    const center = new DispatchCenter(sim, { mode: 'dispatcher', callsPerHour: 0 });
+    const target = center.createCall('medical', nonStationSite(sim), 'medium');
+    const localStation = center.stations
+      .filter((station) => station.kind === 'ambulance')
+      .sort((a, b) =>
+        sim.planUnitTrip(a.site, target.site).unitEta - sim.planUnitTrip(b.site, target.site).unitEta ||
+        a.id - b.id,
+      )[0];
+
+    for (const unitId of localStation.unitIds) {
+      const blockingCall = center.createCall('medical', nonStationSite(sim), 'medium');
+      expect(center.assign(blockingCall.id, unitId)).toBe(true);
+    }
+
+    const candidates = center.candidates(target.id);
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(candidates.every((candidate) => candidate.mutualAid)).toBe(true);
+    const candidate = candidates[0];
+    const unit = center.units[candidate.unitId];
+    expect(unit.station).not.toBe(localStation);
+    expect(candidate.eta).toBe(sim.planUnitTrip(unit.location, target.site).unitEta);
+    expect(center.assign(target.id, unit.id)).toBe(true);
+    expect(unit.callId).toBe(target.id);
+  });
+
   it('resolves a call from the simulation arrival stream and tracks response', () => {
     const sim = quietSimulation();
     const center = new DispatchCenter(sim, { mode: 'dispatcher', callsPerHour: 0 });

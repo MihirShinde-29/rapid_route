@@ -7,7 +7,9 @@ import { BLOCK_JUNCTION_M, type Incident, type Simulation } from '../sim';
 
 export type DispatchMode = 'dispatcher' | 'sandbox';
 export type CallKind = 'medical' | 'fire' | 'crime' | 'crash';
-export type UnitState = 'idle' | 'en_route' | 'on_scene' | 'returning';
+export type CallSeverity = 'low' | 'medium' | 'critical';
+// to_hospital: an ambulance taking a patient to the nearest hospital after a medical call.
+export type UnitState = 'idle' | 'en_route' | 'on_scene' | 'to_hospital' | 'returning';
 export type CallState = 'created' | 'assigned' | 'en_route' | 'resolved' | 'missed';
 export type DispatchEnd = null | 'win' | 'loss' | 'ended';
 
@@ -32,6 +34,8 @@ export interface EmergencyUnit {
 export interface EmergencyCall {
   id: number;
   kind: CallKind;
+  severity: CallSeverity; // A5 stub: always 'medium' until severity is built
+  needs: EmergencyKind[]; // unit kinds the call needs; A5 stub: one, until multi-unit calls are built
   site: Site;
   incidentId: number | null;
   createdAt: number;
@@ -68,6 +72,7 @@ export interface DispatchEvent {
 }
 const ACCIDENT_CLEARS_AFTER_MISS_S = 20 * 60; // nobody came: it is cleared eventually anyway
 const MAX_EVENTS = 200; // kept if nobody drains them (tests, headless runs)
+const HANDOVER_S = 3 * 60; // an ambulance at the hospital, handing its patient over
 
 const DEFAULT_CALLS_PER_HOUR = 20;
 const DEFAULT_SHIFT_SECONDS = 2 * HOUR;
@@ -135,6 +140,7 @@ export class DispatchCenter {
   private missedCalls = 0;
   private readonly accidentsPerHour: number;
   private readonly accidentRng: () => number;
+  private readonly hospitalOf = new Map<number, Site>(); // ambulances on a hospital trip, by unit id
 
   constructor(private readonly sim: Simulation, opts: DispatchOptions) {
     this.mode = opts.mode;
@@ -211,6 +217,8 @@ export class DispatchCenter {
     const call: EmergencyCall = {
       id: this.nextCallId++,
       kind: callKind,
+      severity: 'medium',
+      needs: [CALL_UNIT[callKind]],
       site: callSite,
       incidentId,
       createdAt: this.sim.time,
@@ -379,6 +387,13 @@ export class DispatchCenter {
       const unit = this.units.find((item) => item.tripId === trip.id);
       if (!unit) continue;
       unit.tripId = null;
+      if (unit.state === 'to_hospital') {
+        // At the hospital: hand the patient over, then drive back (or stay, if it is home).
+        unit.location = this.hospitalOf.get(unit.id) ?? unit.location;
+        this.hospitalOf.delete(unit.id);
+        unit.sceneUntil = t + HANDOVER_S;
+        continue;
+      }
       if (unit.state === 'returning') {
         this.resetUnit(unit);
         unit.location = unit.station.site;
@@ -411,9 +426,33 @@ export class DispatchCenter {
       } else if (unit.state === 'on_scene' && unit.sceneUntil !== null && t >= unit.sceneUntil) {
         const call = unit.callId === null ? undefined : this.calls.find((item) => item.id === unit.callId);
         if (call && call.state !== 'missed' && call.state !== 'resolved') this.resolveCall(call);
-        this.startReturn(unit);
+        if (call?.kind === 'medical' && unit.kind === 'ambulance' && call.state === 'resolved') this.startHospital(unit);
+        else this.startReturn(unit);
+      } else if (unit.state === 'to_hospital' && unit.tripId === null && unit.sceneUntil !== null && t >= unit.sceneUntil) {
+        if (unit.location === unit.station.site) this.resetUnit(unit);
+        else this.startReturn(unit);
       }
     }
+  }
+
+  // After a medical call: to the hospital the ambulance would reach first, siren on.
+  private startHospital(unit: EmergencyUnit): void {
+    let best: { site: Site; eta: number } | null = null;
+    for (const station of this.stations) {
+      if (station.kind !== 'ambulance') continue;
+      const eta = this.sim.planUnitTrip(unit.location, station.site).unitEta;
+      if (!best || eta < best.eta) best = { site: station.site, eta };
+    }
+    const trip = best && Number.isFinite(best.eta) ? this.sim.sendUnit(unit.kind, unit.location, best.site) : null;
+    if (!best || !trip) {
+      this.startReturn(unit);
+      return;
+    }
+    unit.callId = null;
+    unit.sceneUntil = null;
+    unit.state = 'to_hospital';
+    unit.tripId = trip.id;
+    this.hospitalOf.set(unit.id, best.site);
   }
 
   private startReturn(unit: EmergencyUnit): void {
@@ -452,6 +491,7 @@ export class DispatchCenter {
   }
 
   private resetUnit(unit: EmergencyUnit): void {
+    this.hospitalOf.delete(unit.id);
     unit.state = 'idle';
     unit.tripId = null;
     unit.callId = null;

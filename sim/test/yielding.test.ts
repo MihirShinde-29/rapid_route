@@ -51,6 +51,54 @@ describe('yielding to sirens', () => {
   });
 });
 
+// A steady stream of cars past a driveway, and a unit waiting to pull out of it. Returns how long
+// the unit waited to get onto the street.
+function pullOutRun(siren: boolean, left = false) {
+  const grid = buildGrid({ ...buildGrid().opts, cols: 6, rows: 1 });
+  const model = new TrafficModel(grid.net, { signals: false });
+  const route = new Router(grid.net).route(0, 5);
+  const back = new Router(grid.net).route(5, 0);
+  const car = (id: number): Trip => ({ id, originZone: 0, destZone: 0, originNode: 0, destNode: 5, departTime: 0, kind: 'sedan', departPos: 10 });
+  const len = model.lanes[route[1]].geom.length;
+  // The unit leaves from the second street, half way along; with `left` it crosses the other lane.
+  const unit: Trip = { id: 99, originZone: 0, destZone: 0, originNode: 1, destNode: left ? 0 : 5, departTime: 0, kind: 'ambulance', departPos: len / 2, departLeft: left };
+  const unitRoute = left ? back.slice(back.indexOf(grid.net.reverse(route[1])!)) : route.slice(1);
+  let queued = -1;
+  let out = -1;
+  const errors: string[] = [];
+  for (let t = 0; t < 300 && out < 0; t += 0.1) {
+    const k = Math.round(t * 10);
+    if (k % 20 === 0) {
+      model.enqueue(car(k), route); // a car every 2 s each way
+      model.enqueue({ ...car(100000 + k), originNode: 5, destNode: 0 }, back);
+    }
+    if (k === 300) {
+      model.enqueue(unit, unitRoute, { siren });
+      queued = t;
+    }
+    model.step(t, 0.1);
+    if (queued >= 0 && model.vehicleOf(unit.id)) out = t;
+    if (k % 5 === 0) errors.push(...model.checkInvariants());
+  }
+  return { wait: out < 0 ? Infinity : out - queued, errors };
+}
+
+describe('pulling out with the siren on', () => {
+  it('cars stop to let a unit out of its driveway', () => {
+    const on = pullOutRun(true);
+    const off = pullOutRun(false);
+    expect(on.errors).toEqual([]);
+    expect(on.wait).toBeLessThan(off.wait);
+  });
+
+  it('and on the far lane when it turns left out', () => {
+    const on = pullOutRun(true, true);
+    const off = pullOutRun(false, true);
+    expect(on.errors).toEqual([]);
+    expect(on.wait).toBeLessThan(off.wait);
+  });
+});
+
 describe('units in city traffic', () => {
   it('junctions hold cross traffic for a unit, cars yield, and the peak stays clear', () => {
     const sim = new Simulation({ ...DEFAULT_CONFIG, startHour: 7.75 });
@@ -88,5 +136,48 @@ describe('units in city traffic', () => {
     expect(pulledOver).toBeGreaterThan(0);
     expect(held).toBeGreaterThan(0);
     expect(sim.traffic.removedGridlock).toBe(0);
+  }, 120_000);
+});
+
+describe('turning round', () => {
+  // A unit drives away from its station without a siren, then is sent back to the station
+  // behind it once it is part way along a street. Returns how long that took, and whether it
+  // turned round in the street.
+  function sendBack(allow: boolean) {
+    const sim = new Simulation({ ...DEFAULT_CONFIG, startHour: 10 });
+    sim.allowTurnRound = allow;
+    while (sim.time < 10.1 * HOUR) sim.step();
+    const station = sim.sites.find((s) => s.kind === 'fire_station')!;
+    const far = sim.sites[(station.id * 7 + 500) % sim.sites.length];
+    const trip = sim.sendUnit('fire', station, far, { siren: false })!;
+    // Wait until it is on its second street, 40 m or more along it and not at the junction.
+    let veh;
+    for (let k = 0; k < 6000; k++) {
+      sim.step();
+      veh = sim.traffic.vehicleOf(trip.id);
+      if (veh && veh.ri >= 1 && !veh.conn && !veh.granted && veh.pos > 30 && sim.traffic.lanes[veh.route[veh.ri]].geom.length - veh.pos > 40) break;
+    }
+    expect(veh, 'unit never part way along its second street').toBeDefined();
+    const plan = sim.planUnitTrip(veh!, station);
+    const t0 = sim.time;
+    expect(sim.sendUnit('fire', veh!, station)).not.toBeNull();
+    let done = -1;
+    const errors: string[] = [];
+    for (let k = 0; k < 20 * 600 && done < 0; k++) {
+      sim.step();
+      if (sim.arrivals.some((t) => t.id === trip.id)) done = sim.time - t0;
+      if (k % 10 === 0) errors.push(...sim.traffic.checkInvariants());
+    }
+    return { time: done, turned: plan.turnRound === true, errors };
+  }
+
+  it('a unit sent back the way it came turns round in the street and gets there sooner', () => {
+    const on = sendBack(true);
+    const off = sendBack(false);
+    expect(on.turned).toBe(true);
+    expect(off.turned).toBe(false);
+    expect(on.errors).toEqual([]);
+    expect(on.time).toBeGreaterThan(0);
+    expect(on.time).toBeLessThan(off.time);
   }, 120_000);
 });

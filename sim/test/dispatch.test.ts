@@ -80,9 +80,32 @@ describe('dispatch', () => {
     expect(center.score.resolvedCalls).toBe(1);
     expect(center.score.meanResponseTime).toBe(call.responseTime);
     expect(center.score.points).toBeGreaterThan(0);
-    expect(unit.state).toBe('returning');
-    for (let step = 0; step < 20 * 60 * 10 && unit.state !== 'idle'; step++) sim.step();
+    // A medical call: the ambulance takes the patient to hospital before it is free again.
+    expect(unit.state).toBe('to_hospital');
+    for (let step = 0; step < 40 * 60 * 10 && unit.state !== 'idle'; step++) sim.step();
     expect(unit.state).toBe('idle');
+  });
+
+  it('takes the patient to the nearest hospital after a medical call, then returns', () => {
+    const sim = quietSimulation();
+    const center = new DispatchCenter(sim, { mode: 'dispatcher', callsPerHour: 0 });
+    const call = center.createCall('medical', nonStationSite(sim));
+    const unitId = center.candidates(call.id)[0].unitId;
+    const unit = center.units[unitId];
+    expect(center.assign(call.id, unitId)).toBe(true);
+    const states: string[] = [];
+    let hospital: string | null = null;
+    for (let step = 0; step < 60 * 60 * 10 && !(states.includes('to_hospital') && unit.state === 'idle'); step++) {
+      sim.step();
+      if (states[states.length - 1] !== unit.state) states.push(unit.state);
+      if (unit.state === 'to_hospital' && unit.tripId === null) hospital = unit.location.kind;
+    }
+    expect(call.state).toBe('resolved');
+    expect(hospital).toBe('hospital'); // handed over at a hospital
+    expect(states.indexOf('on_scene')).toBeLessThan(states.indexOf('to_hospital'));
+    expect(unit.state).toBe('idle');
+    expect(unit.location).toBe(unit.station.site);
+    expect(center.isFree(unit)).toBe(true);
   });
 
   it('keeps an assigned unit en route and resolves the call only after arrival', () => {

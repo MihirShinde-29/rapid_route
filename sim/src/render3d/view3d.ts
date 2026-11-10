@@ -2050,8 +2050,8 @@ export class View3D {
       this.followVeh = null;
       for (const v of this.sim.traffic.vehicles) if (v.trip.id === this.followTrip) this.followVeh = v;
       if (!this.followVeh) {
-        // Not on the road yet (waiting to depart), or already arrived.
-        if (this.followSeen) {
+        // Not on the road yet (waiting to depart, or turning round), or already arrived.
+        if (this.followSeen && !this.sim.traffic.isWaiting(this.followTrip)) {
           const tripId = this.followTrip;
           this.follow(null);
           if (tripId !== null) this.onFollowEnd?.(tripId);

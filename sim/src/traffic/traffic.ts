@@ -36,6 +36,9 @@ const ON_SHOULDER = 0.8; // shift at which a unit can pass the car
 const HELD = 0.3; // a car shifted more than this stays stopped
 const PREEMPT_M = 100; // a junction is held for a unit this close to its stop line (or its braking distance)
 const SIREN_SPEED = 1.3; // units drive up to this times the speed limit
+// A unit pulling out of its station (or a call) with its siren on: cars this far before its
+// driveway, on its lane and on the lane it crosses to turn left, pull over and stop to let it out.
+const PULL_OUT_YIELD_M = 80;
 // A blocked stretch of one lane (accident, lane closure) is run like a one-lane bridge: the stretch
 // plus ZONE_MARGIN_M either side is a zone covering both lanes. Oncoming traffic has priority; a
 // blocked car waits at the zone for a gap and passes in the oncoming lane, which then holds at the
@@ -123,7 +126,7 @@ export class TrafficModel {
   // network is empty at any moment. Entries are added on entry and pruned once empty.
   private activeLanes = new Set<Lane>();
   private activeConns = new Set<Connector>();
-  private backlog: { trip: Trip; route: number[] }[] = [];
+  private backlog: { trip: Trip; route: number[]; veh?: Vehicle }[] = []; // veh: a unit turning round
   private forcedSpeeds = new Map<number, number>();
   // Streets closed by the user (accidents and lane closures are blockages, below).
   private closedLinks = new Set<number>();
@@ -136,6 +139,8 @@ export class TrafficModel {
   private sirenLanes = new Set<Lane>(); // lanes with a unit on them, where cars can be passed
   // Junctions held for a unit this step, with the approaches the units come from.
   private preempted = new Map<number, Set<number>>();
+  // Per unit trip: the cars that made way for it and the junctions held for it, over the whole trip.
+  private yieldLog = new Map<number, { cars: Set<number>; junctions: Set<number> }>();
   private zones = new Map<number, Zone>(); // by id
   private blockedZone = new Map<number, Zone>(); // by blocked lane
   private oncomingZone = new Map<number, Zone>(); // by oncoming lane
@@ -209,11 +214,23 @@ export class TrafficModel {
   enqueue(trip: Trip, route: number[], opts: { siren?: boolean } = {}): void {
     if (route.length === 0) return;
     this.backlog.push({ trip, route });
-    if (opts.siren) this.sirens.add(trip.id);
+    if (opts.siren) {
+      this.sirens.add(trip.id);
+      this.yieldLog.set(trip.id, { cars: new Set(), junctions: new Set() });
+    }
+  }
+
+  // How many cars made way for a unit trip and how many junctions were held for it, so far.
+  yieldCounts(tripId: number): { cars: number; junctions: number } {
+    const log = this.yieldLog.get(tripId);
+    return { cars: log?.cars.size ?? 0, junctions: log?.junctions.size ?? 0 };
   }
 
   setSiren(tripId: number, on: boolean): void {
-    if (on) this.sirens.add(tripId);
+    if (on) {
+      this.sirens.add(tripId);
+      this.yieldLog.set(tripId, { cars: new Set(), junctions: new Set() });
+    }
     else this.sirens.delete(tripId);
     const veh = this.byTrip.get(tripId);
     if (veh) veh.siren = on;
@@ -238,6 +255,31 @@ export class TrafficModel {
     veh.trip.destNode = this.net.links[route[route.length - 1]].to;
     veh.trip.arrivePos = arrivePos;
     return true;
+  }
+
+  // A unit turning round where it is: it leaves its lane and pulls out again on the other one,
+  // `departPos` m along it, like a car leaving a driveway (cars there stop for it, see
+  // markPullOuts). Only for a car not committed to the junction ahead.
+  turnRound(tripId: number, route: number[], departPos: number, arrivePos: number, arriveLeft: boolean): boolean {
+    const veh = this.byTrip.get(tripId);
+    if (!veh || veh.conn || veh.granted || this.net.reverse(veh.route[veh.ri]) !== route[0]) return false;
+    const vs = this.lanes[veh.route[veh.ri]].vehicles;
+    vs.splice(vs.indexOf(veh), 1);
+    this.vehicles.delete(veh);
+    this.byTrip.delete(tripId);
+    const trip = veh.trip;
+    trip.departPos = departPos;
+    trip.departLeft = false;
+    trip.arrivePos = arrivePos;
+    trip.arriveLeft = arriveLeft;
+    trip.destNode = this.net.links[route[route.length - 1]].to;
+    this.backlog.push({ trip, route, veh });
+    return true;
+  }
+
+  // True while a trip waits to pull out (or to finish turning round).
+  isWaiting(tripId: number): boolean {
+    return this.backlog.some((item) => item.trip.id === tripId);
   }
 
   private finish(veh: Vehicle, t: number): void {
@@ -333,8 +375,13 @@ export class TrafficModel {
   // its next junction. `plan(node, lastLink, skip)` returns links from `node` ending with the
   // trip's last link (where its driveway is), not using `skip`, or null if there is none.
   // The part of a route a car is committed to (its lane, and the next one once it holds the
-  // junction) never changes. Returns how many routes changed.
-  reroute(links: Set<number>, plan: (node: number, lastLink: number, skip: number[]) => number[] | null): number {
+  // junction) never changes. `accept(oldTail, newTail)`, if given, decides whether a car takes
+  // the new route; with `skipUnits` units keep theirs. Returns how many routes changed.
+  reroute(
+    links: Set<number>,
+    plan: (node: number, lastLink: number, skip: number[]) => number[] | null,
+    opts: { accept?: (oldTail: number[], newTail: number[]) => boolean; skipUnits?: boolean } = {},
+  ): number {
     const revised = (route: number[], keep: number): number[] | null => {
       if (keep >= route.length - 1 || !route.slice(keep + 1).some((id) => links.has(id))) return null;
       const kept = this.net.links[route[keep]];
@@ -343,10 +390,12 @@ export class TrafficModel {
       const tail = plan(kept.to, route[route.length - 1], back === undefined ? [] : [back]);
       const same = tail !== null && tail.length === route.length - keep - 1 && tail.every((id, i) => id === route[keep + 1 + i]);
       if (!tail || same) return null;
+      if (opts.accept && !opts.accept(route.slice(keep + 1), tail)) return null;
       return [...route.slice(0, keep + 1), ...tail];
     };
     let changed = 0;
     for (const veh of this.vehicles) {
+      if (opts.skipUnits && veh.siren) continue;
       const next = revised(veh.route, veh.conn || veh.granted ? veh.ri + 1 : veh.ri);
       if (!next) continue;
       veh.route = next;
@@ -390,7 +439,7 @@ export class TrafficModel {
   // Cars pull out of a driveway part way along their first lane once there is a gap: room
   // ahead, and enough room behind for the next car to slow down for them.
   private insertBacklog(t: number): void {
-    const still: { trip: Trip; route: number[] }[] = [];
+    const still: { trip: Trip; route: number[]; veh?: Vehicle }[] = [];
     for (const item of this.backlog) {
       const lane = this.lanes[item.route[0]];
       const spec = item.trip.kind ? VEHICLE_SPECS[item.trip.kind] : { length: VEHICLE_LENGTH, accel: IDM.a };
@@ -407,22 +456,24 @@ export class TrafficModel {
       }
       let k = 0;
       while (k < vs.length && vs[k].pos >= pos) k++;
-      const lead = vs[k - 1];
       const follow = vs[k];
-      const aheadOk = !lead || lead.pos - lead.len - pos >= IDM.s0 + 2;
-      // With nobody behind, still leave room for cars already granted into this lane.
+      const unit = this.sirens.has(item.trip.id);
+      const aheadOk = this.roomAhead(vs, k, pos, unit);
+      // With nobody behind, still leave room for cars already granted into this lane. A unit goes
+      // once the car behind has stopped for it (see markPullOuts).
       const behindOk = follow
-        ? pos - spec.length - follow.pos >= IDM.s0 + 3 + 1.5 * follow.v * IDM.T
+        ? pos - spec.length - follow.pos >= IDM.s0 + 3 + 1.5 * follow.v * IDM.T ||
+          (unit && follow.yielding && follow.v < 0.5 && (follow.shift >= ON_SHOULDER || pos - spec.length - follow.pos >= 1))
         : pos - spec.length >= lane.reserved + IDM.s0;
       // Pulling out to the left also needs a gap on the near lane, which it crosses first.
       const gap = Math.max(LEFT_MIN_GAP_S, LEFT_OUT_GAP_S - (t - item.trip.departTime) * LEFT_IMPATIENCE);
-      const crossOk = !item.trip.departLeft || this.crossingClear(this.net.reverse(lane.link.id)!, lane.geom.length - pos, gap);
+      const crossOk = !item.trip.departLeft || this.crossingClear(this.net.reverse(lane.link.id)!, lane.geom.length - pos, unit ? LEFT_MIN_GAP_S : gap, unit);
       if (!aheadOk || !behindOk || !crossOk) {
         still.push(item);
         continue;
       }
-      const v: Vehicle = {
-        id: this.nextId++,
+      const v: Vehicle = Object.assign(item.veh ?? ({} as Vehicle), {
+        id: item.veh?.id ?? this.nextId++,
         trip: item.trip,
         route: item.route,
         ri: 0,
@@ -444,13 +495,48 @@ export class TrafficModel {
         yielding: false,
         shift: 0,
         pass: 0,
-      };
+      });
       vs.splice(k, 0, v);
       this.activeLanes.add(lane);
       this.vehicles.add(v);
       this.byTrip.set(v.trip.id, v);
     }
     this.backlog = still;
+  }
+
+  // Room for a car pulling out at `pos` behind the car before index k (a unit drives past cars on
+  // the shoulder).
+  private roomAhead(vs: Vehicle[], k: number, pos: number, unit: boolean): boolean {
+    for (let j = k - 1; j >= 0; j--) {
+      if (unit && vs[j].shift >= ON_SHOULDER) continue;
+      return vs[j].pos - vs[j].len - pos >= IDM.s0 + 2;
+    }
+    return true;
+  }
+
+  // Units waiting to pull out with their siren on: the cars coming up to the driveway (and, for a
+  // left turn out, on the lane it crosses) pull over and stop, if the unit has room to go.
+  private markPullOuts(marked: Set<Vehicle>): void {
+    for (const item of this.backlog) {
+      if (!this.sirens.has(item.trip.id)) continue;
+      const lane = this.lanes[item.route[0]];
+      const at = Math.max(item.trip.kind ? VEHICLE_SPECS[item.trip.kind].length : VEHICLE_LENGTH, item.trip.departPos ?? DEPART_FRAC * lane.geom.length);
+      const vs = lane.vehicles;
+      let k = 0;
+      while (k < vs.length && vs[k].pos >= at) k++;
+      if (!this.roomAhead(vs, k, at, true) || this.blockedZone.has(lane.link.id) || this.oncomingZone.has(lane.link.id)) continue;
+      const log = this.yieldLog.get(item.trip.id);
+      const mark = (l: Lane, point: number) => {
+        for (const o of l.vehicles) {
+          if (o.siren || o.granted || o.pos > point + 2 || point - o.pos > PULL_OUT_YIELD_M) continue;
+          marked.add(o);
+          log?.cars.add(o.id);
+        }
+      };
+      mark(lane, at);
+      const back = this.net.reverse(lane.link.id);
+      if (item.trip.departLeft && back !== undefined) mark(this.lanes[back], this.lanes[back].geom.length - at);
+    }
   }
 
   // Right-of-way: a car may enter the junction only if (1) its movement is compatible with
@@ -588,6 +674,7 @@ export class TrafficModel {
     }
     const marked = new Set<Vehicle>();
     for (const u of units) {
+      const log = this.yieldLog.get(u.trip.id);
       let ri = u.ri;
       let from = u.pos;
       let budget = YIELD_RANGE_M;
@@ -603,6 +690,7 @@ export class TrafficModel {
           const node = lane.link.to;
           if (!this.preempted.has(node)) this.preempted.set(node, new Set());
           this.preempted.get(node)!.add(lane.link.id);
+          log?.junctions.add(node);
         }
       }
       // Nearest first. Making way only helps if the unit can reach the car, so marking stops at a
@@ -622,6 +710,7 @@ export class TrafficModel {
             break;
           }
           marked.add(o);
+          log?.cars.add(o.id);
         }
         budget -= lane.geom.length - from;
         from = 0;
@@ -629,6 +718,7 @@ export class TrafficModel {
         if (ri < u.route.length) budget -= this.connector(u.route[ri - 1], u.route[ri]).length;
       }
     }
+    this.markPullOuts(marked);
     for (const v of marked) {
       v.yielding = true;
       v.shift = Math.min(1, v.shift + dt / PULL_OVER_S);
@@ -990,15 +1080,18 @@ export class TrafficModel {
   // `window` seconds: the gap a car needs to cross that lane into or out of a driveway. A car
   // waiting there to turn left across our lane is no obstacle (both turn), and a queue that has
   // stopped across the driveway lets the car through.
-  private crossingClear(laneId: number, at: number, window: number): boolean {
+  // With `unit`, cars that have stopped for a unit pulling out (see markPullOuts) are no obstacle.
+  private crossingClear(laneId: number, at: number, window: number, unit = false): boolean {
     const eta = (dist: number, v: number) => dist / Math.max(v, 2);
     for (const o of this.lanes[laneId].vehicles) {
       if (o.pos - o.len - 2 > at) continue; // already past
       if (o.pos + 2 >= at) {
         if (o.arriveLeft && !o.turnIn && o.ri === o.route.length - 1) continue;
         if (o.v < 0.5 && o.stoppedFor > 2) continue;
+        if (unit && o.shift >= ON_SHOULDER) continue;
         return false;
       }
+      if (unit && o.yielding && o.v < 0.5) continue;
       if (eta(at - o.pos, o.v) < window) return false;
     }
     for (const c of this.connsInto[laneId]) {

@@ -89,3 +89,41 @@ describe('incidents', () => {
     for (const id of inc.links) expect(sim.traffic.isClosed(id)).toBe(false);
   }, 60_000);
 });
+
+describe('queues at a blockage', () => {
+  // Mean number of cars standing in the queue for a blocked lane (on it, or on the streets just
+  // before it with a route through it), sampled every second for half an hour after an accident
+  // on the busiest arterial at the morning peak.
+  function accidentQueue(reroute: boolean) {
+    const sim = new Simulation({ ...DEFAULT_CONFIG, startHour: 7.5 });
+    sim.rerouteQueues = reroute;
+    while (sim.time < 7.75 * HOUR) sim.step();
+    const link = busyArterial(sim);
+    sim.addIncident('accident', link);
+    const net = sim.grid.net;
+    const feeders = net.inLinks[net.links[link].from];
+    let sum = 0;
+    let samples = 0;
+    let steps = 0;
+    const end = sim.time + 0.5 * HOUR;
+    while (sim.time < end) {
+      sim.step();
+      if (++steps % 10 !== 0) continue;
+      let q = sim.traffic.lanes[link].vehicles.filter((v) => v.v < 2).length;
+      for (const f of feeders) q += sim.traffic.lanes[f].vehicles.filter((v) => v.v < 2 && v.route.includes(link)).length;
+      sum += q;
+      samples++;
+      if (steps % 100 === 0) expect(routesAreValid(sim)).toEqual([]);
+    }
+    return { mean: sum / samples, rerouted: sim.queueReroutes, removed: sim.traffic.removedGridlock };
+  }
+
+  it('cars heading for an accident find a way round as its queue grows, so the queue stays shorter', () => {
+    const on = accidentQueue(true);
+    const off = accidentQueue(false);
+    expect(on.rerouted).toBeGreaterThan(0);
+    expect(off.rerouted).toBe(0);
+    expect(on.mean).toBeLessThan(0.8 * off.mean); // measured: 1.3 against 2.7 cars
+    expect(on.removed).toBe(0);
+  }, 300_000);
+});

@@ -43,7 +43,26 @@ const LEFT_TURN_S = 15;
 // steered round the block to avoid one.
 const UNIT_LEFT_TURN_S = 3;
 const UNIT_TURNS_S = 8; // a unit pulling out of its station and turning in at the call
+const TURN_ROUND_S = 10; // a unit turning round in the street
 const ARTERIAL_LEFT_FACTOR = 4;
+// Cars heading for a blocked lane (accident or lane closure) look again this often for a way round
+// as the queue there grows, and take one only if it saves this much on live costs.
+const REROUTE_EVERY_S = 10;
+const REROUTE_MARGIN_S = 20;
+
+// What yielding did for one unit trip with its siren on. `normalEta` is the live-traffic time for
+// the same trip driven like an ordinary car (what it would take without a siren); `savedS` is that
+// minus the time the trip actually took, once it has arrived. It reads low: at the morning peak
+// normalEta is a median 0.80 of the time measured with the siren off, and over 12 units the
+// estimated saving was about half the measured one (unitstats.test.ts).
+export interface UnitStats {
+  carsYielded: number;
+  junctionsHeld: number;
+  normalEta: number;
+  sentAt: number;
+  arrivedAt: number | null;
+  savedS: number | null;
+}
 
 export interface RouteDecision {
   tripId: number;
@@ -91,6 +110,8 @@ export interface TripPlan {
   // make way, so units take about this whatever the traffic (measured: 0.93-1.16 of it at the
   // morning peak, 10th to 90th percentile), where `eta` reads about 1.7 times too high.
   unitEta: number;
+  // From a unit on the road: turn round where it is instead of driving on to the next junction.
+  turnRound?: boolean;
 }
 
 // Owns all sim state. No DOM access, so it runs headless in tests.
@@ -120,8 +141,13 @@ export class Simulation {
   readonly layout: CityLayout;
   readonly sites: Site[];
   private unitTripId = 2000000; // emergency trips, clear of generated and probe ids
+  private unitTrips = new Map<number, { normalEta: number; sentAt: number; arrivedAt: number | null }>();
   // Stepped every tick after traffic (the dispatch centre plugs in here).
   dispatch: { step(t: number): void } | null = null;
+  // Re-plan cars heading into a blockage as its queue grows (A5); off gives the A4 behaviour.
+  rerouteQueues = true;
+  queueReroutes = 0; // routes changed that way so far
+  private nextQueueReroute = 0;
 
   constructor(readonly config: SimConfig = DEFAULT_CONFIG) {
     const rng = mulberry32(config.seed);
@@ -180,6 +206,14 @@ export class Simulation {
     }
     for (const inc of this.incidents.filter((i) => i.until !== null && this.time >= i.until)) this.removeIncident(inc.id);
     this.traffic.step(this.time, dt);
+    for (const trip of this.traffic.arrivals) {
+      const rec = this.unitTrips.get(trip.id);
+      if (rec && rec.arrivedAt === null) rec.arrivedAt = this.time + dt;
+    }
+    if (this.rerouteQueues && this.time >= this.nextQueueReroute) {
+      this.nextQueueReroute = this.time + REROUTE_EVERY_S;
+      this.rerouteAroundBlockages();
+    }
     this.dispatch?.step(this.time);
     this.totalTrips += spawned.length;
     this.time += dt;
@@ -265,9 +299,17 @@ export class Simulation {
   }
 
   // A unit's route with its siren on: left turns across traffic cost it little (see UNIT_LEFT_TURN_S).
+  // From a unit on the road, it may turn round where it is if that gets it there sooner.
   planUnitTrip(from: Site | Vehicle, to: Site): TripPlan {
-    return this.planTrip(from, to, this.router, true);
+    const plan = this.planTrip(from, to, this.router, true);
+    if ('entrance' in from || !this.allowTurnRound || from.conn || from.granted) return plan;
+    // Leaving from where it is, as from a driveway there: the far lane means turning round.
+    const here = { entrance: { link: from.route[from.ri], pos: from.pos } } as Site;
+    const turn = this.planTrip(here, to, this.router, true);
+    if (!turn.departLeft || !(turn.unitEta + TURN_ROUND_S < plan.unitEta)) return plan;
+    return { ...turn, unitEta: turn.unitEta + TURN_ROUND_S, departLeft: false, turnRound: true };
   }
+  allowTurnRound = true; // off gives the A4 behaviour (drive on to the next junction)
 
   // Send an emergency unit from a site (its station, or a call it just finished) or from where it
   // is on the road, to a site. Returns its trip, or null if there is no route.
@@ -275,10 +317,15 @@ export class Simulation {
     const siren = opts.siren ?? true;
     const plan = siren ? this.planUnitTrip(from, to) : this.planTrip(from, to);
     if (plan.route.length === 0) return null;
+    // The same trip driven like an ordinary car, for UnitStats.savedS.
+    const normalEta = siren ? this.planTrip(from, to).eta : plan.eta;
     if (!('entrance' in from)) {
-      if (!this.traffic.redirect(from.trip.id, plan.route, plan.arrivePos, plan.arriveLeft)) return null;
+      if (plan.turnRound) {
+        if (!this.traffic.turnRound(from.trip.id, plan.route, plan.departPos, plan.arrivePos, plan.arriveLeft)) return null;
+      } else if (!this.traffic.redirect(from.trip.id, plan.route, plan.arrivePos, plan.arriveLeft)) return null;
       from.trip.destZone = to.zone;
       this.traffic.setSiren(from.trip.id, siren);
+      if (siren) this.unitTrips.set(from.trip.id, { normalEta, sentAt: this.time, arrivedAt: null });
       return from.trip;
     }
     const net = this.grid.net;
@@ -296,7 +343,21 @@ export class Simulation {
       arriveLeft: plan.arriveLeft,
     };
     this.traffic.enqueue(trip, plan.route, { siren });
+    if (siren) this.unitTrips.set(trip.id, { normalEta, sentAt: this.time, arrivedAt: null });
     return trip;
+  }
+
+  // Yielding stats for a unit trip sent with its siren on; null for any other trip.
+  unitStats(tripId: number): UnitStats | null {
+    const rec = this.unitTrips.get(tripId);
+    if (!rec) return null;
+    const { cars, junctions } = this.traffic.yieldCounts(tripId);
+    return {
+      carsYielded: cars,
+      junctionsHeld: junctions,
+      ...rec,
+      savedS: rec.arrivedAt === null ? null : rec.normalEta - (rec.arrivedAt - rec.sentAt),
+    };
   }
 
   // Seconds from the nearest of `sources` (junctions) to every junction, on live link costs.
@@ -346,21 +407,38 @@ export class Simulation {
       lane = linkId;
       blockage = this.traffic.addBlockage(linkId, from, end, kind === 'accident' ? ACCIDENT_PASS_SPEED : LANE_PASS_SPEED);
     }
-    const rerouted = this.traffic.reroute(new Set(kind === 'closure' ? links : [linkId]), (node, last, skip) => {
-      const lastLink = net.links[last];
-      // The new route must end on the same last link; never arrive at it from its reverse (a U-turn).
-      const reverse = net.reverse(last);
-      const toLast = node === lastLink.from ? { links: [], cost: 0 } : this.router.routeWithCost(node, lastLink.from, reverse === undefined ? skip : [...skip, reverse]);
-      if (toLast.cost >= CLOSED_COST) return null;
-      if (node === lastLink.from && skip.includes(last)) return null;
-      return [...toLast.links, last];
-    });
+    const rerouted = this.traffic.reroute(new Set(kind === 'closure' ? links : [linkId]), this.planTail);
     const inc: Incident = {
       id: this.incidentId++, kind, links, lane, from, to: end, placedAt: this.time,
       until: kind === 'accident' ? this.time + ACCIDENT_CLEARS_S : null, rerouted, blockage,
     };
     this.incidents.push(inc);
     return inc;
+  }
+
+  // A new end of route from `node` to the trip's last link (where its driveway is), on live costs;
+  // for TrafficModel.reroute.
+  private planTail = (node: number, last: number, skip: number[]): number[] | null => {
+    const net = this.grid.net;
+    const lastLink = net.links[last];
+    // The new route must end on the same last link; never arrive at it from its reverse (a U-turn).
+    const reverse = net.reverse(last);
+    const toLast = node === lastLink.from ? { links: [], cost: 0 } : this.router.routeWithCost(node, lastLink.from, reverse === undefined ? skip : [...skip, reverse]);
+    if (toLast.cost >= CLOSED_COST) return null;
+    if (node === lastLink.from && skip.includes(last)) return null;
+    return [...toLast.links, last];
+  };
+
+  // Cars whose route still runs into a blocked lane switch to a way round if it is now faster
+  // by a margin: the queue at the blockage shows up in the live cost of the links before it.
+  private rerouteAroundBlockages(): void {
+    const blocked = new Set<number>();
+    for (const inc of this.incidents) if (inc.lane !== null) blocked.add(inc.lane);
+    if (blocked.size === 0) return;
+    this.queueReroutes += this.traffic.reroute(blocked, this.planTail, {
+      skipUnits: true,
+      accept: (oldTail, newTail) => this.router.pathCost(newTail) < this.router.pathCost(oldTail) - REROUTE_MARGIN_S,
+    });
   }
 
   removeIncident(id: number): void {

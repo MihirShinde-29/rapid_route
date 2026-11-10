@@ -152,6 +152,10 @@
       .dispatch-call span { display: block; font-size: 10px; color: var(--text-dim); margin-top: 1px; }
       .dispatch-call.waiting { border-left: 3px solid #fab219; }
       .dispatch-call.waiting span { color: #fab219; }
+      .dispatch-call .call-severity { display: inline-block; width: fit-content; padding: 1px 5px; border: 1px solid currentColor; border-radius: 3px; font-family: var(--font-mono); font-size: 9px; line-height: 1.3; text-transform: uppercase; }
+      .severity-low .call-severity { color: #74d99f; }
+      .severity-medium .call-severity { color: #fab219; }
+      .severity-critical .call-severity { color: #ff5964; }
       .dispatch-list li.call-group { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px; }
       .dispatch-candidate[aria-pressed='true'] { border-color: var(--accent); color: var(--text); }
       .dispatch-status { margin: 0 0 8px; font-family: var(--font-mono); font-size: 10px; color: var(--text-dim); }
@@ -205,12 +209,18 @@
         border: 1px solid rgba(0, 0, 0, 0.4); border-radius: 10px; white-space: nowrap;
       }
       .call-pin.assigned { background: #35d7ff; }
+      .call-pin.severity-low { border-color: #74d99f; }
+      .call-pin.severity-medium { border-color: #fab219; }
+      .call-pin.severity-critical { border: 2px solid #ff5964; box-shadow: 0 0 0 2px rgba(255, 89, 100, 0.3); }
       .call-pin.selected { outline: 2px solid #fff; outline-offset: 1px; }
       .call-arrow {
         position: absolute; left: 0; top: 0; width: 30px; height: 30px; margin: -15px 0 0 -15px; padding: 0; pointer-events: auto; cursor: pointer;
         border-radius: 50%; background: rgba(6, 9, 13, 0.85); border: 1px solid #fab219; color: #fab219; font-size: 15px; line-height: 28px; text-align: center;
       }
       .call-arrow span { display: inline-block; }
+      .call-arrow.severity-low { border-color: #74d99f; color: #74d99f; }
+      .call-arrow.severity-medium { border-color: #fab219; color: #fab219; }
+      .call-arrow.severity-critical { border-color: #ff5964; color: #ff5964; box-shadow: 0 0 0 2px rgba(255, 89, 100, 0.3); }
       .list li.incident { cursor: pointer; }
       .list li.rideable { cursor: pointer; border-color: var(--accent); }
       .list li.incident strong { display: block; font-weight: 500; }

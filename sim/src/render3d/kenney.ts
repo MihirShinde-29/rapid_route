@@ -8,7 +8,8 @@ import { isEmergency, VEHICLE_KINDS, VEHICLE_SPECS, type VehicleKind } from '../
 // and steer them. Our frame, as in vehicles.ts: +x forward, +y up, +z the car's right, the
 // ground at y = 0, the footprint centred on the origin.
 
-const FILE: Record<VehicleKind, string> = {
+// The Car Kit has no bus; buses keep the classic model.
+const FILE: Partial<Record<VehicleKind, string>> = {
   hatchback: 'hatchback-sports',
   sedan: 'sedan',
   taxi: 'taxi',
@@ -54,6 +55,7 @@ export async function loadKenneyKit(base: string, worldPerM: number, width: numb
   let pixels: ImageData | null = null;
   const vehicles = new Map<VehicleKind, KenneyVehicle>();
   for (const kind of VEHICLE_KINDS) {
+    if (!FILE[kind]) continue;
     const gltf = await loader.loadAsync(`${base}${FILE[kind]}.glb`);
     const root = gltf.scene;
     root.updateMatrixWorld(true);

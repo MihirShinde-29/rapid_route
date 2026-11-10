@@ -350,6 +350,7 @@ export class View3D {
     this.buildRoads();
     this.buildZones(rng);
     this.buildEntrances();
+    this.buildBusStops();
     this.buildStreetLamps();
     this.buildSignals();
     this.buildTags();
@@ -822,6 +823,37 @@ export class View3D {
       const start = this.ranges();
       this.drawEntrance(site);
       this.siteRanges.set(site.id, this.rangesSince(start));
+    }
+  }
+
+  // A shelter and a sign on the pavement beside each bus stop, level with where the bus waits.
+  private buildBusStops(): void {
+    const M = WORLD_PER_M;
+    const frame = new THREE.Color(0x3a4048);
+    const glass = new THREE.Color(0x8fb4c8);
+    const sign = new THREE.Color(0x2a7bc0);
+    for (const stop of this.sim.allBusStops) {
+      const g = this.sim.traffic.lanes[stop.link].geom;
+      const link = this.sim.grid.net.links[stop.link];
+      const nx = -g.dy;
+      const ny = g.dx;
+      const edge = (link.arterial ? 5.7 : 4.65) - LANE_OFFSET;
+      const along = Math.max(0, stop.pos - 6); // about the middle of a waiting bus
+      const rot = -Math.atan2(g.dy, g.dx);
+      // A box `w` m along the street, `d` across and `h` high, centred `across` m from the lane
+      // centre and `off` m along from the stop, standing `y` m up.
+      const put = (w: number, d: number, h: number, across: number, off: number, y: number, color: THREE.Color) => {
+        const x = g.x0 + g.dx * (along + off) + nx * across;
+        const z = g.y0 + g.dy * (along + off) + ny * across;
+        this.solid.add(new THREE.BoxGeometry(w * M, h * M, d * M), color, this.wx(x), (y + h / 2) * M, this.wz(z), 0, rot);
+      };
+      const back = edge + 2.6;
+      put(4, 1.6, 0.15, back - 0.7, 0, 2.5, frame); // roof
+      put(4, 0.1, 2.2, back, 0, 0.2, glass); // back panel
+      for (const s of [-1.9, 1.9]) put(0.12, 0.12, 2.5, back, s, 0, frame);
+      put(1.6, 0.4, 0.45, back - 0.4, 0, 0, frame); // bench
+      put(0.1, 0.1, 2.6, edge + 0.6, 4, 0, frame); // sign post
+      put(0.08, 0.7, 0.7, edge + 0.6, 4, 2.4, sign);
     }
   }
 

@@ -125,6 +125,16 @@ export function vehicleGeometry(
       b.add(box(len * 0.22, 0.07, W * 1.01), GLASS, len * 0.34, 0.21, 0); // cab side windows
       lightY = 0.1;
       break;
+    case 'bus':
+      // A long box with a band of windows, a dark windscreen and a destination sign.
+      wheelR = 0.055;
+      lightY = 0.1;
+      b.add(box(len, 0.36, W * 1.06), BODY, 0, 0.22, 0);
+      b.add(box(len * 0.86, 0.11, W * 1.075), GLASS, -len * 0.04, 0.29, 0);
+      b.add(box(0.012, 0.16, W * 0.9), GLASS, len / 2, 0.27, 0);
+      b.add(box(0.014, 0.04, W * 0.6), new THREE.Color(1, 0.75, 0.2), len / 2 + 0.002, 0.37, 0);
+      b.add(box(len * 0.9, 0.02, W * 0.9), TRIM, -len * 0.03, 0.41, 0); // roof units
+      break;
     case 'truck':
       wheelR = 0.055;
       lightY = 0.1;
@@ -202,6 +212,7 @@ export function vehiclePaint(trip: Trip, kind: VehicleKind, out: THREE.Color): T
   if (kind === 'taxi') return out.setHex(0xf2c21a);
   if (kind === 'ambulance' || kind === 'fire' || kind === 'police') return out.setHex(0xf4f4f4);
   if (kind === 'truck' || kind === 'van') return out.setHex(FLEET[Math.floor(h * FLEET.length)]);
+  if (kind === 'bus') return out.setHex(0x2a7bc0); // the city's bus livery
   let acc = 0;
   for (const [hex, share] of PAINT) {
     acc += share;

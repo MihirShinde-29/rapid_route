@@ -4,9 +4,9 @@ import type { ZoneType } from '../demand/zones';
 // road and pulls away more slowly than a hatchback.
 
 export type EmergencyKind = 'ambulance' | 'fire' | 'police';
-export type VehicleKind = 'hatchback' | 'sedan' | 'taxi' | 'suv' | 'pickup' | 'van' | 'truck' | EmergencyKind;
+export type VehicleKind = 'hatchback' | 'sedan' | 'taxi' | 'suv' | 'pickup' | 'van' | 'truck' | 'bus' | EmergencyKind;
 export const EMERGENCY_KINDS: EmergencyKind[] = ['ambulance', 'fire', 'police'];
-export const VEHICLE_KINDS: VehicleKind[] = ['hatchback', 'sedan', 'taxi', 'suv', 'pickup', 'van', 'truck', ...EMERGENCY_KINDS];
+export const VEHICLE_KINDS: VehicleKind[] = ['hatchback', 'sedan', 'taxi', 'suv', 'pickup', 'van', 'truck', 'bus', ...EMERGENCY_KINDS];
 export const isEmergency = (kind: VehicleKind | undefined): kind is EmergencyKind =>
   kind === 'ambulance' || kind === 'fire' || kind === 'police';
 
@@ -23,6 +23,7 @@ export const VEHICLE_SPECS: Record<VehicleKind, VehicleSpec> = {
   pickup: { length: 5.4, accel: 1.3 },
   van: { length: 5.5, accel: 1.2 },
   truck: { length: 8.5, accel: 0.9 },
+  bus: { length: 12, accel: 1.0 },
   ambulance: { length: 6.2, accel: 1.6 },
   fire: { length: 9.5, accel: 1.1 },
   police: { length: 4.9, accel: 2.0 },

@@ -27,6 +27,13 @@ export interface Trip {
   arriveLeft?: boolean;
   originSite?: number; // generated trips run from one site's entrance to another's
   destSite?: number;
+  stops?: BusStop[]; // a bus: where it stops along its route, in order
+}
+
+// A bus stop: the lane and how far along it the bus stops (front bumper).
+export interface BusStop {
+  link: number;
+  pos: number;
 }
 
 export interface TripGenOptions {

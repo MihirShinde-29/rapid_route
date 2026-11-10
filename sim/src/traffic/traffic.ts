@@ -36,6 +36,7 @@ const ON_SHOULDER = 0.8; // shift at which a unit can pass the car
 const HELD = 0.3; // a car shifted more than this stays stopped
 const PREEMPT_M = 100; // a junction is held for a unit this close to its stop line (or its braking distance)
 const SIREN_SPEED = 1.3; // units drive up to this times the speed limit
+export const BUS_DWELL_S = 20; // a bus waits this long at each stop; cars behind it queue
 // A unit pulling out of its station (or a call) with its siren on: cars this far before its
 // driveway, on its lane and on the lane it crosses to turn left, pull over and stop to let it out.
 const PULL_OUT_YIELD_M = 80;
@@ -75,6 +76,8 @@ export interface Vehicle {
   yielding: boolean; // a unit is coming: pull over and stop
   shift: number; // 0 in the lane, 1 on the shoulder
   pass: number; // 0 in the lane, 1 out in the oncoming lane passing a blocked stretch
+  stopAt: number; // a bus: index of its next stop in trip.stops
+  dwellUntil: number; // a bus at a stop: sim time it leaves, -1 if not stopped
 }
 
 // A stretch of one lane that cars cannot use, `from` to `to` m along it.
@@ -495,6 +498,8 @@ export class TrafficModel {
         yielding: false,
         shift: 0,
         pass: 0,
+        stopAt: item.veh?.stopAt ?? 0,
+        dwellUntil: -1,
       });
       vs.splice(k, 0, v);
       this.activeLanes.add(lane);
@@ -1042,6 +1047,12 @@ export class TrafficModel {
           const g = oz.oStart - veh.pos + IDM.s0 - 0.5;
           if (g < gap) [gap, dv] = [g, veh.v];
         }
+        const stop = veh.trip.stops ? this.busStop(veh, lane) : null;
+        if (stop !== null) {
+          // A bus pulls up at its stop in the lane, waits, and goes on; the cars behind queue.
+          const g = stop - veh.pos + 1;
+          if (g < gap) [gap, dv] = [g, veh.v];
+        }
         if (veh.ri === veh.route.length - 1 && veh.arriveLeft && !veh.turnIn) {
           // Waits beside its driveway for a gap in the oncoming lane; the cars behind queue.
           const g = veh.arrivePos - veh.pos + 1;
@@ -1074,6 +1085,30 @@ export class TrafficModel {
         veh.acc = this.idm(veh.v, veh.siren ? v0 * SIREN_SPEED : v0, gap, dv, veh.accel);
       }
     }
+  }
+
+  // A bus's next stop on this lane (m along it), or null if it has none here or has just served
+  // it. Starts and ends the wait at the stop. Stops no longer on its route (after a reroute) and
+  // stops it is already past are skipped.
+  private busStop(veh: Vehicle, lane: Lane): number | null {
+    const stops = veh.trip.stops!;
+    while (veh.stopAt < stops.length) {
+      const s = stops[veh.stopAt];
+      const k = veh.route.indexOf(s.link, veh.ri);
+      if (k < 0 || (k === veh.ri && veh.pos > s.pos + 0.5 && veh.dwellUntil < 0)) {
+        veh.stopAt++;
+        continue;
+      }
+      if (k !== veh.ri || s.link !== lane.link.id) return null;
+      if (veh.dwellUntil < 0 && s.pos - veh.pos < 1.5 && veh.v < 0.3) veh.dwellUntil = this.now + BUS_DWELL_S;
+      if (veh.dwellUntil >= 0 && this.now >= veh.dwellUntil) {
+        veh.dwellUntil = -1;
+        veh.stopAt++;
+        continue;
+      }
+      return s.pos;
+    }
+    return null;
   }
 
   // True if no car on lane `laneId` is over the point `at` (m along it) or reaches it within

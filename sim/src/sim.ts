@@ -3,7 +3,7 @@ import { HOUR } from './core/time';
 import { buildGrid, DEFAULT_GRID, nearestJunction, type Grid, type GridOptions } from './network/grid';
 import { generateZones, type Zone } from './demand/zones';
 import { zoneCostMatrix } from './demand/od';
-import { TripGenerator, type Trip } from './demand/trips';
+import { TripGenerator, type BusStop, type Trip } from './demand/trips';
 import { Router, type RouteResult } from './routing/router';
 import { TrafficModel, type Vehicle } from './traffic/traffic';
 import { blockDistricts, DISTRICTS } from './demand/districts';
@@ -48,6 +48,14 @@ const ARTERIAL_LEFT_FACTOR = 4;
 // Cars heading for a blocked lane (accident or lane closure) look again this often for a way round
 // as the queue there grows, and take one only if it saves this much on live costs.
 const REROUTE_EVERY_S = 10;
+// Buses: lines end to end along arterials, a bus each way every BUS_HEADWAY_S from BUS_FIRST_H to
+// BUS_LAST_H, stopping about every BUS_STOP_SPACING_M (never within BUS_STOP_JUNCTION_M of a
+// junction).
+const BUS_HEADWAY_S = 8 * 60;
+const BUS_FIRST_H = 6;
+const BUS_LAST_H = 22;
+const BUS_STOP_SPACING_M = 400;
+const BUS_STOP_JUNCTION_M = 30;
 const REROUTE_MARGIN_S = 20;
 
 // What yielding did for one unit trip with its siren on. `normalEta` is the live-traffic time for
@@ -62,6 +70,13 @@ export interface UnitStats {
   sentAt: number;
   arrivedAt: number | null;
   savedS: number | null;
+}
+
+// A bus line: its route each way and the stops on each.
+export interface BusLine {
+  id: number;
+  routes: [number[], number[]];
+  stops: [BusStop[], BusStop[]];
 }
 
 export interface RouteDecision {
@@ -141,6 +156,9 @@ export class Simulation {
   readonly layout: CityLayout;
   readonly sites: Site[];
   private unitTripId = 2000000; // emergency trips, clear of generated and probe ids
+  private busTripId = 3000000;
+  readonly busLines: BusLine[];
+  private nextBus: number[]; // per line and direction, sim time of the next departure
   private unitTrips = new Map<number, { normalEta: number; sentAt: number; arrivedAt: number | null }>();
   // Stepped every tick after traffic (the dispatch centre plugs in here).
   dispatch: { step(t: number): void } | null = null;
@@ -189,6 +207,87 @@ export class Simulation {
     this.produced = new Int32Array(this.zones.length);
     this.attracted = new Int32Array(this.zones.length);
     this.district = blockDistricts(this.grid);
+    this.busLines = this.planBusLines();
+    // Departures each way staggered across the headway, so buses do not bunch.
+    this.nextBus = this.busLines.flatMap((_, k) => [0, 1].map((d) => this.time + ((k * 2 + d) * BUS_HEADWAY_S) / (2 * this.busLines.length + 1)));
+  }
+
+  // Three lines: across the middle arterial row, down the middle arterial column, and across the
+  // next arterial row up. Each runs from one side of the city to the other.
+  private planBusLines(): BusLine[] {
+    const { rows, cols, arterialEvery, suburbRing: ring } = this.grid.opts;
+    const arterialRows: number[] = [];
+    const arterialCols: number[] = [];
+    for (let r = 1; r < rows - 1; r++) if ((((r - ring) % arterialEvery) + arterialEvery) % arterialEvery === 0) arterialRows.push(r);
+    for (let c = 1; c < cols - 1; c++) if ((((c - ring) % arterialEvery) + arterialEvery) % arterialEvery === 0) arterialCols.push(c);
+    const mid = (xs: number[]) => xs[Math.floor(xs.length / 2)];
+    const ends: [number, number][] = [];
+    if (arterialRows.length > 0) ends.push([this.grid.nodeAt(mid(arterialRows), 0), this.grid.nodeAt(mid(arterialRows), cols - 1)]);
+    if (arterialCols.length > 0) ends.push([this.grid.nodeAt(0, mid(arterialCols)), this.grid.nodeAt(rows - 1, mid(arterialCols))]);
+    if (arterialRows.length > 1) {
+      const r = arterialRows[Math.max(0, arterialRows.indexOf(mid(arterialRows)) - 1)];
+      ends.push([this.grid.nodeAt(r, 0), this.grid.nodeAt(r, cols - 1)]);
+    }
+    const lines: BusLine[] = [];
+    for (const [a, b] of ends) {
+      const there = this.distanceRouter.route(a, b);
+      const back = this.distanceRouter.route(b, a);
+      if (there.length < 3 || back.length < 3) continue;
+      lines.push({ id: lines.length + 1, routes: [there, back], stops: [this.busStops(there), this.busStops(back)] });
+    }
+    return lines;
+  }
+
+  // Stops about every BUS_STOP_SPACING_M along a route, part way along a lane.
+  private busStops(route: number[]): BusStop[] {
+    const stops: BusStop[] = [];
+    let start = 0; // m along the route where this lane begins
+    let next = BUS_STOP_SPACING_M / 2;
+    for (const link of route.slice(0, -1)) {
+      const len = this.traffic.lanes[link].geom.length;
+      if (next < start + len && len > 2 * BUS_STOP_JUNCTION_M + 12) {
+        const pos = Math.min(len - BUS_STOP_JUNCTION_M, Math.max(BUS_STOP_JUNCTION_M + 12, next - start));
+        stops.push({ link, pos });
+        next = start + pos + BUS_STOP_SPACING_M;
+      }
+      start += len;
+    }
+    return stops;
+  }
+
+  // Every bus stop, both ways on every line.
+  get allBusStops(): BusStop[] {
+    return this.busLines.flatMap((l) => [...l.stops[0], ...l.stops[1]]);
+  }
+
+  private departBuses(): void {
+    const hour = (this.time / HOUR) % 24;
+    this.busLines.forEach((line, k) => {
+      for (const d of [0, 1] as const) {
+        const slot = k * 2 + d;
+        if (this.time < this.nextBus[slot]) continue;
+        this.nextBus[slot] += BUS_HEADWAY_S;
+        if (hour < BUS_FIRST_H || hour >= BUS_LAST_H) continue;
+        let route = line.routes[d];
+        const net = this.grid.net;
+        const last = route[route.length - 1];
+        // Round a closed street (its stops there are skipped), as other traffic would.
+        if (route.slice(1, -1).some((id) => this.traffic.isClosed(id))) {
+          const reverse = net.reverse(last);
+          const detour = this.router.routeWithCost(net.links[route[0]].to, net.links[last].from, reverse === undefined ? [] : [reverse]);
+          if (detour.cost < CLOSED_COST && detour.links[0] !== net.reverse(route[0])) route = [route[0], ...detour.links, last];
+        }
+        this.traffic.enqueue(
+          {
+            id: this.busTripId++, originZone: 0, destZone: 0,
+            originNode: net.links[route[0]].from, destNode: net.links[last].to,
+            departTime: this.time, kind: 'bus', departPos: 20,
+            arrivePos: this.traffic.lanes[last].geom.length - 20, stops: line.stops[d],
+          },
+          route,
+        );
+      }
+    });
   }
 
   step(dt: number = FIXED_DT): Trip[] {
@@ -205,6 +304,7 @@ export class Simulation {
       this.traffic.enqueue(trip, decision.chosen.links);
     }
     for (const inc of this.incidents.filter((i) => i.until !== null && this.time >= i.until)) this.removeIncident(inc.id);
+    this.departBuses();
     this.traffic.step(this.time, dt);
     for (const trip of this.traffic.arrivals) {
       const rec = this.unitTrips.get(trip.id);

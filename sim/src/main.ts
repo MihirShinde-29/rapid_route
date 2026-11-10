@@ -6,7 +6,7 @@ import { DISTRICTS } from './demand/districts';
 import { formatClock, periodAt, HOUR, type Period } from './core/time';
 import type { ZoneType } from './demand/zones';
 import { VEHICLE_KINDS, VEHICLE_SPECS, type EmergencyKind, type VehicleKind } from './traffic/vehicleTypes';
-import { DispatchCenter, type CallKind, type DispatchMode, type EmergencyCall } from './dispatch/dispatch';
+import { DispatchCenter, sortCallsByPriority, type CallKind, type DispatchMode, type EmergencyCall } from './dispatch/dispatch';
 import { responseChart, formatMinutes } from './ui/responseChart';
 import { SirenAudio } from './render3d/sirenAudio';
 import type { Vehicle } from './traffic/traffic';
@@ -779,8 +779,8 @@ function syncDispatchPanel(): void {
   // Grouped: waiting calls first, the soonest to expire at the top; then calls with a unit
   // on the way or on scene; then the last few finished.
   const center = dispatch;
-  const waitingCalls = center.calls.filter((call) => call.state === 'created').sort((a, b) => a.expiresAt - b.expiresAt);
-  const servedCalls = center.calls.filter((call) => call.state === 'assigned' || call.state === 'en_route');
+  const waitingCalls = sortCallsByPriority(center.calls.filter((call) => call.state === 'created'), sim.time);
+  const servedCalls = sortCallsByPriority(center.calls.filter((call) => call.state === 'assigned' || call.state === 'en_route'), sim.time);
   const finishedCalls = center.calls.filter((call) => call.state === 'resolved' || call.state === 'missed').slice(-3).reverse();
   const callLabel = (call: EmergencyCall): string => {
     const missing = missingCallNeeds(call);
@@ -804,12 +804,15 @@ function syncDispatchPanel(): void {
     for (const call of calls) {
       const li = document.createElement('li');
       const button = document.createElement('button');
-      button.className = `dispatch-call ${call.state === 'created' ? 'waiting' : ''}`;
+      button.className = `dispatch-call ${call.state === 'created' ? 'waiting' : ''} severity-${call.severity}`;
       const what = document.createElement('b');
       what.textContent = `${call.kind.toUpperCase()} · ${call.site.address}`;
+      const severity = document.createElement('span');
+      severity.className = 'call-severity';
+      severity.textContent = call.severity;
       const state = document.createElement('span');
       state.textContent = callLabel(call);
-      button.append(what, state);
+      button.append(what, severity, state);
       button.setAttribute('aria-pressed', String(selectedCallId === call.id));
       button.disabled = call.state === 'resolved' || call.state === 'missed';
       button.onclick = () => {
@@ -1120,10 +1123,11 @@ function syncCallMarkers(): void {
     const label = el.firstElementChild as HTMLSpanElement;
     const p = view.screenPoint(call.site.door.x, call.site.door.y, 2);
     const waiting = call.state === 'created';
-    set(el, 'title', `${CALL_LABEL[call.kind]} call · ${call.site.address} · ${waiting ? 'waiting' : 'unit on the way'}`);
+    set(el, 'title', `${CALL_LABEL[call.kind]} call · ${call.severity} severity · ${call.site.address} · ${waiting ? 'waiting' : 'unit on the way'}`);
     if (p.ahead && p.x >= 0 && p.x <= w && p.y >= 0 && p.y <= h) {
-      set(el, 'className', `call-pin${waiting ? '' : ' assigned'}${selectedCallId === call.id ? ' selected' : ''}`);
-      if (label.textContent !== CALL_LABEL[call.kind]) label.textContent = CALL_LABEL[call.kind];
+      set(el, 'className', `call-pin severity-${call.severity}${waiting ? '' : ' assigned'}${selectedCallId === call.id ? ' selected' : ''}`);
+      const markerText = `${CALL_LABEL[call.kind]} · ${call.severity.toUpperCase()}`;
+      if (label.textContent !== markerText) label.textContent = markerText;
       label.style.transform = '';
       el.style.transform = `translate(${p.x.toFixed(1)}px, ${p.y.toFixed(1)}px) translate(-50%, -100%)`;
       el.hidden = false;
@@ -1133,7 +1137,7 @@ function syncCallMarkers(): void {
       let dy = p.y - h / 2;
       if (!p.ahead) [dx, dy] = [-dx, -dy];
       const scale = Math.min((w / 2 - EDGE_PX) / Math.max(1e-6, Math.abs(dx)), (h / 2 - EDGE_PX) / Math.max(1e-6, Math.abs(dy)));
-      set(el, 'className', 'call-arrow');
+      set(el, 'className', `call-arrow severity-${call.severity}`);
       if (label.textContent !== '➜') label.textContent = '➜';
       label.style.transform = `rotate(${Math.atan2(dy, dx).toFixed(3)}rad)`;
       el.style.transform = `translate(${(w / 2 + dx * scale).toFixed(1)}px, ${(h / 2 + dy * scale).toFixed(1)}px)`;

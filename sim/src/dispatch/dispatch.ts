@@ -34,7 +34,7 @@ export interface EmergencyUnit {
 export interface EmergencyCall {
   id: number;
   kind: CallKind;
-  severity: CallSeverity; // Severity is not used by the current dispatch rules.
+  severity: CallSeverity;
   needs: EmergencyKind[];
   site: Site;
   incidentId: number | null;
@@ -107,6 +107,17 @@ const CALL_TIMING: Record<CallKind, { target: number; expires: number; scene: nu
   crash: { target: 10 * 60, expires: 20 * 60, scene: 5 * 60 },
 };
 const CALL_KINDS: CallKind[] = ['medical', 'fire', 'crime', 'crash'];
+const SEVERITY_EXPIRY_FACTOR: Record<CallSeverity, number> = { low: 1.2, medium: 1, critical: 0.6 };
+const SEVERITY_SCORE_FACTOR: Record<CallSeverity, number> = { low: 0.75, medium: 1, critical: 1.5 };
+const SEVERITY_ORDER: Record<CallSeverity, number> = { low: 0, medium: 1, critical: 2 };
+
+export function sortCallsByPriority(calls: EmergencyCall[], now: number): EmergencyCall[] {
+  return [...calls].sort((a, b) =>
+    SEVERITY_ORDER[b.severity] - SEVERITY_ORDER[a.severity] ||
+    (a.expiresAt - now) - (b.expiresAt - now) ||
+    a.id - b.id,
+  );
+}
 
 export interface DispatchCandidate {
   unitId: number;
@@ -142,6 +153,7 @@ export class DispatchCenter {
   private missedCalls = 0;
   private readonly accidentsPerHour: number;
   private readonly accidentRng: () => number;
+  private readonly severityRng: () => number;
   private readonly hospitalOf = new Map<number, Site>(); // ambulances on a hospital trip, by unit id
 
   constructor(private readonly sim: Simulation, opts: DispatchOptions) {
@@ -154,6 +166,7 @@ export class DispatchCenter {
     this.accidentsPerHour = Math.max(0, opts.accidentsPerHour ?? 0);
     // Its own stream, so random accidents do not change which calls come in.
     this.accidentRng = mulberry32((opts.seed ?? sim.config.seed) ^ 0x5eed);
+    this.severityRng = mulberry32((opts.seed ?? sim.config.seed) ^ 0x5e7e71);
     const unitCounts = { ...UNIT_COUNTS, ...opts.unitCounts };
 
     for (const site of sim.sites) {
@@ -188,8 +201,8 @@ export class DispatchCenter {
     };
   }
 
-  createCall(kind?: CallKind, site?: Site): EmergencyCall {
-    return this.addCall(kind, site, null);
+  createCall(kind?: CallKind, site?: Site, severity?: CallSeverity): EmergencyCall {
+    return this.addCall(kind, site, null, severity);
   }
 
   createCrashCall(incident: Incident): EmergencyCall {
@@ -211,21 +224,22 @@ export class DispatchCenter {
     return this.addCall('crash', site, incident.id);
   }
 
-  private addCall(kind: CallKind | undefined, site: Site | undefined, incidentId: number | null): EmergencyCall {
+  private addCall(kind: CallKind | undefined, site: Site | undefined, incidentId: number | null, severity?: CallSeverity): EmergencyCall {
     const callKind = kind ?? CALL_KINDS[Math.floor(this.rng() * CALL_KINDS.length)];
     const callSite = site ?? this.chooseCallSite();
     if (!this.sim.sites.includes(callSite)) throw new RangeError('Call site must belong to this simulation');
     const timing = CALL_TIMING[callKind];
+    const callSeverity = severity ?? this.randomSeverity();
     const call: EmergencyCall = {
       id: this.nextCallId++,
       kind: callKind,
-      severity: 'medium',
+      severity: callSeverity,
       needs: [...CALL_NEEDS[callKind]],
       site: callSite,
       incidentId,
       createdAt: this.sim.time,
       targetResponseTime: timing.target,
-      expiresAt: this.sim.time + timing.expires,
+      expiresAt: this.sim.time + timing.expires * SEVERITY_EXPIRY_FACTOR[callSeverity],
       state: 'created',
       assignedUnitId: null,
       assignedUnitIds: [],
@@ -504,9 +518,11 @@ export class DispatchCenter {
     const responseTime = call.responseTime ?? 0;
     this.totalResponseTime += responseTime;
     this.resolvedCalls++;
-    this.points += responseTime <= call.targetResponseTime
+    const baseExpiryWindow = CALL_TIMING[call.kind].expires - call.targetResponseTime;
+    const basePoints = responseTime <= call.targetResponseTime
       ? 100
-      : Math.round(Math.max(20, 100 - (80 * (responseTime - call.targetResponseTime)) / (call.expiresAt - call.createdAt - call.targetResponseTime)));
+      : Math.round(Math.max(20, 100 - (80 * (responseTime - call.targetResponseTime)) / Math.max(1, baseExpiryWindow)));
+    this.points += Math.round(basePoints * SEVERITY_SCORE_FACTOR[call.severity]);
   }
 
   private resetUnit(unit: EmergencyUnit): void {
@@ -549,5 +565,10 @@ export class DispatchCenter {
       if (target < 0) return this.sim.sites[index];
     }
     return this.sim.sites[this.sim.sites.length - 1];
+  }
+
+  private randomSeverity(): CallSeverity {
+    const roll = this.severityRng();
+    return roll < 1 / 3 ? 'low' : roll < 2 / 3 ? 'medium' : 'critical';
   }
 }

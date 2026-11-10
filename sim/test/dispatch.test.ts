@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { BLOCK_JUNCTION_M, DEFAULT_CONFIG, Simulation } from '../src/sim';
 import { HOUR } from '../src/core/time';
-import { DispatchCenter } from '../src/dispatch/dispatch';
+import { DispatchCenter, sortCallsByPriority } from '../src/dispatch/dispatch';
 
 function quietSimulation(): Simulation {
   return new Simulation({ ...DEFAULT_CONFIG, peakTripsPerHour: 0 });
@@ -63,6 +63,52 @@ describe('dispatch', () => {
     sim.step(1);
     expect(center.calls).toHaveLength(2);
     expect(center.calls[1].state).toBe('created');
+  });
+
+  it('orders calls by severity, then remaining time', () => {
+    const sim = quietSimulation();
+    const center = new DispatchCenter(sim, { mode: 'dispatcher', callsPerHour: 0 });
+    const low = center.createCall('medical', nonStationSite(sim), 'low');
+    const medium = center.createCall('medical', nonStationSite(sim), 'medium');
+    const criticalLater = center.createCall('medical', nonStationSite(sim), 'critical');
+    const criticalSooner = center.createCall('medical', nonStationSite(sim), 'critical');
+    criticalLater.expiresAt = sim.time + 300;
+    criticalSooner.expiresAt = sim.time + 100;
+
+    expect(sortCallsByPriority([low, criticalLater, medium, criticalSooner], sim.time).map((call) => call.id))
+      .toEqual([criticalSooner.id, criticalLater.id, medium.id, low.id]);
+  });
+
+  it('expires critical calls before low-severity calls created at the same time', () => {
+    const sim = quietSimulation();
+    const center = new DispatchCenter(sim, { mode: 'dispatcher', callsPerHour: 0 });
+    const low = center.createCall('medical', nonStationSite(sim), 'low');
+    const critical = center.createCall('medical', nonStationSite(sim), 'critical');
+
+    expect(critical.expiresAt).toBeLessThan(low.expiresAt);
+    center.step(critical.expiresAt);
+
+    expect(critical.state).toBe('missed');
+    expect(low.state).toBe('created');
+  });
+
+  it('awards more points for critical calls than lower-severity calls', () => {
+    const scoreFor = (severity: 'low' | 'medium' | 'critical', targetResponseTime: number) => {
+      const sim = quietSimulation();
+      const center = new DispatchCenter(sim, { mode: 'dispatcher', callsPerHour: 0 });
+      const call = center.createCall('medical', nonStationSite(sim), severity);
+      call.targetResponseTime = targetResponseTime;
+      call.expiresAt = Infinity;
+      const unitId = center.candidates(call.id)[0].unitId;
+      expect(center.assign(call.id, unitId)).toBe(true);
+      for (let step = 0; step < 20 * 60 * 10 && call.state !== 'resolved'; step++) sim.step();
+      expect(call.state).toBe('resolved');
+      return center.score.points;
+    };
+
+    expect(scoreFor('medium', Infinity)).toBe(100);
+    expect(scoreFor('critical', Infinity)).toBeGreaterThan(scoreFor('low', Infinity));
+    expect(scoreFor('critical', 0)).toBeGreaterThan(scoreFor('low', 0));
   });
 
   it('filters suitable idle units and sorts them by live ETA', () => {

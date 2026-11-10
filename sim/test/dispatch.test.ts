@@ -20,6 +20,37 @@ function unrelatedLink(sim: Simulation, incidentLinks: number[]): number {
   return link.id;
 }
 
+function exerciseMultiUnitResolution(kind: 'crash' | 'fire', firstKind: 'police' | 'fire', secondKind: 'ambulance'): void {
+  const sim = quietSimulation();
+  const center = new DispatchCenter(sim, { mode: 'dispatcher', callsPerHour: 0 });
+  const call = center.createCall(kind, nonStationSite(sim));
+  call.expiresAt = Infinity;
+  expect(call.needs).toEqual(kind === 'crash' ? ['police', 'ambulance'] : ['fire', 'ambulance']);
+
+  const firstCandidate = center.candidates(call.id).find(({ unitId }) => center.units[unitId].kind === firstKind);
+  expect(firstCandidate).toBeDefined();
+  expect(center.assign(call.id, firstCandidate!.unitId)).toBe(true);
+  const firstUnit = center.units[firstCandidate!.unitId];
+  for (let step = 0; step < 20 * 60 * 10 && firstUnit.state !== 'on_scene'; step++) sim.step();
+  expect(firstUnit.state).toBe('on_scene');
+
+  for (let step = 0; step < 10 * 60 * 10 && sim.time <= (firstUnit.sceneUntil ?? Infinity); step++) sim.step();
+  expect(call.arrivedUnitIds).toEqual([firstUnit.id]);
+  expect(call.state).not.toBe('resolved');
+
+  const secondCandidate = center.candidates(call.id).find(({ unitId }) => center.units[unitId].kind === secondKind);
+  expect(secondCandidate).toBeDefined();
+  expect(center.assign(call.id, secondCandidate!.unitId)).toBe(true);
+  expect(center.assign(call.id, firstUnit.id)).toBe(false);
+
+  for (let step = 0; step < 30 * 60 * 10 && call.state !== 'resolved'; step++) sim.step();
+  expect(call.state).toBe('resolved');
+  expect(call.assignedUnitIds).toHaveLength(2);
+  expect(call.arrivedUnitIds).toHaveLength(2);
+  expect(call.responseTime).toBeGreaterThan(0);
+  expect(center.score.resolvedCalls).toBe(1);
+}
+
 describe('dispatch', () => {
   it('creates addressed calls and generates them at the configured rate', () => {
     const sim = quietSimulation();
@@ -44,7 +75,7 @@ describe('dispatch', () => {
     expect(candidates.every(({ unitId }) => center.units[unitId].kind === 'ambulance')).toBe(true);
 
     const otherKindCall = center.createCall('fire', nonStationSite(sim));
-    expect(center.candidates(otherKindCall.id).every(({ unitId }) => center.units[unitId].kind === 'fire')).toBe(true);
+    expect(new Set(center.candidates(otherKindCall.id).map(({ unitId }) => center.units[unitId].kind))).toEqual(new Set(['fire', 'ambulance']));
   });
 
   it('assigns a selected unit to a selected call', () => {
@@ -58,6 +89,18 @@ describe('dispatch', () => {
     expect(call.assignedUnitId).toBe(unitId);
     expect(center.units[unitId].state).toBe('en_route');
     expect(center.assign(call.id, unitId)).toBe(false);
+  });
+
+  it('does not offer or assign a committed unit to another active call', () => {
+    const sim = quietSimulation();
+    const center = new DispatchCenter(sim, { mode: 'dispatcher', callsPerHour: 0 });
+    const first = center.createCall('medical', nonStationSite(sim));
+    const unitId = center.candidates(first.id)[0].unitId;
+    expect(center.assign(first.id, unitId)).toBe(true);
+
+    const second = center.createCall('medical', sim.sites[(first.site.id + 100) % sim.sites.length]);
+    expect(center.candidates(second.id).some((candidate) => candidate.unitId === unitId)).toBe(false);
+    expect(center.assign(second.id, unitId)).toBe(false);
   });
 
   it('resolves a call from the simulation arrival stream and tracks response', () => {
@@ -108,30 +151,12 @@ describe('dispatch', () => {
     expect(center.isFree(unit)).toBe(true);
   });
 
-  it('keeps an assigned unit en route and resolves the call only after arrival', () => {
-    const sim = quietSimulation();
-    const center = new DispatchCenter(sim, { mode: 'dispatcher', callsPerHour: 0 });
-    const call = center.createCall('crash', nonStationSite(sim));
-    const unitId = center.candidates(call.id)[0].unitId;
+  it('resolves a crash only after police and ambulance arrive', () => {
+    exerciseMultiUnitResolution('crash', 'police', 'ambulance');
+  });
 
-    expect(center.assign(call.id, unitId)).toBe(true);
-    expect(center.units[unitId].state).toBe('en_route');
-    expect(call.state).toBe('assigned');
-    expect(call.responseTime).toBeNull();
-    expect(center.unitTravel(unitId)?.destination).toBe(call.site);
-    expect(call.state).not.toBe('resolved');
-
-    for (let step = 0; step < 20 * 60 * 10 && center.units[unitId].state !== 'on_scene'; step++) {
-      sim.step();
-      expect(call.state).not.toBe('resolved');
-    }
-
-    expect(center.units[unitId].state).toBe('on_scene');
-    expect(call.state).toBe('en_route');
-    expect(call.responseTime).not.toBeNull();
-
-    for (let step = 0; step < 6 * 60 * 10 && call.state !== 'resolved'; step++) sim.step();
-    expect(call.state).toBe('resolved');
+  it('resolves a fire only after fire engine and ambulance arrive', () => {
+    exerciseMultiUnitResolution('fire', 'fire', 'ambulance');
   });
 
   it('creates a linked crash call when an accident is placed', () => {
@@ -153,13 +178,15 @@ describe('dispatch', () => {
     const accident = sim.addIncident('accident', sim.grid.net.links.find((link) => link.arterial)!.id);
     const unrelated = sim.addIncident('lane', unrelatedLink(sim, accident.links));
     const call = center.createCrashCall(accident);
-    const unitId = center.candidates(call.id)[0].unitId;
+    const firstUnitId = center.candidates(call.id)[0].unitId;
 
-    expect(center.assign(call.id, unitId)).toBe(true);
+    expect(center.assign(call.id, firstUnitId)).toBe(true);
+    const secondUnitId = center.candidates(call.id).find(({ unitId }) => unitId !== firstUnitId)!.unitId;
+    expect(center.assign(call.id, secondUnitId)).toBe(true);
     expect(sim.incidents).toContain(accident);
 
-    for (let step = 0; step < 20 * 60 * 10 && center.units[unitId].state !== 'on_scene'; step++) sim.step();
-    expect(center.units[unitId].state).toBe('on_scene');
+    for (let step = 0; step < 20 * 60 * 10 && center.units[firstUnitId].state !== 'on_scene'; step++) sim.step();
+    expect(center.units[firstUnitId].state).toBe('on_scene');
     expect(call.state).toBe('en_route');
     expect(sim.incidents).toContain(accident);
 

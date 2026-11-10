@@ -299,7 +299,7 @@ window.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Tab' && dispatch?.mode === 'dispatcher' && dispatch.ended === null && !inControl) {
     // Next waiting call, soonest to expire first (the list's order), wrapping round.
-    const waiting = dispatch.calls.filter((call) => call.state === 'created').sort((a, b) => a.expiresAt - b.expiresAt);
+    const waiting = dispatch.calls.filter(needsUnitAssignment).sort((a, b) => a.expiresAt - b.expiresAt);
     if (waiting.length > 0) {
       const k = waiting.findIndex((call) => call.id === selectedCallId);
       selectedCallId = waiting[(k + 1) % waiting.length].id;
@@ -738,9 +738,23 @@ function syncIncidentList(): void {
   $('incidentsEmpty').hidden = sim.incidents.length > 0;
 }
 
-// The waiting call that expires first, to select after sending a unit.
+function missingCallNeeds(call: EmergencyCall): EmergencyCall['needs'] {
+  const remaining = [...call.needs];
+  for (const unitId of call.assignedUnitIds) {
+    const kind = dispatch?.units[unitId]?.kind;
+    const index = kind === undefined ? -1 : remaining.indexOf(kind);
+    if (index >= 0) remaining.splice(index, 1);
+  }
+  return remaining;
+}
+
+function needsUnitAssignment(call: EmergencyCall): boolean {
+  return (call.state === 'created' || call.state === 'assigned' || call.state === 'en_route') && missingCallNeeds(call).length > 0;
+}
+
+// The open call with the earliest deadline that still needs a unit.
 function nextWaitingCall(): number | null {
-  const waiting = dispatch?.calls.filter((call) => call.state === 'created') ?? [];
+  const waiting = dispatch?.calls.filter(needsUnitAssignment) ?? [];
   return waiting.length > 0 ? waiting.reduce((a, b) => (b.expiresAt < a.expiresAt ? b : a)).id : null;
 }
 
@@ -769,12 +783,15 @@ function syncDispatchPanel(): void {
   const servedCalls = center.calls.filter((call) => call.state === 'assigned' || call.state === 'en_route');
   const finishedCalls = center.calls.filter((call) => call.state === 'resolved' || call.state === 'missed').slice(-3).reverse();
   const callLabel = (call: EmergencyCall): string => {
-    if (call.state === 'created') return `waiting · ${Math.max(0, Math.ceil((call.expiresAt - sim.time) / 60))} min left`;
+    const missing = missingCallNeeds(call);
+    if (call.state === 'created') {
+      return `waiting for ${missing.join(' + ')} · ${Math.max(0, Math.ceil((call.expiresAt - sim.time) / 60))} min left`;
+    }
     if (call.state === 'missed') return 'missed';
     if (call.state === 'resolved') return `done · reached in ${formatMinutes(call.responseTime ?? 0)}`;
-    const unit = call.assignedUnitId === null ? undefined : center.units[call.assignedUnitId];
-    if (!unit) return 'unit assigned';
-    return `${unit.kind} ${unit.id + 1} ${unit.state === 'on_scene' ? 'on scene' : 'on the way'}`;
+    const arrived = call.arrivedUnitIds.length;
+    const progress = `${arrived}/${call.needs.length} arrived`;
+    return missing.length > 0 ? `needs ${missing.join(' + ')} · ${progress}` : `all units assigned · ${progress}`;
   };
   const callItems: HTMLLIElement[] = [];
   const groups: [string, EmergencyCall[]][] = [['Waiting', waitingCalls], ['Unit on the way or on scene', servedCalls], ['Recent', finishedCalls]];
@@ -814,11 +831,9 @@ function syncDispatchPanel(): void {
     ? undefined
     : dispatch.units[selectedCall.assignedUnitId];
   const travel = assignedUnit ? dispatch.unitTravel(assignedUnit.id) : null;
-  $('dispatchCallDetails').textContent = selectedCall && assignedUnit && travel
-    ? `${selectedCall.kind.toUpperCase()} · ${travel.origin.address} → ${travel.destination.address} · ${assignedUnit.state.replace('_', ' ')} · ETA ${Math.ceil(travel.eta)} s`
-    : selectedCall
-      ? `${selectedCall.kind.toUpperCase()} · ${selectedCall.site.address} · expires in ${Math.max(0, Math.ceil((selectedCall.expiresAt - sim.time) / 60))} min`
-      : 'Select a waiting or assigned call to see its details.';
+  $('dispatchCallDetails').textContent = selectedCall
+    ? `${selectedCall.kind.toUpperCase()} · ${selectedCall.site.address} · ${selectedCall.arrivedUnitIds.length}/${selectedCall.needs.length} arrived${missingCallNeeds(selectedCall).length > 0 ? ` · needs ${missingCallNeeds(selectedCall).join(' + ')}` : ''}${travel && assignedUnit ? ` · ${assignedUnit.kind} ETA ${Math.ceil(travel.eta)} s` : ''} · expires in ${Math.max(0, Math.ceil((selectedCall.expiresAt - sim.time) / 60))} min`
+    : 'Select a waiting or assigned call to see its details.';
   const selectedEmergencyTravel = selectedEmergencyUnitId === null
     ? null
     : dispatch.unitTravel(selectedEmergencyUnitId);
@@ -832,7 +847,7 @@ function syncDispatchPanel(): void {
     ? `${statusUnit.kind[0].toUpperCase()}${statusUnit.kind.slice(1)} ${statusUnit.id + 1} en route to ${statusTravel.destination.address} — ETA ${Math.ceil(statusTravel.eta)} s`
     : 'No emergency units currently en route.';
   view.setEmergencyRoute(selectedEmergencyTravel?.route ?? null);
-  if (selectedCall?.state === 'created') {
+  if (selectedCall && needsUnitAssignment(selectedCall)) {
     for (const candidate of dispatch.candidates(selectedCall.id)) {
       const unit = dispatch.units[candidate.unitId];
       const li = document.createElement('li');
@@ -857,14 +872,14 @@ function syncDispatchPanel(): void {
     if (selectedCall && selectedUnitId !== null && dispatch?.assign(selectedCall.id, selectedUnitId)) {
       lastSent = selectedUnitId;
       selectedEmergencyUnitId = selectedUnitId;
-      selectedCallId = nextWaitingCall() ?? selectedCallId;
+      selectedCallId = needsUnitAssignment(selectedCall) ? selectedCall.id : nextWaitingCall() ?? selectedCallId;
     }
     selectedUnitId = null;
     syncDispatchPanel();
   };
 
   $('dispatchScore').textContent = dispatch.score.points.toLocaleString();
-  $('dispatchWaiting').textContent = dispatch.calls.filter((call) => call.state === 'created').length.toLocaleString();
+  $('dispatchWaiting').textContent = dispatch.calls.filter(needsUnitAssignment).length.toLocaleString();
   $('dispatchResolved').textContent = dispatch.score.resolvedCalls.toLocaleString();
   $('dispatchMissed').textContent = dispatch.score.missedCalls.toLocaleString();
   $('dispatchResponse').textContent = dispatch.score.resolvedCalls > 0

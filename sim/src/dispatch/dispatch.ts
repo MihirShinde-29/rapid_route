@@ -34,8 +34,8 @@ export interface EmergencyUnit {
 export interface EmergencyCall {
   id: number;
   kind: CallKind;
-  severity: CallSeverity; // A5 stub: always 'medium' until severity is built
-  needs: EmergencyKind[]; // unit kinds the call needs; A5 stub: one, until multi-unit calls are built
+  severity: CallSeverity; // Severity is not used by the current dispatch rules.
+  needs: EmergencyKind[];
   site: Site;
   incidentId: number | null;
   createdAt: number;
@@ -43,6 +43,8 @@ export interface EmergencyCall {
   expiresAt: number;
   state: CallState;
   assignedUnitId: number | null;
+  assignedUnitIds: number[];
+  arrivedUnitIds: number[];
   responseTime: number | null;
 }
 
@@ -92,11 +94,11 @@ const SITE_TO_UNIT: Record<Site['kind'], EmergencyKind | undefined> = {
   parking: undefined,
   mall: undefined,
 };
-const CALL_UNIT: Record<CallKind, EmergencyKind> = {
-  medical: 'ambulance',
-  fire: 'fire',
-  crime: 'police',
-  crash: 'police',
+const CALL_NEEDS: Record<CallKind, EmergencyKind[]> = {
+  medical: ['ambulance'],
+  fire: ['fire', 'ambulance'],
+  crime: ['police'],
+  crash: ['police', 'ambulance'],
 };
 const CALL_TIMING: Record<CallKind, { target: number; expires: number; scene: number }> = {
   medical: { target: 8 * 60, expires: 15 * 60, scene: 4 * 60 },
@@ -218,7 +220,7 @@ export class DispatchCenter {
       id: this.nextCallId++,
       kind: callKind,
       severity: 'medium',
-      needs: [CALL_UNIT[callKind]],
+      needs: [...CALL_NEEDS[callKind]],
       site: callSite,
       incidentId,
       createdAt: this.sim.time,
@@ -226,6 +228,8 @@ export class DispatchCenter {
       expiresAt: this.sim.time + timing.expires,
       state: 'created',
       assignedUnitId: null,
+      assignedUnitIds: [],
+      arrivedUnitIds: [],
       responseTime: null,
     };
     this.calls.push(call);
@@ -245,9 +249,10 @@ export class DispatchCenter {
 
   candidates(callId: number): DispatchCandidate[] {
     const call = this.calls.find((item) => item.id === callId);
-    if (!call || call.state !== 'created') return [];
+    if (!call || !this.isActive(call)) return [];
+    const needed = this.outstandingNeeds(call, call.assignedUnitIds);
     return this.units
-      .filter((unit) => this.isFree(unit) && unit.kind === CALL_UNIT[call.kind])
+      .filter((unit) => this.isFree(unit) && !this.isCommitted(unit) && needed.includes(unit.kind))
       .map((unit) => ({ unitId: unit.id, eta: this.sim.planUnitTrip(this.startOf(unit), call.site).unitEta }))
       .filter((candidate) => Number.isFinite(candidate.eta))
       .sort((a, b) => a.eta - b.eta || a.unitId - b.unitId);
@@ -283,11 +288,19 @@ export class DispatchCenter {
   assign(callId: number, unitId: number): boolean {
     const call = this.calls.find((item) => item.id === callId);
     const unit = this.units.find((item) => item.id === unitId);
-    if (!call || call.state !== 'created' || !unit || !this.isFree(unit) || unit.kind !== CALL_UNIT[call.kind]) return false;
+    if (
+      !call ||
+      !this.isActive(call) ||
+      !unit ||
+      !this.isFree(unit) ||
+      this.isCommitted(unit) ||
+      !this.outstandingNeeds(call, call.assignedUnitIds).includes(unit.kind)
+    ) return false;
     const trip = this.sim.sendUnit(unit.kind, this.startOf(unit), call.site);
     if (!trip) return false;
-    call.state = 'assigned';
-    call.assignedUnitId = unit.id;
+    if (call.state === 'created') call.state = 'assigned';
+    if (call.assignedUnitId === null) call.assignedUnitId = unit.id;
+    call.assignedUnitIds.push(unit.id);
     unit.state = 'en_route';
     unit.tripId = trip.id;
     unit.callId = call.id;
@@ -320,7 +333,7 @@ export class DispatchCenter {
 
     if (this.mode === 'sandbox') {
       for (const call of this.calls) {
-        if (call.state !== 'created') continue;
+        if (!this.isActive(call)) continue;
         const fastest = this.candidates(call.id)[0];
         if (fastest) this.assign(call.id, fastest.unitId);
       }
@@ -365,9 +378,7 @@ export class DispatchCenter {
 
   private expireCalls(t: number): void {
     for (const call of this.calls) {
-      if (call.state === 'created' || call.state === 'assigned' || call.state === 'en_route') {
-        if (call.responseTime === null && t >= call.expiresAt) this.markMissed(call);
-      }
+      if (this.isActive(call) && this.outstandingNeeds(call, call.arrivedUnitIds).length > 0 && t >= call.expiresAt) this.markMissed(call);
     }
   }
 
@@ -408,11 +419,18 @@ export class DispatchCenter {
       }
 
       unit.location = call.site;
-      call.responseTime = Math.max(0, t - call.createdAt);
+      call.responseTime = Math.max(call.responseTime ?? 0, t - call.createdAt);
+      if (!call.arrivedUnitIds.includes(unit.id)) call.arrivedUnitIds.push(unit.id);
       this.emit({ type: 'arrived', t, callId: call.id, unitId: unit.id });
       unit.state = 'on_scene';
       unit.sceneUntil = t + CALL_TIMING[call.kind].scene;
       unit.callId = call.id;
+      if (this.outstandingNeeds(call, call.arrivedUnitIds).length === 0) {
+        for (const assignedId of call.assignedUnitIds) {
+          const arrivedUnit = this.units[assignedId];
+          if (arrivedUnit.state === 'on_scene') arrivedUnit.sceneUntil = t + CALL_TIMING[call.kind].scene;
+        }
+      }
     }
   }
 
@@ -425,7 +443,8 @@ export class DispatchCenter {
         }
       } else if (unit.state === 'on_scene' && unit.sceneUntil !== null && t >= unit.sceneUntil) {
         const call = unit.callId === null ? undefined : this.calls.find((item) => item.id === unit.callId);
-        if (call && call.state !== 'missed' && call.state !== 'resolved') this.resolveCall(call);
+        if (call && this.isActive(call) && this.outstandingNeeds(call, call.arrivedUnitIds).length === 0) this.resolveCall(call);
+        if (call && this.isActive(call)) continue;
         if (call?.kind === 'medical' && unit.kind === 'ambulance' && call.state === 'resolved') this.startHospital(unit);
         else this.startReturn(unit);
       } else if (unit.state === 'to_hospital' && unit.tripId === null && unit.sceneUntil !== null && t >= unit.sceneUntil) {
@@ -496,6 +515,24 @@ export class DispatchCenter {
     unit.tripId = null;
     unit.callId = null;
     unit.sceneUntil = null;
+  }
+
+  private isActive(call: EmergencyCall): boolean {
+    return call.state === 'created' || call.state === 'assigned' || call.state === 'en_route';
+  }
+
+  private isCommitted(unit: EmergencyUnit): boolean {
+    return this.calls.some((call) => this.isActive(call) && call.assignedUnitIds.includes(unit.id));
+  }
+
+  private outstandingNeeds(call: EmergencyCall, unitIds: number[]): EmergencyKind[] {
+    const remaining = [...call.needs];
+    for (const unitId of unitIds) {
+      const kind = this.units[unitId]?.kind;
+      const index = kind === undefined ? -1 : remaining.indexOf(kind);
+      if (index >= 0) remaining.splice(index, 1);
+    }
+    return remaining;
   }
 
   private chooseCallSite(): Site {

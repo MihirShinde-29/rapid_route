@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { coniferGeometry, windMaterial } from './nature';
 import { mulberry32 } from '../core/rng';
 
 // Sky, sun/moon lighting and the land around the city. Everything here is visual only.
@@ -46,6 +46,8 @@ function lightDirection(hour: number, out: THREE.Vector3): { elevation: number; 
   return { elevation: Math.sin(a), isSun };
 }
 
+export const BASE_FOG = 0.0016;
+
 export class Sky {
   readonly sun: THREE.DirectionalLight;
   private ambient: THREE.AmbientLight;
@@ -57,10 +59,15 @@ export class Sky {
   private b = new THREE.Color();
   private dir = new THREE.Vector3();
   night = 1; // 0 full day .. 1 full night; drives windows, lamps and car lights
+  // Weather: how overcast (0..1) and how thick the fog (FogExp2 density), eased towards the targets.
+  overcastTarget = 0;
+  fogTarget = BASE_FOG;
+  private overcast = 0;
+  private grey = new THREE.Color();
 
   constructor(private scene: THREE.Scene, shadowExtent: number) {
-    this.ambient = new THREE.AmbientLight(0x8899aa, 0.5);
-    this.hemi = new THREE.HemisphereLight(0x9fc4ff, 0x2a2a22, 0.4);
+    this.ambient = new THREE.AmbientLight(0xa9adb3, 0.5);
+    this.hemi = new THREE.HemisphereLight(0xc2d3ea, 0x3d3a31, 0.4);
     this.sun = new THREE.DirectionalLight(0xffffff, 1);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
@@ -124,6 +131,15 @@ export class Sky {
     scene.add(this.stars);
   }
 
+  // The colour a white cloud takes in the current light: sunlit by day (warm at dawn and dusk),
+  // dark at night, flat grey when overcast.
+  cloudLight(out: THREE.Color): THREE.Color {
+    out.setRGB(1, 1, 1).lerp(this.sun.color, 0.35).lerp(this.uniforms.horizon.value as THREE.Color, 0.25);
+    out.multiplyScalar(1 - 0.86 * this.night);
+    const lum = 0.2126 * out.r + 0.7152 * out.g + 0.0722 * out.b;
+    return out.lerp(this.grey.setScalar(lum * 0.78), this.overcast);
+  }
+
   private lerpKey(hour: number, field: 'zenith' | 'horizon' | 'sun', out: THREE.Color): THREE.Color {
     const [k0, k1, t] = this.keysAt(hour);
     return out.setHex(k0[field]).lerp(this.b.setHex(k1[field]), t);
@@ -145,8 +161,11 @@ export class Sky {
     this.sun.position.copy(this.dir).multiplyScalar(300);
     this.lerpKey(hour, 'sun', this.sun.color);
     // Fade the light out as the sun or moon touches the horizon so shadows never streak.
-    this.sun.intensity = (k0.sunI + (k1.sunI - k0.sunI) * t) * Math.PI * smoothstep(0, 0.12, elevation);
-    const ambient = k0.ambient + (k1.ambient - k0.ambient) * t;
+    this.overcast += (this.overcastTarget - this.overcast) * 0.03;
+    const o = this.overcast;
+    // Cloud hides the sun (soft shadows) and lifts the flat sky light a little.
+    this.sun.intensity = (k0.sunI + (k1.sunI - k0.sunI) * t) * Math.PI * smoothstep(0, 0.12, elevation) * (1 - 0.75 * o);
+    const ambient = (k0.ambient + (k1.ambient - k0.ambient) * t) * (1 + 0.2 * o);
     this.ambient.intensity = ambient * Math.PI;
     this.hemi.intensity = ambient * 0.8 * Math.PI;
 
@@ -154,12 +173,18 @@ export class Sky {
     this.lerpKey(hour, 'horizon', this.uniforms.horizon.value);
     this.uniforms.sunDir.value.copy(this.dir);
     this.uniforms.sunColor.value.copy(this.sun.color);
-    this.uniforms.sunGlow.value = (isSun ? 1 : 0.25) * smoothstep(-0.05, 0.05, elevation);
+    this.uniforms.sunGlow.value = (isSun ? 1 : 0.25) * smoothstep(-0.05, 0.05, elevation) * (1 - o);
+    // An overcast sky: towards grey of about the same brightness, a little darker.
+    for (const c of [this.uniforms.zenith.value as THREE.Color, this.uniforms.horizon.value as THREE.Color]) {
+      const lum = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+      c.lerp(this.grey.setRGB(lum * 0.85, lum * 0.88, lum * 0.92), o * 0.85);
+    }
     const z = this.uniforms.zenith.value as THREE.Color;
     const skyLum = 0.2126 * z.r + 0.7152 * z.g + 0.0722 * z.b;
     (this.stars.material as THREE.PointsMaterial).opacity = (1 - smoothstep(0.004, 0.03, skyLum)) * 0.9; // only once the sky is dark
 
     const fog = this.scene.fog as THREE.FogExp2;
+    fog.density += (this.fogTarget - fog.density) * 0.03;
     fog.color.copy(this.uniforms.horizon.value).lerp(this.a.copy(this.uniforms.zenith.value), 0.35);
     // Sky follows the camera so it never clips.
     this.dome.position.copy(camera.position);
@@ -302,19 +327,8 @@ export class Terrain {
 
   // Forest: instanced trees on gentle land outside the suburbs, away from water and fields.
   buildForest(count: number): THREE.InstancedMesh {
-    const trunk = new THREE.CylinderGeometry(0.25, 0.35, 2, 5);
-    trunk.translate(0, 1, 0);
-    const crown = new THREE.ConeGeometry(1.6, 4.5, 6);
-    crown.translate(0, 4, 0);
-    const paint = (g: THREE.BufferGeometry, hex: number) => {
-      const col = new THREE.Color(hex);
-      const arr = new Float32Array(g.attributes.position.count * 3);
-      for (let i = 0; i < arr.length; i += 3) arr.set([col.r, col.g, col.b], i);
-      g.setAttribute('color', new THREE.BufferAttribute(arr, 3));
-      return g;
-    };
-    const merged = mergeGeometries([paint(trunk, 0x5a4330), paint(crown, 0xffffff)])!;
-    const mesh = new THREE.InstancedMesh(merged, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, flatShading: true }), count);
+    // Tiered conifers (see nature.ts), 6.3 world units tall at scale 1, swaying in the breeze.
+    const mesh = new THREE.InstancedMesh(coniferGeometry(23).scale(6.3, 6.3, 6.3), windMaterial(), count);
     const rng = mulberry32(17);
     const m = new THREE.Matrix4();
     const q = new THREE.Quaternion();
@@ -339,7 +353,7 @@ export class Terrain {
       n++;
     }
     mesh.count = n;
-    mesh.castShadow = true;
+    mesh.castShadow = false; // outside the shadow map's area: its shadows would never show
     mesh.receiveShadow = true;
     return mesh;
   }

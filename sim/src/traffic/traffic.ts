@@ -6,6 +6,14 @@ import { SignalPlans } from './signals';
 
 // Intelligent Driver Model parameters (uncalibrated defaults; calibration is post-MVP).
 export const IDM = { a: 1.5, b: 2.0, T: 1.2, s0: 2.0, delta: 4, bMax: 9 };
+
+// Weather (W12): in rain and fog drivers keep below the limit and leave longer gaps.
+export type Weather = 'clear' | 'rain' | 'fog';
+export const WEATHER: Record<Weather, { speed: number; headway: number }> = {
+  clear: { speed: 1, headway: 1 },
+  rain: { speed: 0.88, headway: 1.25 },
+  fog: { speed: 0.78, headway: 1.4 },
+};
 export const VEHICLE_LENGTH = 4.5; // m, for trips without a vehicle type
 const TURN_SPEED = 7; // m/s through a turning connector
 const STARVE_S = 8; // after this wait an approach overrides arterial priority
@@ -317,8 +325,11 @@ export class TrafficModel {
 
   // Speed limit, or the forced cap if one is set, so a jammed link really slows cars.
   private desiredSpeed(link: Link): number {
-    return Math.min(link.speedLimit, this.capOf(link.id));
+    return Math.min(link.speedLimit * this.weather.speed, this.capOf(link.id));
   }
+
+  // Factors for the current weather (see WEATHER).
+  weather = WEATHER.clear;
 
   private capOf(linkId: number): number {
     return this.forcedSpeeds.get(linkId) ?? Infinity;
@@ -383,7 +394,7 @@ export class TrafficModel {
   reroute(
     links: Set<number>,
     plan: (node: number, lastLink: number, skip: number[]) => number[] | null,
-    opts: { accept?: (oldTail: number[], newTail: number[]) => boolean; skipUnits?: boolean } = {},
+    opts: { accept?: (oldTail: number[], newTail: number[]) => boolean; skipUnits?: boolean; skipBacklog?: boolean; pick?: (veh: Vehicle) => boolean } = {},
   ): number {
     const revised = (route: number[], keep: number): number[] | null => {
       if (keep >= route.length - 1 || !route.slice(keep + 1).some((id) => links.has(id))) return null;
@@ -399,12 +410,13 @@ export class TrafficModel {
     let changed = 0;
     for (const veh of this.vehicles) {
       if (opts.skipUnits && veh.siren) continue;
+      if (opts.pick && !opts.pick(veh)) continue;
       const next = revised(veh.route, veh.conn || veh.granted ? veh.ri + 1 : veh.ri);
       if (!next) continue;
       veh.route = next;
       changed++;
     }
-    for (const item of this.backlog) {
+    for (const item of opts.skipBacklog ? [] : this.backlog) {
       const next = revised(item.route, 0);
       if (!next) continue;
       item.route = next;
@@ -475,7 +487,7 @@ export class TrafficModel {
         still.push(item);
         continue;
       }
-      const v: Vehicle = Object.assign(item.veh ?? ({} as Vehicle), {
+      const fresh: Vehicle = {
         id: item.veh?.id ?? this.nextId++,
         trip: item.trip,
         route: item.route,
@@ -500,7 +512,9 @@ export class TrafficModel {
         pass: 0,
         stopAt: item.veh?.stopAt ?? 0,
         dwellUntil: -1,
-      });
+      };
+      // A unit turning round keeps its object, so anything holding it still sees it.
+      const v = item.veh ? Object.assign(item.veh, fresh) : fresh;
       vs.splice(k, 0, v);
       this.activeLanes.add(lane);
       this.vehicles.add(v);
@@ -990,7 +1004,7 @@ export class TrafficModel {
 
   private idm(v: number, v0: number, gap: number, dv: number, a: number): number {
     if (gap <= 0.05) return -IDM.bMax;
-    const sStar = IDM.s0 + Math.max(0, v * IDM.T + (v * dv) / (2 * Math.sqrt(a * IDM.b)));
+    const sStar = IDM.s0 + Math.max(0, v * IDM.T * this.weather.headway + (v * dv) / (2 * Math.sqrt(a * IDM.b)));
     const acc = a * (1 - (v / v0) ** IDM.delta - (sStar / gap) ** 2);
     return Math.max(-IDM.bMax, acc);
   }
@@ -1067,7 +1081,7 @@ export class TrafficModel {
       const vs = this.onConnector.get(conn)!;
       // Junctions are crossed at normal speed; an incident cap applies once on the next street,
       // so slow traffic never sits inside the box.
-      const v0 = conn.turn ? TURN_SPEED : this.net.links[conn.outLink].speedLimit;
+      const v0 = conn.turn ? TURN_SPEED : this.net.links[conn.outLink].speedLimit * this.weather.speed;
       for (let k = 0; k < vs.length; k++) {
         const veh = vs[k];
         let gap = Infinity;

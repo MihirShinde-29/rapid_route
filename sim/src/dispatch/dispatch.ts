@@ -63,6 +63,9 @@ export interface DispatchOptions {
   missedLimit?: number;
   unitCounts?: Partial<Record<EmergencyKind, number>>; // units per station of each kind
   accidentsPerHour?: number; // random accidents per sim hour at peak demand (fewer when quieter)
+  // How units are ranked for a call: by live ETA (the game), or by straight-line distance, the
+  // usual "nearest unit" rule (for the report's dispatch-policy experiment).
+  policy?: 'eta' | 'nearest';
 }
 
 // What happened since the UI last looked: for call alerts, sounds and the camera.
@@ -157,8 +160,11 @@ export class DispatchCenter {
   private readonly severityRng: () => number;
   private readonly hospitalOf = new Map<number, Site>(); // ambulances on a hospital trip, by unit id
 
+  private readonly policy: 'eta' | 'nearest';
+
   constructor(private readonly sim: Simulation, opts: DispatchOptions) {
     this.mode = opts.mode;
+    this.policy = opts.policy ?? 'eta';
     this.callsPerHour = Math.max(0, opts.callsPerHour ?? DEFAULT_CALLS_PER_HOUR);
     this.shiftEndsAt = sim.time + Math.max(0, opts.shiftDurationSeconds ?? DEFAULT_SHIFT_SECONDS);
     this.missedLimit = Math.max(1, Math.floor(opts.missedLimit ?? DEFAULT_MISSED_LIMIT));
@@ -268,6 +274,13 @@ export class DispatchCenter {
     const needed = this.outstandingNeeds(call, call.assignedUnitIds);
     const candidates: DispatchCandidate[] = [];
     for (const kind of needed) {
+      const eligible = this.units.filter((unit) =>
+        unit.kind === kind &&
+        this.isFree(unit) &&
+        !this.isCommitted(unit),
+      );
+      // Nothing free of this kind: skip the station ETAs below (sandbox asks every step).
+      if (eligible.length === 0) continue;
       const localStation = this.stations
         .filter((station) => station.kind === kind)
         .map((station) => ({
@@ -277,11 +290,6 @@ export class DispatchCenter {
         .sort((a, b) => a.eta - b.eta || a.station.id - b.station.id)[0]?.station;
       if (!localStation) continue;
 
-      const eligible = this.units.filter((unit) =>
-        unit.kind === kind &&
-        this.isFree(unit) &&
-        !this.isCommitted(unit),
-      );
       const local = eligible.filter((unit) => unit.station === localStation);
       const available = local.length > 0
         ? [
@@ -298,6 +306,14 @@ export class DispatchCenter {
         const eta = this.sim.planUnitTrip(this.startOf(unit), call.site).unitEta;
         if (Number.isFinite(eta)) candidates.push({ unitId: unit.id, eta, mutualAid });
       }
+    }
+    if (this.policy === 'nearest') {
+      const dist = (c: DispatchCandidate) => {
+        const from = this.startOf(this.units[c.unitId]);
+        const p = 'entrance' in from ? from.door : this.sim.traffic.pose(from);
+        return Math.hypot(p.x - call.site.door.x, p.y - call.site.door.y);
+      };
+      return candidates.sort((a, b) => dist(a) - dist(b) || a.unitId - b.unitId);
     }
     return candidates.sort((a, b) => a.eta - b.eta || a.unitId - b.unitId);
   }
@@ -489,7 +505,9 @@ export class DispatchCenter {
         const call = unit.callId === null ? undefined : this.calls.find((item) => item.id === unit.callId);
         if (call && this.isActive(call) && this.outstandingNeeds(call, call.arrivedUnitIds).length === 0) this.resolveCall(call);
         if (call && this.isActive(call)) continue;
-        if (call?.kind === 'medical' && unit.kind === 'ambulance' && call.state === 'resolved') this.startHospital(unit);
+        // A patient to hospital: from medical and crash calls, and from fires that were critical.
+        const patient = call?.kind === 'medical' || call?.kind === 'crash' || (call?.kind === 'fire' && call.severity === 'critical');
+        if (patient && unit.kind === 'ambulance' && call?.state === 'resolved') this.startHospital(unit);
         else this.startReturn(unit);
       } else if (unit.state === 'to_hospital' && unit.tripId === null && unit.sceneUntil !== null && t >= unit.sceneUntil) {
         if (unit.location === unit.station.site) this.resetUnit(unit);
@@ -599,6 +617,7 @@ export class DispatchCenter {
 
   private randomSeverity(): CallSeverity {
     const roll = this.severityRng();
-    return roll < 1 / 3 ? 'low' : roll < 2 / 3 ? 'medium' : 'critical';
+    // 40% low, 40% medium, 20% critical: critical calls stay the exception they are meant to be.
+    return roll < 0.4 ? 'low' : roll < 0.8 ? 'medium' : 'critical';
   }
 }

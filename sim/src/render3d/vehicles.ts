@@ -150,32 +150,11 @@ export function vehicleGeometry(
     b.add(box(0.012, 0.025, W * 0.22), TAIL, -len / 2, lightY, sx * W * 0.3);
   }
 
-  const l = new StaticBatch();
-  for (const sx of [-1, 1]) {
-    l.add(box(0.016, 0.032, W * 0.24), HEAD_GLOW, len / 2 + 0.005, lightY, sx * W * 0.3);
-    l.add(box(0.016, 0.032, W * 0.24), TAIL_GLOW, -len / 2 - 0.005, lightY, sx * W * 0.3);
-  }
-  const beamLength = 1.4;
-  const beamStart = l.add(new THREE.PlaneGeometry(beamLength, W * 1.2), HEAD_GLOW, len / 2 + beamLength / 2, 0.015, 0, -Math.PI / 2);
-  const lights = l.geometry();
-  // Fade the beam out with distance and widen it into a cone.
-  const pos = lights.attributes.position as THREE.BufferAttribute;
-  const col = lights.attributes.color as THREE.BufferAttribute;
-  for (let v = beamStart; v < beamStart + 4; v++) {
-    const far = pos.getX(v) > len / 2 + beamLength / 2;
-    if (far) pos.setZ(v, pos.getZ(v) * 1.8);
-    const k = far ? 0 : 0.45;
-    col.setXYZ(v, HEAD_GLOW.r * k, HEAD_GLOW.g * k, HEAD_GLOW.b * k);
-  }
-  // Brake lights: slightly larger than the tail lights, switched per vehicle by instance colour.
-  const k = new StaticBatch();
-  for (const sx of [-1, 1]) k.add(box(0.02, 0.04, W * 0.27), BODY, -len / 2 - 0.009, lightY, sx * W * 0.3);
-  // Turn indicators at the four corners (+z is the car's right), switched like the brake lights.
-  const indicator = (side: number) => {
-    const g = new StaticBatch();
-    for (const end of [-1, 1]) g.add(box(0.03, 0.035, W * 0.14), BODY, end * (len / 2 + 0.006), lightY + 0.012, side * W * 0.44);
-    return g.geometry();
-  };
+  const { lights, brake, indicatorL, indicatorR } = vehicleLights(W, {
+    front: { x: len / 2, y: lightY, z: W * 0.3 },
+    rear: { x: -len / 2, y: lightY, z: W * 0.3 },
+    side: W * 0.44,
+  });
   // Siren lamps: red lenses on one side, blue on the other; their glows are switched per vehicle.
   let sirenA: THREE.BufferGeometry | null = null;
   let sirenB: THREE.BufferGeometry | null = null;
@@ -189,7 +168,56 @@ export function vehicleGeometry(
     sirenA = ga.geometry();
     sirenB = gb.geometry();
   }
-  return { body: b.geometry(), lights, brake: k.geometry(), indicatorL: indicator(-1), indicatorR: indicator(1), sirenA, sirenB };
+  return { body: b.geometry(), lights, brake, indicatorL, indicatorR, sirenA, sirenB };
+}
+
+// Where a vehicle's lamps sit: the head and tail lamp faces (x along the car, y height, z the
+// distance of each lamp from the centre line) and how far out the turn indicators are.
+export interface LightAnchors {
+  front: { x: number; y: number; z: number };
+  rear: { x: number; y: number; z: number };
+  side: number;
+}
+
+export interface VehicleLights {
+  lights: THREE.BufferGeometry; // head/tail glow and a beam on the road, for night
+  brake: THREE.BufferGeometry;
+  indicatorL: THREE.BufferGeometry;
+  indicatorR: THREE.BufferGeometry;
+}
+
+// The switchable lamps, as thin glows just proud of the lamp faces.
+export function vehicleLights(W: number, a: LightAnchors): VehicleLights {
+  const { front: f, rear: r } = a;
+  const l = new StaticBatch();
+  for (const sx of [-1, 1]) {
+    // Thin and just proud of the lamp face, so they read as the lamp lit rather than a block.
+    l.add(box(0.006, 0.03, W * 0.22), HEAD_GLOW, f.x + 0.003, f.y, sx * f.z);
+    l.add(box(0.006, 0.03, W * 0.22), TAIL_GLOW, r.x - 0.003, r.y, sx * r.z);
+  }
+  const beamLength = 1.4;
+  const beamStart = l.add(new THREE.PlaneGeometry(beamLength, W * 1.2), HEAD_GLOW, f.x + beamLength / 2, 0.015, 0, -Math.PI / 2);
+  const lights = l.geometry();
+  // Fade the beam out with distance and widen it into a cone.
+  const pos = lights.attributes.position as THREE.BufferAttribute;
+  const col = lights.attributes.color as THREE.BufferAttribute;
+  for (let v = beamStart; v < beamStart + 4; v++) {
+    const far = pos.getX(v) > f.x + beamLength / 2;
+    if (far) pos.setZ(v, pos.getZ(v) * 1.8);
+    const k = far ? 0 : 0.45;
+    col.setXYZ(v, HEAD_GLOW.r * k, HEAD_GLOW.g * k, HEAD_GLOW.b * k);
+  }
+  // Brake lights: slightly larger than the tail lights, switched per vehicle by instance colour.
+  const k = new StaticBatch();
+  for (const sx of [-1, 1]) k.add(box(0.008, 0.036, W * 0.24), BODY, r.x - 0.004, r.y, sx * r.z);
+  // Turn indicators at the four corners (+z is the car's right), switched like the brake lights.
+  const indicator = (side: number) => {
+    const g = new StaticBatch();
+    g.add(box(0.008, 0.026, W * 0.1), BODY, f.x + 0.004, f.y, side * a.side);
+    g.add(box(0.008, 0.026, W * 0.1), BODY, r.x - 0.004, r.y, side * a.side);
+    return g.geometry();
+  };
+  return { lights, brake: k.geometry(), indicatorL: indicator(-1), indicatorR: indicator(1) };
 }
 
 // Common real-world paint colours with rough market shares.

@@ -94,12 +94,14 @@ describe('queues at a blockage', () => {
   // Mean number of cars standing in the queue for a blocked lane (on it, or on the streets just
   // before it with a route through it), sampled every second for half an hour after an accident
   // on the busiest arterial at the morning peak.
-  function accidentQueue(reroute: boolean) {
+  function accidentQueue(reroute: boolean, live = false) {
     const sim = new Simulation({ ...DEFAULT_CONFIG, startHour: 7.5 });
     sim.rerouteQueues = reroute;
+    sim.rerouteLive = false; // same city up to the accident in every run
     while (sim.time < 7.75 * HOUR) sim.step();
     const link = busyArterial(sim);
     sim.addIncident('accident', link);
+    sim.rerouteLive = live; // the queue rule on its own unless asked
     const net = sim.grid.net;
     const feeders = net.inLinks[net.links[link].from];
     let sum = 0;
@@ -121,9 +123,18 @@ describe('queues at a blockage', () => {
   it('cars heading for an accident find a way round as its queue grows, so the queue stays shorter', () => {
     const on = accidentQueue(true);
     const off = accidentQueue(false);
+    console.log('queue on', on.mean, 'off', off.mean);
     expect(on.rerouted).toBeGreaterThan(0);
     expect(off.rerouted).toBe(0);
     expect(on.mean).toBeLessThan(0.8 * off.mean); // measured: 1.3 against 2.7 cars
     expect(on.removed).toBe(0);
+  }, 300_000);
+
+  it('with live rerouting on as well (the game default) the queue is no longer than with neither', () => {
+    const both = accidentQueue(true, true);
+    const neither = accidentQueue(false, false);
+    console.log('queue both', both.mean, 'neither', neither.mean);
+    expect(both.mean).toBeLessThan(neither.mean);
+    expect(both.removed).toBe(0);
   }, 300_000);
 });

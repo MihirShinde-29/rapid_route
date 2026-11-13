@@ -1,6 +1,7 @@
 import type { EmergencyKind } from '../traffic/vehicleTypes';
 
-// Procedural siren (Web Audio, no samples): a sawtooth swept up and down by a low-frequency
+// All the game's sound, procedural (Web Audio, no samples): traffic, wind and birdsong round the
+// camera (see traffic() and ambience()), the UI sounds, and the siren. Procedural siren: a sawtooth swept up and down by a low-frequency
 // oscillator, through a low-pass filter. Ambulances and fire engines wail (a slow sweep), police
 // cars yelp (a fast one). One voice plays the unit nearest the camera, louder the nearer it is.
 // The same context plays the UI sounds (new-call chime, missed-call tone, button ticks).
@@ -14,6 +15,11 @@ export class SirenAudio {
   private ctx: AudioContext | null = null;
   private gain: GainNode | null = null;
   private lfo: OscillatorNode | null = null;
+  private windGain: GainNode | null = null;
+  private rumbleGain: GainNode | null = null;
+  private hissGain: GainNode | null = null;
+  private nextChirp = 0;
+  private nextHorn = 0;
   muted = false;
 
   // Browsers only allow audio after a user gesture; call this from one (a click or key press).
@@ -45,6 +51,118 @@ export class SirenAudio {
     this.ctx = ctx;
     this.gain = gain;
     this.lfo = lfo;
+    // Ambience: a soft wind (looping noise through a band-pass, swelling slowly).
+    const noise = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+    const data = noise.getChannelData(0);
+    for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+    const src = ctx.createBufferSource();
+    src.buffer = noise;
+    src.loop = true;
+    const band = ctx.createBiquadFilter();
+    band.type = 'bandpass';
+    band.frequency.value = 420;
+    band.Q.value = 0.5;
+    const swell = ctx.createOscillator();
+    swell.frequency.value = 0.13;
+    const swellDepth = ctx.createGain();
+    swellDepth.gain.value = 180;
+    swell.connect(swellDepth).connect(band.frequency);
+    const windGain = ctx.createGain();
+    windGain.gain.value = 0;
+    src.connect(band).connect(windGain).connect(ctx.destination);
+    src.start();
+    swell.start();
+    this.windGain = windGain;
+    // Traffic: a low rumble of engines and tyres, and a higher hiss (wet roads hiss more), both from
+    // the same noise through different filters.
+    const rumbleSrc = ctx.createBufferSource();
+    rumbleSrc.buffer = noise;
+    rumbleSrc.loop = true;
+    rumbleSrc.playbackRate.value = 0.5;
+    const low = ctx.createBiquadFilter();
+    low.type = 'lowpass';
+    low.frequency.value = 260;
+    const rumbleGain = ctx.createGain();
+    rumbleGain.gain.value = 0;
+    rumbleSrc.connect(low).connect(rumbleGain).connect(ctx.destination);
+    const hissSrc = ctx.createBufferSource();
+    hissSrc.buffer = noise;
+    hissSrc.loop = true;
+    const high = ctx.createBiquadFilter();
+    high.type = 'bandpass';
+    high.frequency.value = 1800;
+    high.Q.value = 0.7;
+    const hissGain = ctx.createGain();
+    hissGain.gain.value = 0;
+    hissSrc.connect(high).connect(hissGain).connect(ctx.destination);
+    rumbleSrc.start();
+    hissSrc.start();
+    this.rumbleGain = rumbleGain;
+    this.hissGain = hissGain;
+  }
+
+  // Each frame: the traffic heard from the camera (0 none .. ~1 a busy street close by), whether the
+  // roads are wet, and how many cars close by are stuck (for the odd horn).
+  traffic(level: number, wet: boolean, stuck: number): void {
+    if (!this.ctx || !this.rumbleGain || !this.hissGain) return;
+    const now = this.ctx.currentTime;
+    const l = this.muted ? 0 : Math.min(1.2, level);
+    this.rumbleGain.gain.setTargetAtTime(0.11 * l, now, 0.3);
+    this.hissGain.gain.setTargetAtTime((wet ? 0.05 : 0.018) * l, now, 0.3);
+    if (this.muted || stuck < 3 || now < this.nextHorn) return;
+    this.nextHorn = now + 3 + Math.random() * 10 / Math.min(4, stuck / 3);
+    // A car horn: two detuned square tones, filtered, short (sometimes twice).
+    const beeps = Math.random() < 0.35 ? 2 : 1;
+    for (let b = 0; b < beeps; b++) {
+      const t0 = now + b * 0.3;
+      const len = 0.18 + Math.random() * 0.25;
+      const env = this.ctx.createGain();
+      env.gain.setValueAtTime(0, t0);
+      env.gain.linearRampToValueAtTime(0.03 * Math.min(1, l * 1.5), t0 + 0.02);
+      env.gain.setValueAtTime(0.03 * Math.min(1, l * 1.5), t0 + len);
+      env.gain.linearRampToValueAtTime(0, t0 + len + 0.04);
+      const lp = this.ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = 1500;
+      lp.connect(env).connect(this.ctx.destination);
+      const base = 380 + Math.random() * 120;
+      for (const hz of [base, base * 1.26]) {
+        const o = this.ctx.createOscillator();
+        o.type = 'square';
+        o.frequency.value = hz;
+        o.connect(lp);
+        o.start(t0);
+        o.stop(t0 + len + 0.05);
+      }
+    }
+  }
+
+  // Each frame: the wind (0 calm .. ~1.5) and how much birdsong to play (0 none .. 1, by day near
+  // the ground). A chirp is two or three quick rising notes.
+  ambience(wind: number, birds: number): void {
+    if (!this.ctx || !this.windGain) return;
+    const now = this.ctx.currentTime;
+    this.windGain.gain.setTargetAtTime(this.muted ? 0 : 0.012 + 0.03 * wind, now, 0.5);
+    if (this.muted || birds <= 0 || now < this.nextChirp) return;
+    this.nextChirp = now + 1.5 + Math.random() * 4 / birds;
+    const base = 2600 + Math.random() * 1400;
+    const notes = 2 + Math.floor(Math.random() * 2);
+    for (let k = 0; k < notes; k++) this.chirp(base * (1 + 0.08 * k), k * 0.11, 0.022 * birds);
+  }
+
+  private chirp(hz: number, delay: number, peak: number): void {
+    const ctx = this.ctx!;
+    const t0 = ctx.currentTime + delay;
+    const osc = ctx.createOscillator();
+    osc.frequency.setValueAtTime(hz, t0);
+    osc.frequency.exponentialRampToValueAtTime(hz * 1.35, t0 + 0.07);
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0, t0);
+    env.gain.linearRampToValueAtTime(peak, t0 + 0.01);
+    env.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.09);
+    osc.connect(env).connect(ctx.destination);
+    osc.start(t0);
+    osc.stop(t0 + 0.1);
   }
 
   // New call: two rising sine notes.

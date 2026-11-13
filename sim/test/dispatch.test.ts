@@ -109,7 +109,7 @@ describe('dispatch', () => {
     expect(scoreFor('medium', Infinity)).toBe(100);
     expect(scoreFor('critical', Infinity)).toBeGreaterThan(scoreFor('low', Infinity));
     expect(scoreFor('critical', 0)).toBeGreaterThan(scoreFor('low', 0));
-  });
+  }, 30_000); // about 2 s alone; over the 5 s default when the whole suite runs at once
 
   it('filters suitable idle units and sorts them by live ETA', () => {
     const sim = quietSimulation();

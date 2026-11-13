@@ -1,6 +1,6 @@
 import { Simulation, FIXED_DT, DEFAULT_CONFIG, BLOCK_JUNCTION_M, STATION_KINDS, type Incident, type IncidentKind } from './sim';
 import type { Site } from './city/sites';
-import { View3D, INCIDENT_HEX } from './render3d/view3d';
+import { View3D, INCIDENT_HEX, BUS_LINE_HEX, type CallScene } from './render3d/view3d';
 import { OdHeatmap } from './render3d/odHeatmap';
 import { DISTRICTS } from './demand/districts';
 import { formatClock, periodAt, HOUR, type Period } from './core/time';
@@ -9,7 +9,9 @@ import { VEHICLE_KINDS, VEHICLE_SPECS, type EmergencyKind, type VehicleKind } fr
 import { DispatchCenter, sortCallsByPriority, type CallKind, type DispatchMode, type EmergencyCall } from './dispatch/dispatch';
 import { responseChart, formatMinutes } from './ui/responseChart';
 import { SirenAudio } from './render3d/sirenAudio';
-import type { Vehicle } from './traffic/traffic';
+import { callIcon } from './ui/icons';
+import { Tutorial } from './ui/tutorial';
+import type { Vehicle, Weather } from './traffic/traffic';
 
 // ?start=7.75 opens at 07:45 with the previous 30 sim minutes already run,
 // so the roads are loaded instead of empty (useful for demos).
@@ -106,6 +108,8 @@ startDispatchBtn.onclick = () => {
   }
   playedKey = bestKey();
   resultShown = false;
+  sirenTrips.clear();
+  lastSirenTrip.clear();
   dispatch = new DispatchCenter(sim, {
     mode: modeValue,
     shiftDurationSeconds: modeValue === 'sandbox' ? Infinity : shift.duration * HOUR, // sandbox runs until the menu
@@ -122,11 +126,12 @@ startDispatchBtn.onclick = () => {
   paused = false;
   pauseBtn.disabled = false;
   pauseBtn.textContent = 'Pause';
-  speedSel.value = modeValue === 'sandbox' ? '60' : '20'; // a 2-hour shift in about 6 real minutes
+  speedSel.value = '5'; // 5x by default in both modes (a 2-hour shift takes 24 real minutes); 1-5 keys change it
   endDispatchBtn.textContent = modeValue === 'sandbox' ? 'End session' : 'End shift';
   $('dispatchMenu').hidden = true;
   $('dispatchActive').hidden = modeValue === 'sandbox';
   if (modeValue === 'sandbox') showSandbox();
+  else tutorial.start();
   syncDispatchPanel();
   updateSidebar();
 };
@@ -227,6 +232,9 @@ mapEl.addEventListener('pointerup', (e) => {
     // A click on a unit rides along with it.
     const unit = view.pickVehicle(e.clientX, e.clientY, isUnit);
     if (unit) rideAlong(unit.trip.id);
+    // With the bus lines shown, a click on a bus follows it.
+    const bus = unit || !view.showBusLines ? null : view.pickVehicle(e.clientX, e.clientY, (v) => v.trip.kind === 'bus');
+    if (bus) followBus(bus.trip.id);
     return;
   }
   if (placing !== null) {
@@ -298,8 +306,8 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === 'Tab' && dispatch?.mode === 'dispatcher' && dispatch.ended === null && !inControl) {
-    // Next waiting call, soonest to expire first (the list's order), wrapping round.
-    const waiting = dispatch.calls.filter(needsUnitAssignment).sort((a, b) => a.expiresAt - b.expiresAt);
+    // Next waiting call in the list's order (critical first, then soonest to expire), wrapping round.
+    const waiting = sortCallsByPriority(dispatch.calls.filter(needsUnitAssignment), sim.time);
     if (waiting.length > 0) {
       const k = waiting.findIndex((call) => call.id === selectedCallId);
       selectedCallId = waiting[(k + 1) % waiting.length].id;
@@ -333,6 +341,15 @@ window.addEventListener('keydown', (e) => {
   }
   if (!inControl && key === 'b') {
     boidsBtn.click();
+    return;
+  }
+  if (!inControl && key === 'l') {
+    busLinesBtn.click();
+    return;
+  }
+  if (!inControl && key === 'w') {
+    weatherSel.selectedIndex = (weatherSel.selectedIndex + 1) % weatherSel.options.length;
+    weatherSel.dispatchEvent(new Event('change'));
     return;
   }
   if (!inControl && key === 'm') {
@@ -378,6 +395,47 @@ jamBtn.onclick = () => {
 $('reset').onclick = () => location.reload();
 
 // Ride along: the chase camera follows a unit until it arrives (Esc stops).
+// Call scenes on the map: units on scene parked with their lights going, fires burning until
+// they are put out, police tape at crime scenes.
+function syncScenes(): void {
+  const scenes: CallScene[] = [];
+  for (const call of dispatch?.calls ?? []) {
+    const open = call.state === 'created' || call.state === 'assigned' || call.state === 'en_route';
+    const units = dispatch!.units.filter((u) => u.state === 'on_scene' && u.callId === call.id).map((u) => u.kind);
+    const burning = call.kind === 'fire' && open;
+    if (units.length === 0 && !burning) continue;
+    scenes.push({ id: call.id, kind: call.kind, site: call.site, units, burning });
+  }
+  view.setScenes(scenes);
+}
+
+// First-shift tutorial: a card over the map that moves on as the player does each step.
+const tutorial = new Tutorial($('three-container').parentElement!);
+$('replayTutorial').onclick = () => {
+  try {
+    localStorage.removeItem('dispatch.tutorialDone');
+  } catch {
+    // storage blocked: it shows every shift anyway
+  }
+  setPickHint('The tutorial will show on your next dispatcher shift', 3000);
+};
+function updateTutorial(): void {
+  if (!tutorial.active || !dispatch || dispatch.mode !== 'dispatcher') return;
+  if (dispatch.ended !== null) {
+    tutorial.finish();
+    return;
+  }
+  tutorial.update({
+    calls: dispatch.calls.length,
+    selected: selectedCallId !== null,
+    sent: dispatch.units.some((u) => u.state === 'en_route'),
+    following: view.following,
+  });
+}
+
+// Siren trips this shift, for the yielding stats in the unit list and on the end screen.
+const sirenTrips = new Set<number>();
+const lastSirenTrip = new Map<number, number>(); // unit id -> its latest siren trip
 const isUnit = (v: Vehicle) => v.trip.kind === 'ambulance' || v.trip.kind === 'fire' || v.trip.kind === 'police';
 let lastSent: number | null = null; // the unit most recently sent from the keyboard
 function rideAlong(tripId: number): void {
@@ -418,6 +476,96 @@ $('dispatchUnits').addEventListener('click', (e) => {
   const unit = id === undefined ? undefined : dispatch?.units[Number(id)];
   if (unit?.tripId != null && sim.traffic.vehicleOf(unit.tripId)) rideAlong(unit.tripId);
 });
+
+// Bus lines (L): each line's route and stops on the map, a pin over every bus, and a list of
+// the buses on the road with a button to follow one.
+const busLinesBtn = $('busLines') as HTMLButtonElement;
+const busPanel = $('busPanel');
+const busList = $('busList');
+busLinesBtn.onclick = () => {
+  view.showBusLines = !view.showBusLines;
+  busLinesBtn.setAttribute('aria-pressed', String(view.showBusLines));
+  busPanel.hidden = !view.showBusLines;
+  renderBusList();
+};
+function busName(tripId: number): string {
+  const veh = sim.traffic.vehicleOf(tripId);
+  const at = veh ? sim.busLineOf(veh.trip) : null;
+  return at ? `BUS · LINE ${at.line + 1}` : 'BUS';
+}
+function followBus(tripId: number): void {
+  endPicking();
+  endPlacing();
+  followingEmergency = false;
+  selectedEmergencyUnitId = null;
+  view.setEmergencyRoute(null);
+  view.follow(tripId, busName(tripId));
+  setPickHint(`Following the ${busName(tripId).toLowerCase().replace(' · ', ' on ')} · drag to look around · Esc to stop`, 4000);
+  renderBusList();
+}
+// Which way a route runs, as a compass heading (the map has north up, y down).
+function heading(route: number[]): string {
+  const net = sim.grid.net;
+  const a = net.nodes[net.links[route[0]].from];
+  const b = net.nodes[net.links[route[route.length - 1]].to];
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  return Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'eastbound' : 'westbound') : dy > 0 ? 'southbound' : 'northbound';
+}
+function renderBusList(): void {
+  if (busPanel.hidden) return;
+  const buses = [...sim.traffic.vehicles].filter((v) => v.trip.kind === 'bus');
+  const followed = view.followedTrip;
+  busList.replaceChildren();
+  sim.busLines.forEach((line, k) => {
+    const head = document.createElement('div');
+    head.className = 'line';
+    const sw = document.createElement('span');
+    sw.className = 'swatch';
+    sw.style.background = `#${BUS_LINE_HEX[k % BUS_LINE_HEX.length].toString(16).padStart(6, '0')}`;
+    const onLine = buses.filter((v) => sim.busLineOf(v.trip)?.line === k);
+    head.append(sw, `Line ${k + 1} · ${heading(line.routes[0]).replace('bound', '')}–${heading(line.routes[1]).replace('bound', '')} · ${onLine.length} bus${onLine.length === 1 ? '' : 'es'}`);
+    busList.append(head);
+    if (onLine.length === 0) {
+      const none = document.createElement('div');
+      none.className = 'none';
+      none.textContent = 'none on the road (buses run 06:00–22:00)';
+      busList.append(none);
+    }
+    for (const v of onLine) {
+      const at = sim.busLineOf(v.trip)!;
+      const stops = line.stops[at.dir].length;
+      const row = document.createElement('div');
+      row.className = 'bus' + (followed === v.trip.id ? ' following' : '');
+      const state = v.dwellUntil >= 0 ? 'at a stop' : v.v < 0.5 ? 'waiting' : `${Math.round(v.v * 3.6)} km/h`;
+      const text = document.createElement('span');
+      text.textContent = `${heading(line.routes[at.dir])} · stop ${Math.min(v.stopAt + 1, stops)}/${stops} · ${state}`;
+      const btn = document.createElement('button');
+      btn.textContent = followed === v.trip.id ? 'Following' : 'Follow';
+      btn.disabled = followed === v.trip.id;
+      btn.onclick = () => followBus(v.trip.id);
+      row.append(text, btn);
+      busList.append(row);
+    }
+  });
+}
+setInterval(renderBusList, 1000);
+
+// Weather (W): kept in the page address so a shift restart keeps it.
+const weatherSel = $('weather') as HTMLSelectElement;
+function setWeather(w: Weather): void {
+  sim.weather = w;
+  view.setWeather(w);
+  weatherSel.value = w;
+  if (w === 'clear') pageParams.delete('weather');
+  else pageParams.set('weather', w);
+  history.replaceState(null, '', `${location.pathname}?${pageParams.toString()}`);
+}
+weatherSel.onchange = () => setWeather(weatherSel.value as Weather);
+{
+  const w = pageParams.get('weather');
+  if (w === 'rain' || w === 'fog') setWeather(w);
+}
 
 // Boids debug view (B).
 const boidsBtn = $('boids') as HTMLButtonElement;
@@ -580,7 +728,7 @@ muteBtn.onclick = () => {
   sirens.unlock();
   sirens.muted = !sirens.muted;
   muteBtn.setAttribute('aria-pressed', String(sirens.muted));
-  muteBtn.textContent = sirens.muted ? 'Muted' : 'Sound on';
+  muteBtn.textContent = sirens.muted ? '🔇 Muted' : '🔊 Sound';
 };
 window.addEventListener('pointerdown', () => sirens.unlock());
 // Graphics quality (G): high draws the Kenney vehicle models, low the simple built-in ones. Kept
@@ -752,10 +900,11 @@ function needsUnitAssignment(call: EmergencyCall): boolean {
   return (call.state === 'created' || call.state === 'assigned' || call.state === 'en_route') && missingCallNeeds(call).length > 0;
 }
 
-// The open call with the earliest deadline that still needs a unit.
+// The open call that still needs a unit and comes first in the list (critical first, then the
+// earliest deadline), so Tab, Enter and the list agree.
 function nextWaitingCall(): number | null {
   const waiting = dispatch?.calls.filter(needsUnitAssignment) ?? [];
-  return waiting.length > 0 ? waiting.reduce((a, b) => (b.expiresAt < a.expiresAt ? b : a)).id : null;
+  return waiting.length > 0 ? sortCallsByPriority(waiting, sim.time)[0].id : null;
 }
 
 function followEmergencyUnit(unitId: number): void {
@@ -806,7 +955,7 @@ function syncDispatchPanel(): void {
       const button = document.createElement('button');
       button.className = `dispatch-call ${call.state === 'created' ? 'waiting' : ''} severity-${call.severity}`;
       const what = document.createElement('b');
-      what.textContent = `${call.kind.toUpperCase()} · ${call.site.address}`;
+      what.append(callIcon(call.kind), ` ${call.kind.toUpperCase()} · ${call.site.address}`);
       const severity = document.createElement('span');
       severity.className = 'call-severity';
       severity.textContent = call.severity;
@@ -918,6 +1067,24 @@ function syncDispatchPanel(): void {
   const unitRows = dispatch.units.map((unit) => {
     const li = listItem('var(--accent)', `${unit.kind} ${unit.id + 1} · ${unit.state.replace('_', ' ')}`, unit.location.address);
     li.dataset.unit = String(unit.id);
+    li.classList.add('unit-row');
+    // Yielding on this unit's siren trips: live while driving, then the last run's total.
+    if (unit.tripId !== null && sim.unitStats(unit.tripId)) {
+      sirenTrips.add(unit.tripId);
+      lastSirenTrip.set(unit.id, unit.tripId);
+    }
+    const last = lastSirenTrip.get(unit.id);
+    const stats = last === undefined ? null : sim.unitStats(last);
+    if (stats) {
+      const note = document.createElement('div');
+      note.className = 'yield-note';
+      const cars = `${stats.carsYielded} car${stats.carsYielded === 1 ? '' : 's'} made way`;
+      const held = stats.junctionsHeld > 0 ? ` · ${stats.junctionsHeld} junction${stats.junctionsHeld === 1 ? '' : 's'} held` : '';
+      note.textContent = stats.arrivedAt === null
+        ? `On the way: ${cars}${held}`
+        : `Last run: ${cars}${held}${stats.savedS !== null && stats.savedS > 0 ? ` · saved about ${Math.round(stats.savedS)} s` : ''}`;
+      li.append(note);
+    }
     if (unit.tripId !== null && sim.traffic.vehicleOf(unit.tripId)) {
       li.classList.add('rideable');
       li.title = 'Ride along';
@@ -1026,6 +1193,26 @@ function showResult(center: DispatchCenter, outcome: string): void {
     best.textContent = prev ? `Best: ${prev.points.toLocaleString()} points, grade ${prev.grade}` : '';
     best.classList.remove('new');
   }
+  // What yielding did for this shift's units (see sim.unitStats; the saving reads low).
+  let cars = 0;
+  let saved = 0;
+  let runs = 0;
+  for (const id of sirenTrips) {
+    const s = sim.unitStats(id);
+    if (!s) continue;
+    cars += s.carsYielded;
+    runs++;
+    if (s.savedS !== null && s.savedS > 0) saved += s.savedS;
+  }
+  const yieldBox = $('resultYield');
+  yieldBox.replaceChildren();
+  if (runs > 0) {
+    const b1 = document.createElement('b');
+    b1.textContent = `${cars} car${cars === 1 ? '' : 's'}`;
+    const b2 = document.createElement('b');
+    b2.textContent = `about ${(saved / 60).toFixed(1)} min`;
+    yieldBox.append('Yielding: ', b1, ` made way for your units on ${runs} siren run${runs === 1 ? '' : 's'}, saving `, b2, ' of driving this shift (a cautious estimate: it counts only time saved on the streets, not at junctions or driveways).');
+  }
   const chartBox = $('responseChart');
   chartBox.replaceChildren(responseChart(center.calls, Math.max(200, chartBox.clientWidth || 288)));
   const done = center.calls.filter((c) => c.state === 'resolved' || c.state === 'missed');
@@ -1071,7 +1258,7 @@ function showAlert(call: EmergencyCall, missed: boolean): void {
   const alert = document.createElement('button');
   alert.className = missed ? 'call-alert missed' : 'call-alert';
   const head = document.createElement('b');
-  head.textContent = missed ? `Missed: ${CALL_LABEL[call.kind].toLowerCase()} call` : `${CALL_LABEL[call.kind]} call · ${districtOf(call)}`;
+  head.append(callIcon(call.kind, 13), ` ${missed ? `Missed: ${CALL_LABEL[call.kind].toLowerCase()} call` : `${CALL_LABEL[call.kind]} call · ${districtOf(call)}`}`);
   const body = document.createElement('span');
   body.textContent = missed ? `${call.site.address} · no unit got there in time` : `${call.site.address} · click to show`;
   alert.append(head, body);
@@ -1120,11 +1307,11 @@ function syncCallMarkers(): void {
     if (!el) {
       el = document.createElement('button');
       el.onclick = () => selectCall(call.id, true);
-      el.append(document.createElement('span'));
+      el.append(callIcon(call.kind, 11), document.createElement('span'));
       layer.append(el);
       markers.set(call.id, el);
     }
-    const label = el.firstElementChild as HTMLSpanElement;
+    const label = el.querySelector('span') as HTMLSpanElement;
     const p = view.screenPoint(call.site.door.x, call.site.door.y, 2);
     const waiting = call.state === 'created';
     set(el, 'title', `${CALL_LABEL[call.kind]} call · ${call.severity} severity · ${call.site.address} · ${waiting ? 'waiting' : 'unit on the way'}`);
@@ -1296,13 +1483,19 @@ function frame(now: number): void {
   perf.simMs = smooth(perf.simMs, drawStart - simStart);
   view.render(now);
   sirens.update(view.nearestSiren(), !paused && !warming);
+  const amb = view.ambience();
+  sirens.ambience(amb.wind, amb.birds);
+  const city = view.trafficSound();
+  sirens.traffic(paused || warming ? 0 : city.level, city.wet, city.stuck);
   handleDispatchEvents();
   syncCallMarkers();
+  updateTutorial();
   perf.drawMs = smooth(perf.drawMs, performance.now() - drawStart);
   if (now - lastSidebar > SIDEBAR_MS) {
     lastSidebar = now;
     updateSidebar();
     syncCoverage();
+    syncScenes();
     $('perf').textContent =
       `${perf.fps.toFixed(0)} fps · sim ${perf.simMs.toFixed(1)} ms · draw ${perf.drawMs.toFixed(1)} ms · ` +
       `${view.renderer.info.render.calls} draw calls · ${sim.traffic.vehicles.size} cars`;

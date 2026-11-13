@@ -1,14 +1,15 @@
 import { mulberry32 } from './core/rng';
 import { HOUR } from './core/time';
 import { buildGrid, DEFAULT_GRID, nearestJunction, type Grid, type GridOptions } from './network/grid';
+import { freeFlowTime } from './network/network';
 import { generateZones, type Zone } from './demand/zones';
 import { zoneCostMatrix } from './demand/od';
 import { TripGenerator, type BusStop, type Trip } from './demand/trips';
 import { Router, type RouteResult } from './routing/router';
-import { TrafficModel, type Vehicle } from './traffic/traffic';
+import { TrafficModel, WEATHER, type Vehicle, type Weather } from './traffic/traffic';
 import { blockDistricts, DISTRICTS } from './demand/districts';
 import { buildCity, siteAccess, type Access, type BlockStyle, type CityLayout, type Site, type SiteKind } from './city/sites';
-import type { EmergencyKind } from './traffic/vehicleTypes';
+import { isEmergency, type EmergencyKind } from './traffic/vehicleTypes';
 
 // Perturbations the user can place on a street. An accident blocks a short stretch of one lane
 // and a lane closure a longer one; cars get past through the oncoming lane, one side at a time.
@@ -57,6 +58,14 @@ const BUS_LAST_H = 22;
 const BUS_STOP_SPACING_M = 400;
 const BUS_STOP_JUNCTION_M = 30;
 const REROUTE_MARGIN_S = 20;
+// Cars on the road look again at their route on live costs (W12): every LIVE_REROUTE_EVERY_S,
+// cars whose remaining route runs through a slow street (live time over SLOW_RATIO times free
+// flow) switch to a new way if it saves REROUTE_MARGIN_S and LIVE_REROUTE_GAIN of the rest of the
+// trip. About LIVE_REROUTE_MAX cars are looked at per check, a different share each time.
+const LIVE_REROUTE_EVERY_S = 20;
+const SLOW_RATIO = 3;
+const LIVE_REROUTE_GAIN = 0.2;
+const LIVE_REROUTE_MAX = 60;
 
 // What yielding did for one unit trip with its siren on. `normalEta` is the live-traffic time for
 // the same trip driven like an ordinary car (what it would take without a siren); `savedS` is that
@@ -166,6 +175,21 @@ export class Simulation {
   rerouteQueues = true;
   queueReroutes = 0; // routes changed that way so far
   private nextQueueReroute = 0;
+  // Clear, rain or fog: changes how fast and how close cars drive (see WEATHER).
+  private weatherNow: Weather = 'clear';
+  get weather(): Weather {
+    return this.weatherNow;
+  }
+  set weather(w: Weather) {
+    this.weatherNow = w;
+    this.traffic.weather = WEATHER[w];
+  }
+
+  // Re-plan cars on the road whose route runs into slow streets (A5, W12); off gives the A4 behaviour.
+  rerouteLive = true;
+  liveReroutes = 0; // routes changed that way so far
+  private nextLiveReroute = 0;
+  private liveChecks = 0;
 
   constructor(readonly config: SimConfig = DEFAULT_CONFIG) {
     const rng = mulberry32(config.seed);
@@ -220,18 +244,33 @@ export class Simulation {
     const arterialCols: number[] = [];
     for (let r = 1; r < rows - 1; r++) if ((((r - ring) % arterialEvery) + arterialEvery) % arterialEvery === 0) arterialRows.push(r);
     for (let c = 1; c < cols - 1; c++) if ((((c - ring) % arterialEvery) + arterialEvery) % arterialEvery === 0) arterialCols.push(c);
-    const mid = (xs: number[]) => xs[Math.floor(xs.length / 2)];
-    const ends: [number, number][] = [];
-    if (arterialRows.length > 0) ends.push([this.grid.nodeAt(mid(arterialRows), 0), this.grid.nodeAt(mid(arterialRows), cols - 1)]);
-    if (arterialCols.length > 0) ends.push([this.grid.nodeAt(0, mid(arterialCols)), this.grid.nodeAt(rows - 1, mid(arterialCols))]);
-    if (arterialRows.length > 1) {
-      const r = arterialRows[Math.max(0, arterialRows.indexOf(mid(arterialRows)) - 1)];
-      ends.push([this.grid.nodeAt(r, 0), this.grid.nodeAt(r, cols - 1)]);
+    // Each line runs along the arterials through waypoints, so it turns through the city rather
+    // than running straight across: two cross downtown with a dog-leg, one bends at a corner.
+    const at = (r: number, c: number) => this.grid.nodeAt(r, c);
+    const pick = (xs: number[], k: number) => xs[Math.max(0, Math.min(xs.length - 1, k))];
+    const m = (xs: number[]) => Math.floor(xs.length / 2);
+    const R = arterialRows;
+    const C = arterialCols;
+    const plans: number[][] = [];
+    if (R.length > 0 && C.length > 0) {
+      // West to east: along one arterial row, across downtown on the middle column, on along the next.
+      plans.push([at(pick(R, m(R) - 1), 0), at(pick(R, m(R) - 1), pick(C, m(C))), at(pick(R, m(R) + 1), pick(C, m(C))), at(pick(R, m(R) + 1), cols - 1)]);
+      // North to south, the same way round on the columns.
+      plans.push([at(0, pick(C, m(C) - 1)), at(pick(R, m(R)), pick(C, m(C) - 1)), at(pick(R, m(R)), pick(C, m(C) + 1)), at(rows - 1, pick(C, m(C) + 1))]);
+      // From the west edge along the first arterial row, then down the last arterial column.
+      plans.push([at(R[0], 0), at(R[0], C[C.length - 1]), at(rows - 1, C[C.length - 1])]);
     }
+    // Buses keep to the arterials between waypoints.
+    const busRouter = new Router(this.grid.net, (link) => link.length * (link.arterial ? 1 : 20));
+    const via = (points: number[]): number[] => {
+      const out: number[] = [];
+      for (let k = 0; k + 1 < points.length; k++) if (points[k] !== points[k + 1]) out.push(...busRouter.route(points[k], points[k + 1]));
+      return out;
+    };
     const lines: BusLine[] = [];
-    for (const [a, b] of ends) {
-      const there = this.distanceRouter.route(a, b);
-      const back = this.distanceRouter.route(b, a);
+    for (const points of plans) {
+      const there = via(points);
+      const back = via([...points].reverse());
       if (there.length < 3 || back.length < 3) continue;
       lines.push({ id: lines.length + 1, routes: [there, back], stops: [this.busStops(there), this.busStops(back)] });
     }
@@ -255,6 +294,16 @@ export class Simulation {
     return stops;
   }
 
+  // The line (index into busLines) and direction (0 or 1) a bus trip runs, or null.
+  busLineOf(trip: Trip): { line: number; dir: 0 | 1 } | null {
+    if (!trip.stops) return null;
+    for (let k = 0; k < this.busLines.length; k++) {
+      const d = this.busLines[k].stops.indexOf(trip.stops);
+      if (d >= 0) return { line: k, dir: d as 0 | 1 };
+    }
+    return null;
+  }
+
   // Every bus stop, both ways on every line.
   get allBusStops(): BusStop[] {
     return this.busLines.flatMap((l) => [...l.stops[0], ...l.stops[1]]);
@@ -271,11 +320,15 @@ export class Simulation {
         let route = line.routes[d];
         const net = this.grid.net;
         const last = route[route.length - 1];
-        // Round a closed street (its stops there are skipped), as other traffic would.
-        if (route.slice(1, -1).some((id) => this.traffic.isClosed(id))) {
-          const reverse = net.reverse(last);
-          const detour = this.router.routeWithCost(net.links[route[0]].to, net.links[last].from, reverse === undefined ? [] : [reverse]);
-          if (detour.cost < CLOSED_COST && detour.links[0] !== net.reverse(route[0])) route = [route[0], ...detour.links, last];
+        // Round a closed stretch (its stops there are skipped), as other traffic would: from the
+        // junction before it to the one after it, then back on the line, with no U-turn at either end.
+        const closedAt = route.map((id, i) => (this.traffic.isClosed(id) ? i : -1)).filter((i) => i > 0 && i < route.length - 1);
+        if (closedAt.length > 0) {
+          const i = closedAt[0];
+          const j = closedAt[closedAt.length - 1];
+          const skip = [net.reverse(route[i - 1]), net.reverse(route[j + 1])].filter((x): x is number => x !== undefined);
+          const detour = this.router.routeWithCost(net.links[route[i - 1]].to, net.links[route[j + 1]].from, skip);
+          if (detour.cost < CLOSED_COST) route = [...route.slice(0, i), ...detour.links, ...route.slice(j + 1)];
         }
         this.traffic.enqueue(
           {
@@ -313,6 +366,10 @@ export class Simulation {
     if (this.rerouteQueues && this.time >= this.nextQueueReroute) {
       this.nextQueueReroute = this.time + REROUTE_EVERY_S;
       this.rerouteAroundBlockages();
+    }
+    if (this.rerouteLive && this.time >= this.nextLiveReroute) {
+      this.nextLiveReroute = this.time + LIVE_REROUTE_EVERY_S;
+      this.rerouteAroundSlowStreets();
     }
     this.dispatch?.step(this.time);
     this.totalTrips += spawned.length;
@@ -538,6 +595,30 @@ export class Simulation {
     this.queueReroutes += this.traffic.reroute(blocked, this.planTail, {
       skipUnits: true,
       accept: (oldTail, newTail) => this.router.pathCost(newTail) < this.router.pathCost(oldTail) - REROUTE_MARGIN_S,
+    });
+  }
+
+  // Cars whose remaining route runs through a slow street switch to a faster way if one now
+  // exists on live costs. Buses keep their lines and units their own routes.
+  private rerouteAroundSlowStreets(): void {
+    const slow = new Set<number>();
+    for (const link of this.grid.net.links) {
+      if (this.traffic.isClosed(link.id)) continue;
+      const live = link.length / Math.max(1, this.traffic.linkMeanSpeed(link.id));
+      if (live > SLOW_RATIO * freeFlowTime(link)) slow.add(link.id);
+    }
+    if (slow.size === 0) return;
+    const share = Math.max(1, Math.ceil(this.traffic.vehicles.size / LIVE_REROUTE_MAX));
+    const turn = this.liveChecks++ % share;
+    this.liveReroutes += this.traffic.reroute(slow, this.planTail, {
+      skipUnits: true,
+      skipBacklog: true,
+      pick: (veh) => veh.trip.kind !== 'bus' && !isEmergency(veh.trip.kind) && veh.trip.id % share === turn,
+      accept: (oldTail, newTail) => {
+        const before = this.router.pathCost(oldTail);
+        const after = this.router.pathCost(newTail);
+        return after < before - REROUTE_MARGIN_S && after < before * (1 - LIVE_REROUTE_GAIN);
+      },
     });
   }
 

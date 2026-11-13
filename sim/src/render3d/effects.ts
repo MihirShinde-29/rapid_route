@@ -7,12 +7,15 @@ import * as THREE from 'three';
 const MAX_PARTICLES = 3000;
 const SMOKE_LIFE_S = 4.5;
 const FLAME_LIFE_S = 0.8;
+const WATER_LIFE_S = 1.1;
+const GRAVITY = 1.4; // world units/s² (9.8 m/s² at 0.14 world units a metre)
 
-export type EmitterKind = 'smoke' | 'flame';
+export type EmitterKind = 'smoke' | 'flame' | 'water';
 
 interface Emitter {
   kind: EmitterKind;
   at: THREE.Vector3;
+  dir: THREE.Vector3 | null; // water: launch velocity, world units/s
   rate: number; // particles per second
   size: number; // world units at birth
   carry: number; // fractional particle owed
@@ -33,7 +36,7 @@ interface Particle {
 
 // A lamp that flashes on a pattern: on while (t + phase) mod period < duty.
 interface Lamp {
-  material: THREE.MeshBasicMaterial;
+  material: { color: THREE.Color };
   on: THREE.Color;
   off: THREE.Color;
   period: number; // ms
@@ -50,7 +53,7 @@ export class Effects {
   private col = new Float32Array(MAX_PARTICLES * 4);
   private sizes = new Float32Array(MAX_PARTICLES);
   private lamps = new Map<string, Lamp[]>();
-  private flares = new Map<string, THREE.Mesh[]>();
+  private flares = new Map<string, THREE.Object3D[]>();
   private last = performance.now();
 
   constructor(scene: THREE.Scene) {
@@ -88,16 +91,18 @@ export class Effects {
   }
 
   // Start (or move) an emitter. `rate` is particles per second at full strength.
-  emit(id: string, kind: EmitterKind, at: THREE.Vector3, opts: { rate?: number; size?: number } = {}): void {
+  emit(id: string, kind: EmitterKind, at: THREE.Vector3, opts: { rate?: number; size?: number; dir?: THREE.Vector3 } = {}): void {
     const e = this.emitters.get(id);
     const rate = opts.rate ?? (kind === 'smoke' ? 6 : 30);
     const size = opts.size ?? (kind === 'smoke' ? 0.35 : 0.22);
+    const dir = opts.dir?.clone() ?? null;
     if (e) {
       e.at.copy(at);
       e.rate = rate;
       e.size = size;
+      e.dir = dir;
     } else {
-      this.emitters.set(id, { kind, at: at.clone(), rate, size, carry: 0 });
+      this.emitters.set(id, { kind, at: at.clone(), dir, rate, size, carry: 0 });
     }
   }
 
@@ -108,7 +113,7 @@ export class Effects {
 
   // Flash a set of materials on a pattern (see Lamp). Replaces any lamps under the same id.
   // `stagger` delays each lamp after the first (a sequence); `offset` delays them all.
-  flash(id: string, materials: THREE.MeshBasicMaterial[], on: number, off: number, period: number, duty: number, stagger = 0, offset = 0): void {
+  flash(id: string, materials: { color: THREE.Color }[], on: number, off: number, period: number, duty: number, stagger = 0, offset = 0): void {
     this.lamps.set(
       id,
       materials.map((material, k) => ({ material, on: new THREE.Color(on), off: new THREE.Color(off), period, duty, phase: offset + k * stagger })),
@@ -116,15 +121,17 @@ export class Effects {
   }
 
   // Road flares: meshes whose brightness flickers.
-  flicker(id: string, meshes: THREE.Mesh[]): void {
+  flicker(id: string, meshes: (THREE.Mesh | THREE.Sprite)[]): void {
     this.flares.set(id, meshes);
   }
 
   // Forget the lamps and flares under an id (the meshes belong to the caller).
+  // Also everything under ids that start with `id:`.
   clear(id: string): void {
-    this.lamps.delete(id);
-    this.flares.delete(id);
-    this.stop(id);
+    const under = (k: string) => k === id || k.startsWith(`${id}:`);
+    for (const m of [this.lamps, this.flares, this.emitters] as Map<string, unknown>[]) {
+      for (const k of [...m.keys()]) if (under(k)) m.delete(k);
+    }
   }
 
   update(): void {
@@ -138,7 +145,7 @@ export class Effects {
       for (const m of meshes) {
         const s = 0.75 + 0.25 * Math.sin(now / 37 + m.id) * Math.sin(now / 91 + 2 * m.id);
         m.scale.setScalar(s);
-        (m.material as THREE.MeshBasicMaterial).opacity = 0.55 + 0.4 * s;
+        ((m as THREE.Mesh).material as THREE.Material).opacity = 0.55 + 0.4 * s;
       }
     }
     this.points.visible = this.enabled;
@@ -152,6 +159,16 @@ export class Effects {
         e.carry--;
         const smoke = e.kind === 'smoke';
         const spread = e.size * 0.6;
+        if (e.kind === 'water' && e.dir) {
+          // A jet: the launch velocity with a little spread, then falling under gravity.
+          const j = e.dir.length() * 0.06;
+          this.particles.push({
+            kind: 'water', x: e.at.x, y: e.at.y, z: e.at.z,
+            vx: e.dir.x + (Math.random() - 0.5) * j, vy: e.dir.y + (Math.random() - 0.5) * j, vz: e.dir.z + (Math.random() - 0.5) * j,
+            age: 0, life: WATER_LIFE_S * (0.8 + Math.random() * 0.4), size: e.size * (0.8 + Math.random() * 0.4),
+          });
+          continue;
+        }
         this.particles.push({
           kind: e.kind,
           x: e.at.x + (Math.random() - 0.5) * spread,
@@ -171,6 +188,7 @@ export class Effects {
     for (const p of this.particles) {
       p.age += dt;
       if (p.age >= p.life) continue;
+      if (p.kind === 'water') p.vy -= GRAVITY * dt;
       p.x += p.vx * dt;
       p.y += p.vy * dt;
       p.z += p.vz * dt;
@@ -179,7 +197,11 @@ export class Effects {
       this.pos[n * 3] = p.x;
       this.pos[n * 3 + 1] = p.y;
       this.pos[n * 3 + 2] = p.z;
-      if (p.kind === 'smoke') {
+      if (p.kind === 'water') {
+        // Pale blue, fading out as it falls.
+        this.col.set([0.75, 0.88, 1, 0.75 * (1 - f)], n * 4);
+        this.sizes[n] = p.size * (1 + f);
+      } else if (p.kind === 'smoke') {
         // Dark grey, growing and fading as it rises.
         const g = 0.22 + 0.25 * f;
         this.col.set([g, g, g * 1.04, 0.55 * (1 - f) * Math.min(1, f * 8)], n * 4);

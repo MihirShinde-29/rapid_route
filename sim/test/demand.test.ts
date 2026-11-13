@@ -83,7 +83,7 @@ describe('demand', () => {
     while (s.time < t0 + HOUR) s.step();
     const expected = DEFAULT_CONFIG.peakTripsPerHour * volumeFactor(8 * HOUR);
     expect(Math.abs(s.totalTrips - expected) / expected).toBeLessThan(0.1);
-  }, 60_000);
+  }, 180_000); // about 25 s alone; longer when the whole suite runs at once
 
   it('peak is much busier than night', () => {
     expect(volumeFactor(8 * HOUR)).toBeGreaterThan(5 * volumeFactor(3 * HOUR));

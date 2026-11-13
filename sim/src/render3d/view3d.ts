@@ -11,12 +11,15 @@ import type { BlockPlan, Rect as CityRect, Site } from '../city/sites';
 import type { Light } from '../traffic/signals';
 import type { Zone, ZoneType } from '../demand/zones';
 import { hourOf } from '../core/time';
-import { Sky, Terrain } from './environment';
+import { BASE_FOG, Sky, Terrain } from './environment';
+import { Birds, buildTrees, Clouds, wind, type Trees, type TreeSpot } from './nature';
+import type { Weather } from '../traffic/traffic';
 import { StaticBatch } from './batch';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { vehicleGeometry, vehiclePaint } from './vehicles';
-import { loadKenneyKit, type KenneyKit } from './kenney';
+import { vehicleGeometry, vehiclePaint, type VehicleLights } from './vehicles';
+import { loadKenneyKit, type KenneyKit, type KenneyVehicle, type PropName } from './kenney';
 import { Effects } from './effects';
+import { buildKitBuildings, loadCityKit, type BuildingKind, type BuildingSlot, type CityKit, type KitBuildings } from './cityKit';
 import { fillBlock, type FillItem } from './fill';
 import { isEmergency, VEHICLE_KINDS, type VehicleKind } from '../traffic/vehicleTypes';
 
@@ -31,6 +34,15 @@ export const ZONE_HEX: Record<ZoneType, number> = {
 
 const WORLD_PER_M = 0.14; // 100 m block spacing -> 14 world units, as in the prototype
 const BLOCK_INSET = 1.4;
+const CAR_LOD = 45; // world units (~320 m): Kit car models within this of the camera, classic bodies beyond
+const WHEEL_NEAR = 45; // world units (~320 m): model wheels are drawn only for cars this close to the camera
+const RAIN_BOX = 140; // world units across, round the camera's target
+const RAIN_HEIGHT = 60;
+// Blocks stand on the pavement: a kerbed sidewalk from the road edge (top at 0.255) to the block,
+// its top PAVE_TOP up. Everything in a block is drawn PAVE_LIFT higher than it was on the ground.
+const PAVE_LIFT = 0.25;
+const PAVE_TOP = PAVE_LIFT + 0.02;
+const ROAD_HALF = { local: 0.65, arterial: 0.8 };
 const MAX_CARS = 4000;
 const BEACON_NEAR = 40; // world units: siren beacons show beyond this distance from the camera
 const MAX_BOID_VERTS = 24000; // boids debug view line vertices
@@ -38,7 +50,8 @@ const MAX_BOID_VERTS = 24000; // boids debug view line vertices
 // over the last.
 const COVERAGE_STOPS: [number, number][] = [[60, 0x2e9e5b], [180, 0xd9b23a], [360, 0xc0392b]];
 const CAR_WIDTH = 2.2; // m, slightly wide so cars read at city zoom
-const ROAD_COLORS = { local: 0x262d35, arterial: 0x2e3640, slow: 0x9a6a2a, jammed: 0x9a3a2a, closed: 0x6a2448 };
+// Mid-grey asphalt, close to the Car Kit's, so the bright models sit on the road rather than float.
+const ROAD_COLORS = { local: 0x3b4047, arterial: 0x444950, slow: 0x8f6c36, jammed: 0x934234, closed: 0x6a2448 };
 // Incident pins, seen from city zoom; close up the scene shows wrecks, cones or barriers.
 export const INCIDENT_HEX: Record<IncidentKind, number> = { accident: 0xff4d4d, lane: 0xffa53d, closure: 0xc04a8c };
 const LAMP_COLOR = 0xffc27a;
@@ -55,6 +68,33 @@ const PITCH_PER_ACC = 0.012;
 const MAX_PITCH = 0.05;
 const ROLL_PER_ACC = 0.01;
 const MAX_ROLL = 0.06;
+// A box whose top and bottom are the quad `q` (tl, tr, br, bl in world x/z) at heights y0, y1.
+function slab(q: THREE.Vector3[], y0: number, y1: number): THREE.BufferGeometry {
+  const g = new THREE.BoxGeometry(1, 1, 1);
+  const pos = g.attributes.position as THREE.BufferAttribute;
+  for (let i = 0; i < pos.count; i++) {
+    const c = q[pos.getZ(i) < 0 ? (pos.getX(i) < 0 ? 0 : 1) : pos.getX(i) < 0 ? 3 : 2];
+    pos.setXYZ(i, c.x, pos.getY(i) < 0 ? y0 : y1, c.z);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+
+// Bus line colours (line 1, 2, 3), also used by the bus list.
+export const BUS_LINE_HEX = [0xf0a030, 0x2ec4b0, 0xc56ee0];
+
+// The way a building faces its street (rotation about y; 0 faces +z, south on the map).
+const FACE: Record<'n' | 's' | 'e' | 'w', number> = { n: Math.PI, s: 0, e: Math.PI / 2, w: -Math.PI / 2 };
+
+// What a call looks like on the map (see View3D.setScenes).
+export interface CallScene {
+  id: number;
+  kind: 'medical' | 'fire' | 'crime' | 'crash';
+  site: Site;
+  units: EmergencyKind[]; // units on scene
+  burning: boolean; // a fire still going (fire calls until resolved)
+}
+
 export type VehicleStyle = 'models' | 'classic';
 
 type Area = { x0: number; x1: number; z0: number; z1: number }; // world units
@@ -213,14 +253,17 @@ export class View3D {
   private fleet = new Map<
     VehicleKind,
     {
-      body: THREE.InstancedMesh;
+      body: THREE.InstancedMesh; // near the camera: the Kit model (or the classic one on Graphics low)
+      far: THREE.InstancedMesh; // further away: the classic body, a third of the triangles
+      nn: number; // cars in `body`
+      nf: number; // cars in `far`
       lights: THREE.InstancedMesh;
       brake: THREE.InstancedMesh;
       left: THREE.InstancedMesh;
       right: THREE.InstancedMesh;
       sirens: [THREE.InstancedMesh, THREE.InstancedMesh] | null;
       n: number;
-      classic: { body: THREE.BufferGeometry; sirens: [THREE.BufferGeometry, THREE.BufferGeometry] | null };
+      classic: { body: THREE.BufferGeometry; sirens: [THREE.BufferGeometry, THREE.BufferGeometry] | null; lamps: VehicleLights };
       // With the Kenney models: wheels drawn separately, left and right.
       wheels: { left: THREE.InstancedMesh; right: THREE.InstancedMesh; nl: number; nr: number } | null;
     }
@@ -246,6 +289,16 @@ export class View3D {
   private flat = new StaticBatch(); // plates, intersections: receive shadows only
   private solid = new StaticBatch(); // roofs, stacks, trees: cast and receive
   private facades = new StaticBatch(); // building walls with windows
+  // Houses, apartments, towers and warehouses: drawn here in the classic style, and as slots for
+  // the City Kit models that replace them when the kits have loaded (Graphics high).
+  private rSolid = new StaticBatch();
+  private rFacades = new StaticBatch();
+  private replaceable: THREE.Mesh[] = [];
+  private kitSlots = new Map<number, BuildingSlot[]>(); // by block
+  private curSlots: BuildingSlot[] | null = null;
+  private cityKit: CityKit | null = null;
+  private kitBuildings: KitBuildings | null = null;
+  private kitDirty = true;
   private lastCongestion = -Infinity;
   private tmp = new THREE.Object3D();
   private tmpColor = new THREE.Color();
@@ -286,6 +339,8 @@ export class View3D {
   private flatMesh!: THREE.Mesh;
   private solidMesh!: THREE.Mesh;
   private facadesMesh!: THREE.Mesh;
+  private rSolidMesh!: THREE.Mesh;
+  private rFacadesMesh!: THREE.Mesh;
   private blockRanges = new Map<number, [number, number][]>();
   private siteRanges = new Map<number, [number, number][]>();
   private redrawn = new Map<string, THREE.Mesh[]>(); // replacement meshes, by block or site
@@ -296,6 +351,20 @@ export class View3D {
   // Boids debug view: each unit's yield reach along its route, the junctions held for it, and
   // each yielding car's steering arrow (amber pulling over, green merging back).
   showBoids = false;
+  // Trees by block (-1 superblocks, -2 elsewhere, -3 along the streets), birds and clouds.
+  private treeSpots = new Map<number, TreeSpot[]>([[-2, []]]);
+  private curTrees: TreeSpot[] | null = null;
+  private trees: Trees | null = null;
+  private birds!: Birds;
+  private clouds!: Clouds;
+  private lastNatureMs = performance.now();
+  private cloudLight = new THREE.Color();
+  private scenes = new Map<string, { key: string; g: THREE.Group }>();
+  private rain: THREE.LineSegments | null = null;
+  private rainVel = new Float32Array(0);
+  private lastRainMs = performance.now();
+  private busOverlay: THREE.Group | null = null;
+  private busPins: THREE.InstancedMesh | null = null;
   private boidsLines!: THREE.LineSegments;
   // Coverage map: a translucent sheet over the city through every junction, coloured by the
   // seconds from the nearest free unit to it (built on first use).
@@ -311,7 +380,7 @@ export class View3D {
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     container.appendChild(this.renderer.domElement);
 
-    this.scene.fog = new THREE.FogExp2(0x0b1424, 0.0016);
+    this.scene.fog = new THREE.FogExp2(0x0b1424, BASE_FOG);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.target.set(0, 0, 0);
@@ -351,6 +420,11 @@ export class View3D {
     this.buildZones(rng);
     this.buildEntrances();
     this.buildBusStops();
+    this.rebuildTrees();
+    this.birds = new Birds((sim.grid.width * WORLD_PER_M) / 2);
+    this.scene.add(this.birds.mesh);
+    this.clouds = new Clouds(Math.max(sim.grid.width, sim.grid.height) * WORLD_PER_M * 3);
+    this.scene.add(this.clouds.mesh);
     this.buildStreetLamps();
     this.buildSignals();
     this.buildTags();
@@ -369,6 +443,16 @@ export class View3D {
     });
     this.facadesMesh = this.facades.build(this.facadeMat, true, true);
     this.scene.add(this.facadesMesh);
+    this.rSolidMesh = this.rSolid.build(this.solidMat, true, true);
+    this.rFacadesMesh = this.rFacades.build(this.facadeMat, true, true);
+    this.replaceable.push(this.rSolidMesh, this.rFacadesMesh);
+    this.scene.add(this.rSolidMesh, this.rFacadesMesh);
+    loadCityKit(`${import.meta.env.BASE_URL}models/`)
+      .then((kit) => {
+        this.cityKit = kit;
+        this.applyBuildingStyle();
+      })
+      .catch((e) => console.warn('Building models failed to load; keeping the classic ones.', e));
     this.buildArcPool();
     this.effects = new Effects(this.scene);
     this.buildCars();
@@ -446,7 +530,7 @@ export class View3D {
   private buildGround(): void {
     const w = this.sim.grid.width * WORLD_PER_M + 3;
     const h = this.sim.grid.height * WORLD_PER_M + 3;
-    this.flat.add(new THREE.PlaneGeometry(w, h), new THREE.Color(0x3a3f45), 0, 0.01, 0, -Math.PI / 2);
+    this.flat.add(new THREE.PlaneGeometry(w, h), new THREE.Color(0x4a4d51), 0, 0.01, 0, -Math.PI / 2);
   }
 
   // A lamp post at the middle of every street, on alternating sides (both sides on arterials).
@@ -573,12 +657,25 @@ export class View3D {
       // neighbouring plates join up.
       const ins = (on: boolean) => (on ? BLOCK_INSET / WORLD_PER_M : 0);
       const st = plan.streets;
+      // The sidewalk runs out to the road edge on sides with a street.
+      const kerb = (on: boolean, p: number, q: number) => {
+        if (!on) return 0;
+        const link = net.outLinks[p].map((id) => net.links[id]).find((l) => l.to === q);
+        return (link?.arterial ? ROAD_HALF.arterial : ROAD_HALF.local) / WORLD_PER_M;
+      };
+      const walk = [
+        [tl.x + kerb(st.w, a, d), tl.y + kerb(st.n, a, b)],
+        [tr.x - kerb(st.e, b, c), tr.y + kerb(st.n, a, b)],
+        [br.x - kerb(st.e, b, c), br.y - kerb(st.s, d, c)],
+        [bl.x + kerb(st.w, a, d), bl.y - kerb(st.s, d, c)],
+      ].map(([x, y]) => new THREE.Vector3(this.wx(x), 0, this.wz(y)));
+      this.flat.add(slab(walk, 0, PAVE_TOP), new THREE.Color(0x8a8c8f), 0, 0, 0);
       const tint = new THREE.Color(ZONE_HEX[z.type]);
       // Low-density blocks read as lawns; denser blocks as paved lots tinted by zone type.
       const plateColor =
-        z.type === 'park' ? new THREE.Color(0x3d5a30)
-        : z.type === 'residential' && z.density < 0.45 ? new THREE.Color(0x46603a).lerp(tint, 0.08)
-        : new THREE.Color(0x30363d).lerp(tint, 0.14);
+        z.type === 'park' ? new THREE.Color(0x4c7236)
+        : z.type === 'residential' && z.density < 0.45 ? new THREE.Color(0x567a3e).lerp(tint, 0.04)
+        : new THREE.Color(0x5a5d61).lerp(tint, 0.06); // concrete, only a hint of the zone colour
       const quad = [
         [tl.x + ins(st.w), tl.y + ins(st.n)],
         [tr.x - ins(st.e), tr.y + ins(st.n)],
@@ -588,16 +685,36 @@ export class View3D {
       // A unit plane (same attributes as the rest of the batch) with its corners moved onto the quad.
       const plate = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
       [quad[0], quad[1], quad[3], quad[2]].forEach((q, i) => plate.attributes.position.setXYZ(i, q.x, q.y, q.z));
-      this.flat.add(plate, plateColor, 0, 0, 0);
+      this.onPavement(() => this.flat.add(plate, plateColor, 0, 0, 0));
       const start = this.ranges();
-      this.drawBlock(plan, z, tint, rng);
+      this.onPavement(() => this.drawBlock(plan, z, tint, rng));
       this.blockRanges.set(z.id, this.rangesSince(start));
     }
-    for (const sb of layout.superblocks) {
-      if (sb.kind === 'park') this.addPark(this.area(sb.rect), rng, true);
-      else this.addMall(this.area(sb.rect), rng);
-    }
+    // Superblocks (parks, the mall): their buildings' slots under key -1.
+    this.curSlots = [];
+    this.kitSlots.set(-1, this.curSlots);
+    this.curTrees = [];
+    this.treeSpots.set(-1, this.curTrees);
+    this.onPavement(() => {
+      for (const sb of layout.superblocks) {
+        if (sb.kind === 'park') this.addPark(this.area(sb.rect), rng, true);
+        else this.addMall(this.area(sb.rect), rng);
+      }
+    });
+    this.curSlots = null;
+    this.curTrees = null;
     this.buildStreetTrees(rng);
+  }
+
+  // Draw with the three city batches lifted onto the pavement.
+  private onPavement(draw: () => void): void {
+    const batches = [this.flat, this.solid, this.facades, this.rSolid, this.rFacades];
+    for (const b of batches) b.lift = PAVE_LIFT;
+    try {
+      draw();
+    } finally {
+      for (const b of batches) b.lift = 0;
+    }
   }
 
   // A rectangle in sim metres as world units.
@@ -606,11 +723,11 @@ export class View3D {
   }
 
   // Vertex counts of the three city batches, and the ranges added since such a count.
-  private ranges(): [number, number, number] {
-    return [this.flat.size, this.solid.size, this.facades.size];
+  private ranges(): number[] {
+    return [this.flat.size, this.solid.size, this.facades.size, this.rSolid.size, this.rFacades.size];
   }
 
-  private rangesSince(start: [number, number, number]): [number, number][] {
+  private rangesSince(start: number[]): [number, number][] {
     const now = this.ranges();
     return start.map((s, k) => [s, now[k]]);
   }
@@ -619,7 +736,7 @@ export class View3D {
   // their old geometry in the merged meshes is collapsed out of sight and drawn again in meshes
   // of their own.
   redrawSites(sites: Site[]): void {
-    const meshes = [this.flatMesh, this.solidMesh, this.facadesMesh];
+    const meshes = [this.flatMesh, this.solidMesh, this.facadesMesh, this.rSolidMesh, this.rFacadesMesh];
     const hide = (ranges: [number, number][] | undefined) => {
       ranges?.forEach(([a, b], k) => {
         const pos = meshes[k].geometry.attributes.position as THREE.BufferAttribute;
@@ -631,17 +748,22 @@ export class View3D {
       for (const m of this.redrawn.get(key) ?? []) {
         this.scene.remove(m);
         m.geometry.dispose();
+        this.replaceable = this.replaceable.filter((r) => r !== m);
       }
-      const kept = [this.flat, this.solid, this.facades];
+      const kept = [this.flat, this.solid, this.facades, this.rSolid, this.rFacades];
       this.flat = new StaticBatch();
       this.solid = new StaticBatch();
       this.facades = new StaticBatch();
-      draw();
+      this.rSolid = new StaticBatch();
+      this.rFacades = new StaticBatch();
+      this.onPavement(draw);
       const made: THREE.Mesh[] = [];
       if (this.flat.size > 0) made.push(this.flat.build(this.flatMat, false, true));
       if (this.solid.size > 0) made.push(this.solid.build(this.solidMat, true, true));
       if (this.facades.size > 0) made.push(this.facades.build(this.facadeMat, true, true));
-      [this.flat, this.solid, this.facades] = kept;
+      if (this.rSolid.size > 0) this.replaceable.push(made[made.push(this.rSolid.build(this.solidMat, true, true)) - 1]);
+      if (this.rFacades.size > 0) this.replaceable.push(made[made.push(this.rFacades.build(this.facadeMat, true, true)) - 1]);
+      [this.flat, this.solid, this.facades, this.rSolid, this.rFacades] = kept;
       for (const m of made) this.scene.add(m);
       this.redrawn.set(key, made);
     };
@@ -657,6 +779,42 @@ export class View3D {
       this.siteRanges.delete(site.id);
       redraw(`site ${site.id}`, () => this.drawEntrance(site));
     }
+    this.kitDirty = true;
+    this.applyBuildingStyle();
+    this.rebuildTrees();
+  }
+
+  // City Kit buildings with Graphics high once the kits have loaded, the classic ones otherwise.
+  private applyBuildingStyle(): void {
+    const models = this.vehicleStyle === 'models' && this.cityKit !== null;
+    if (models && this.kitDirty) {
+      if (this.kitBuildings) {
+        this.scene.remove(this.kitBuildings.group);
+        this.kitBuildings.group.traverse((o) => (o as THREE.BatchedMesh).isBatchedMesh && (o as THREE.BatchedMesh).dispose());
+      }
+      this.kitBuildings = buildKitBuildings(this.cityKit!, [...this.kitSlots.values()].flat());
+      this.scene.add(this.kitBuildings.group);
+      this.kitDirty = false;
+    }
+    if (this.kitBuildings) this.kitBuildings.group.visible = models;
+    for (const m of this.replaceable) m.visible = !models;
+  }
+
+  // Draw a building that the City Kit can replace: into the replaceable batches, and as a slot.
+  // `w` and `d` are its world footprint along x and z, `face` the way its front faces.
+  private replaceableBuilding(kind: BuildingKind, x: number, z: number, w: number, d: number, h: number, face: number, draw: () => void): void {
+    const [solid, facades] = [this.solid, this.facades];
+    this.solid = this.rSolid;
+    this.facades = this.rFacades;
+    try {
+      draw();
+    } finally {
+      this.solid = solid;
+      this.facades = facades;
+    }
+    const turned = Math.abs(Math.sin(face)) > 0.5; // the model's x runs along the world's z
+    const seed = Math.abs(Math.sin(x * 12.9898 + z * 78.233) * 43758.5453) % 1; // not from rng: the layout stays as it was
+    this.curSlots?.push({ kind, x, y: PAVE_LIFT, z, w: turned ? d : w, d: turned ? w : d, h, face, seed });
   }
 
   // A site's lot in world units, with its centre and smaller side.
@@ -716,6 +874,11 @@ export class View3D {
   // perimeter blocks or apartment lots in denser housing, houses along the streets in the
   // suburbs, sheds and container yards in industrial blocks.
   private drawBlock(plan: BlockPlan, z: Zone, tint: THREE.Color, rng: Rng): void {
+    this.curSlots = [];
+    this.kitSlots.set(plan.zone, this.curSlots);
+    this.curTrees = [];
+    this.treeSpots.set(plan.zone, this.curTrees);
+    const face = (site: Site) => FACE[site.front];
     const r = this.area(plan.rect);
     const w = r.x1 - r.x0;
     const d = r.z1 - r.z0;
@@ -741,22 +904,23 @@ export class View3D {
       case 'parking':
         for (const site of sites) {
           const q = lot(site);
-          if (site.kind === 'tower') this.addTower(q.x, q.z, q.cell, z.density, color(), rng);
+          if (site.kind === 'tower') this.addTower(q.x, q.z, q.cell, z.density, color(), rng, face(site));
           else if (site.kind === 'plaza') this.addPlaza(q, rng);
           else if (site.kind === 'parking') this.addParkingLot(q, rng);
-          else this.addBlock(q.x1 - q.x0, 2 * FLOOR, q.z1 - q.z0, q.x, 0, q.z, color(), rng);
+          else this.replaceableBuilding('shop', q.x, q.z, q.x1 - q.x0, q.z1 - q.z0, 2 * FLOOR, face(site), () => this.addBlock(q.x1 - q.x0, 2 * FLOOR, q.z1 - q.z0, q.x, 0, q.z, color(), rng));
         }
         break;
       case 'podium': {
         // One podium over the whole block with towers rising from it.
         const base = (2 + Math.floor(rng() * 2)) * FLOOR;
-        this.addBlock(w, base, d, cx, 0, cz, color(), rng);
         const n = w > d * 1.3 ? 2 : 1;
-        for (let k = 0; k < n; k++) {
-          const h = (8 + 18 * z.density) * (0.6 + 0.5 * rng());
-          const fp = Math.min(w / n, d) * 0.55;
-          this.addBlock(fp, h, fp, r.x0 + (w / n) * (k + 0.5), base, cz, color(), rng);
-        }
+        const towers = [...Array(n).keys()].map((k) => ({ x: r.x0 + (w / n) * (k + 0.5), h: (8 + 18 * z.density) * (0.6 + 0.5 * rng()), fp: Math.min(w / n, d) * 0.55 }));
+        // Classic: a podium over the block with the towers on it. Kit: the towers, a little wider.
+        this.replaceableBuilding('tower', towers[0].x, cz, towers[0].fp * 1.3, towers[0].fp * 1.3, base + towers[0].h, 0, () => {
+          this.addBlock(w, base, d, cx, 0, cz, color(), rng);
+          for (const t of towers) this.addBlock(t.fp, t.h, t.fp, t.x, base, cz, color(), rng);
+        });
+        for (const t of towers.slice(1)) this.curSlots?.push({ kind: 'tower', x: t.x, y: PAVE_LIFT, z: cz, w: t.fp * 1.3, d: t.fp * 1.3, h: base + t.h, face: 0, seed: (t.x * 0.37) % 1 });
         break;
       }
       case 'shed_yard': {
@@ -769,7 +933,7 @@ export class View3D {
       case 'warehouses':
         for (const site of sites) {
           const q = lot(site);
-          this.addWarehouse(q.x, q.z, q.cell, color(), rng);
+          this.addWarehouse(q.x, q.z, q.cell, color(), rng, face(site));
         }
         break;
       case 'perimeter': {
@@ -778,7 +942,7 @@ export class View3D {
         const c = color();
         for (const site of sites) {
           const q = lot(site);
-          this.addBlock(q.x1 - q.x0, floors * FLOOR, q.z1 - q.z0, q.x, 0, q.z, c, rng);
+          this.replaceableBuilding('apartment', q.x, q.z, q.x1 - q.x0, q.z1 - q.z0, floors * FLOOR, face(site), () => this.addBlock(q.x1 - q.x0, floors * FLOOR, q.z1 - q.z0, q.x, 0, q.z, c, rng));
         }
         const t = Math.min(w, d) * 0.24;
         this.flat.add(new THREE.PlaneGeometry(w - 2 * t, d - 2 * t), new THREE.Color(0x3f5c34), cx, 0.05, cz, -Math.PI / 2);
@@ -789,7 +953,7 @@ export class View3D {
       case 'apartments':
         for (const site of sites) {
           const q = lot(site);
-          this.addApartment(q.x, q.z, q.cell, z.density, color(), rng);
+          this.addApartment(q.x, q.z, q.cell, z.density, color(), rng, face(site));
         }
         for (const e of plan.empty) {
           const q = this.area(e);
@@ -806,13 +970,15 @@ export class View3D {
         // A station moved away: its building stays, put to other use.
         for (const site of sites) {
           const q = lot(site);
-          this.addBlock((q.x1 - q.x0) * 0.8, 2 * FLOOR, (q.z1 - q.z0) * 0.8, q.x, 0, q.z, color(), rng);
+          this.replaceableBuilding('shop', q.x, q.z, (q.x1 - q.x0) * 0.8, (q.z1 - q.z0) * 0.8, 2 * FLOOR, face(site), () => this.addBlock((q.x1 - q.x0) * 0.8, 2 * FLOOR, (q.z1 - q.z0) * 0.8, q.x, 0, q.z, color(), rng));
         }
         break;
     }
     // A separate stream, so the fill does not change the buildings of later blocks.
     this.drawFill(fillBlock(r, this.taken, plan.style, mulberry32(plan.zone * 7919 + 13), WORLD_PER_M));
     this.taken = [];
+    this.curSlots = null;
+    this.curTrees = null;
   }
 
   // Every site's way in from its street: a dropped kerb, a driveway or path across the verge to
@@ -821,7 +987,7 @@ export class View3D {
   private buildEntrances(): void {
     for (const site of this.sim.sites) {
       const start = this.ranges();
-      this.drawEntrance(site);
+      this.onPavement(() => this.drawEntrance(site));
       this.siteRanges.set(site.id, this.rangesSince(start));
     }
   }
@@ -845,7 +1011,7 @@ export class View3D {
       const put = (w: number, d: number, h: number, across: number, off: number, y: number, color: THREE.Color) => {
         const x = g.x0 + g.dx * (along + off) + nx * across;
         const z = g.y0 + g.dy * (along + off) + ny * across;
-        this.solid.add(new THREE.BoxGeometry(w * M, h * M, d * M), color, this.wx(x), (y + h / 2) * M, this.wz(z), 0, rot);
+        this.solid.add(new THREE.BoxGeometry(w * M, h * M, d * M), color, this.wx(x), PAVE_TOP + (y + h / 2) * M, this.wz(z), 0, rot);
       };
       const back = edge + 2.6;
       put(4, 1.6, 0.15, back - 0.7, 0, 2.5, frame); // roof
@@ -883,7 +1049,7 @@ export class View3D {
     };
     const isPark = site.kind === 'park';
     const width = { house: 3, warehouse: 7, parking: 6, mall: 7, hospital: 7, fire_station: 9, police_station: 6 }[site.kind as string] ?? (isPark ? 2.5 : 4);
-    put(this.flat, width + 2, 0.9, 0.01, edge - 0.9, 0.255, kerb); // dropped kerb on the road edge
+    put(this.flat, width + 2, 1.2, 0.01, edge, PAVE_TOP - PAVE_LIFT + 0.002, kerb); // dropped kerb at the sidewalk edge
     if (deep > edge) put(this.flat, width, deep - edge, 0.01, edge, 0.045, isPark ? path : concrete);
     const lotDepth = site.front === 'n' || site.front === 's' ? site.lot.y1 - site.lot.y0 : site.lot.x1 - site.lot.x0;
     switch (site.kind) {
@@ -935,7 +1101,7 @@ export class View3D {
     const fx = nx !== 0 ? (nx < 0 ? q.x0 : q.x1) : (q.x0 + q.x1) / 2;
     const fz = nz !== 0 ? (nz < 0 ? q.z0 : q.z1) : (q.z0 + q.z1) / 2;
     const c = new THREE.Color().setHSL(0.08 + 0.06 * rng(), 0.18 + 0.2 * rng(), 0.55 + 0.2 * rng());
-    this.addHouse(fx - nx * deep * 0.42, fz - nz * deep * 0.42, Math.min(wide, deep) * 1.05, c, rng);
+    this.addHouse(fx - nx * deep * 0.42, fz - nz * deep * 0.42, Math.min(wide, deep) * 1.05, c, rng, FACE[site.front]);
     // Driveway from the street to the door.
     const dl = deep * 0.3;
     const dx = this.wx(site.door.x);
@@ -965,13 +1131,15 @@ export class View3D {
       police_station: { color: 0x4a5e7a, floors: 3 },
     }[site.kind as 'hospital' | 'fire_station' | 'police_station'];
     const h = look.floors * FLOOR;
-    this.addBlock(w, h, d, x, 0, z, new THREE.Color(look.color), rng);
-    if (site.kind === 'hospital') {
-      const red = new THREE.Color(0xd8262a);
-      const s = Math.min(w, d) * 0.4;
-      this.solid.add(new THREE.BoxGeometry(s, 0.05, s * 0.3), red, x, h + 0.2, z);
-      this.solid.add(new THREE.BoxGeometry(s * 0.3, 0.05, s), red, x, h + 0.2, z);
-    }
+    this.replaceableBuilding(site.kind as BuildingKind, x, z, w, d, h, FACE[site.front], () => {
+      this.addBlock(w, h, d, x, 0, z, new THREE.Color(look.color), rng);
+      if (site.kind === 'hospital') {
+        const red = new THREE.Color(0xd8262a);
+        const s = Math.min(w, d) * 0.4;
+        this.solid.add(new THREE.BoxGeometry(s, 0.05, s * 0.3), red, x, h + 0.2, z);
+        this.solid.add(new THREE.BoxGeometry(s * 0.3, 0.05, s), red, x, h + 0.2, z);
+      }
+    });
   }
 
   private addPlaza(r: Area, rng: Rng): void {
@@ -1062,11 +1230,16 @@ export class View3D {
     const bw = w * 0.82;
     const bd = d * 0.38;
     const bz = r.z0 + d * 0.06 + bd / 2;
-    this.solid.add(new THREE.BoxGeometry(bw, 2 * FLOOR, bd), new THREE.Color(0xc9c2b4), cx, FLOOR, bz);
-    this.solid.add(new THREE.BoxGeometry(bw * 0.3, 2.6 * FLOOR, bd * 0.5), new THREE.Color(0x7d8b99), cx, 1.3 * FLOOR, bz + bd * 0.3); // entrance hall
-    for (let k = 0; k < 4; k++) {
-      this.solid.add(new THREE.BoxGeometry(bw * 0.12, 0.3, bd * 0.2), new THREE.Color(0x5b6570), cx - bw * 0.3 + k * bw * 0.2, 2 * FLOOR + 0.15, bz - bd * 0.1); // roof plant
-    }
+    const n = Math.max(2, Math.round(bw / bd));
+    this.replaceableBuilding('shop', cx - bw / 2 + bw / n / 2, bz, bw / n, bd, 2 * FLOOR, 0, () => {
+      this.solid.add(new THREE.BoxGeometry(bw, 2 * FLOOR, bd), new THREE.Color(0xc9c2b4), cx, FLOOR, bz);
+      this.solid.add(new THREE.BoxGeometry(bw * 0.3, 2.6 * FLOOR, bd * 0.5), new THREE.Color(0x7d8b99), cx, 1.3 * FLOOR, bz + bd * 0.3); // entrance hall
+      for (let k = 0; k < 4; k++) {
+        this.solid.add(new THREE.BoxGeometry(bw * 0.12, 0.3, bd * 0.2), new THREE.Color(0x5b6570), cx - bw * 0.3 + k * bw * 0.2, 2 * FLOOR + 0.15, bz - bd * 0.1); // roof plant
+      }
+    });
+    // The rest of the row of shops (the classic mall is one building, drawn above).
+    for (let k = 1; k < n; k++) this.curSlots?.push({ kind: 'shop', x: cx - bw / 2 + (bw / n) * (k + 0.5), y: PAVE_LIFT, z: bz, w: bw / n, d: bd, h: 2 * FLOOR, face: 0, seed: (k * 0.29) % 1 });
     for (let x = r.x0 + 0.5; x < r.x1; x += 2.2) this.addTree(x, r.z1 - 0.3, rng, 0.6);
   }
 
@@ -1089,28 +1262,12 @@ export class View3D {
         for (const side of [-1, 1]) spots.push([ax + ux * t - uz * off * side, az + uz * t + ux * off * side]);
       }
     }
-    const paint = (g: THREE.BufferGeometry, c: THREE.Color) => {
-      const arr = new Float32Array(g.attributes.position.count * 3);
-      for (let i = 0; i < arr.length; i += 3) arr.set([c.r, c.g, c.b], i);
-      return g.setAttribute('color', new THREE.BufferAttribute(arr, 3));
-    };
-    const trunk = paint(new THREE.CylinderGeometry(0.06, 0.08, 0.8, 5).translate(0, 0.4, 0), new THREE.Color(0x4a3a2a));
-    const crown = paint(new THREE.SphereGeometry(0.42, 7, 5).translate(0, 1.05, 0), new THREE.Color(1, 1, 1));
-    const mesh = new THREE.InstancedMesh(
-      mergeGeometries([trunk, crown])!,
-      new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, flatShading: true }),
-      spots.length,
-    );
-    const m = new THREE.Matrix4();
-    const col = new THREE.Color();
-    spots.forEach(([x, z], i) => {
-      const s = 0.8 + 0.4 * rng();
-      mesh.setMatrixAt(i, m.makeScale(s, s, s).setPosition(x, 0.25, z));
-      mesh.setColorAt(i, col.setHex(0x3a6b34).multiplyScalar(0.75 + 0.5 * rng()));
+    // Kept as tree spots (see addTree); drawn with the others, swaying.
+    const street: TreeSpot[] = spots.map(([x, z]) => {
+      const sc = 0.8 + 0.4 * rng();
+      return { x, y: PAVE_TOP, z, height: 1.5 * sc, kind: 'broadleaf', color: new THREE.Color(0x4f8540).multiplyScalar(0.75 + 0.5 * rng()) };
     });
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    this.scene.add(mesh);
+    this.treeSpots.set(-3, street);
   }
 
   // Windowed walls from y0 to y0 + h, capped with a slightly wider parapet roof.
@@ -1121,9 +1278,14 @@ export class View3D {
     this.solid.add(new THREE.BoxGeometry(w + 0.12, 0.16, d + 0.12), roof, x, y0 + h + 0.08, z);
   }
 
-  private addTower(x: number, z: number, cell: number, density: number, color: THREE.Color, rng: Rng): void {
+  private addTower(x: number, z: number, cell: number, density: number, color: THREE.Color, rng: Rng, face = 0): void {
     const h = (6 + 20 * density) * (0.6 + 0.6 * rng());
     const fp = cell * (0.62 + 0.18 * rng());
+    const foot = h > 8 ? Math.min(fp * 1.18, cell * 0.92) : fp;
+    this.replaceableBuilding('tower', x, z, foot, foot, h, face, () => this.drawTower(x, z, cell, h, fp, color, rng));
+  }
+
+  private drawTower(x: number, z: number, cell: number, h: number, fp: number, color: THREE.Color, rng: Rng): void {
     let base = 0;
     if (h > 8) {
       // Podium: a wider lobby/retail base under the tower.
@@ -1145,25 +1307,32 @@ export class View3D {
     if (h > 20) this.solid.add(new THREE.CylinderGeometry(0.04, 0.06, 3, 6), plant, x + top * 0.25, h + 1.66, z + top * 0.25);
   }
 
-  private addApartment(x: number, z: number, cell: number, density: number, color: THREE.Color, rng: Rng): void {
+  private addApartment(x: number, z: number, cell: number, density: number, color: THREE.Color, rng: Rng, face = 0): void {
     const floors = Math.max(3, Math.round(((1.6 + 7 * density) * (0.6 + 0.6 * rng())) / FLOOR));
     const h = floors * FLOOR;
     const fp = cell * (0.6 + 0.2 * rng());
     const long = rng() > 0.5;
     const w = long ? fp : fp * 0.7;
     const d = long ? fp * 0.7 : fp;
-    this.addBlock(w, h, d, x, 0, z, color, rng);
-    if (rng() > 0.5) {
-      // Water tank on the roof.
-      this.solid.add(new THREE.CylinderGeometry(0.22, 0.22, 0.4, 10), new THREE.Color(0x6b5a4a), x + w * 0.2, h + 0.36, z - d * 0.15);
-    }
+    this.replaceableBuilding('apartment', x, z, w, d, h, face, () => {
+      this.addBlock(w, h, d, x, 0, z, color, rng);
+      if (rng() > 0.5) {
+        // Water tank on the roof.
+        this.solid.add(new THREE.CylinderGeometry(0.22, 0.22, 0.4, 10), new THREE.Color(0x6b5a4a), x + w * 0.2, h + 0.36, z - d * 0.15);
+      }
+    });
   }
 
-  private addHouse(x: number, z: number, cell: number, color: THREE.Color, rng: Rng): void {
+  private addHouse(x: number, z: number, cell: number, color: THREE.Color, rng: Rng, face = 0): void {
     const fp = cell * (0.42 + 0.14 * rng());
     const h = 2 * FLOOR;
     const ox = (rng() - 0.5) * cell * 0.2;
     const oz = (rng() - 0.5) * cell * 0.2;
+    // The model takes the house and its garage's room: about the lot's middle two thirds.
+    this.replaceableBuilding('house', x, z, cell * 0.72, cell * 0.72, h + 0.55, face, () => this.drawHouseBody(x, z, fp, h, ox, oz, color, rng));
+  }
+
+  private drawHouseBody(x: number, z: number, fp: number, h: number, ox: number, oz: number, color: THREE.Color, rng: Rng): void {
     this.facades.add(facadeBox(fp, h, fp * 0.85, rng), color.clone().lerp(new THREE.Color(0xd8cbb8), 0.35), x + ox, h / 2, z + oz);
     this.take(x + ox, z + oz, fp * 1.2, fp * 1.05); // with the roof overhang
     // Hip roof: a four-sided cone turned 45 degrees, with a small overhang.
@@ -1180,9 +1349,13 @@ export class View3D {
   }
 
   // Warehouses have no window grid: plain walls, a sawtooth roof and a loading door.
-  private addWarehouse(x: number, z: number, cell: number, color: THREE.Color, rng: Rng): void {
+  private addWarehouse(x: number, z: number, cell: number, color: THREE.Color, rng: Rng, face = 0): void {
     const h = 2.2 + 2.2 * rng();
     const fp = cell * (0.8 + 0.12 * rng());
+    this.replaceableBuilding('warehouse', x, z, fp, fp, h + 0.6, face, () => this.drawWarehouse(x, z, fp, h, color, rng));
+  }
+
+  private drawWarehouse(x: number, z: number, fp: number, h: number, color: THREE.Color, rng: Rng): void {
     const wall = color.clone().multiplyScalar(0.85);
     this.solid.add(new THREE.BoxGeometry(fp, h, fp), wall, x, h / 2, z);
     this.take(x, z, fp + 0.2, fp);
@@ -1201,13 +1374,28 @@ export class View3D {
     }
   }
 
+  // A tree (see nature.ts): kept as a spot and drawn with the others, swaying. The random draws
+  // are the same as when trees were drawn here, so the rest of the layout does not change.
   private addTree(x: number, z: number, rng: Rng, scale = 1): void {
     const h = (2 + rng() * 1.6) * scale;
-    const leafColor = new THREE.Color(0x2e5c3a).multiplyScalar(0.8 + 0.4 * rng());
+    const shade = 0.8 + 0.4 * rng();
     this.take(x, z, 2 * scale, 2 * scale);
-    this.solid.add(new THREE.CylinderGeometry(0.15, 0.18, h * 0.5, 6), new THREE.Color(0x3a2a1a), x, h * 0.25, z);
-    if (rng() > 0.5) this.solid.add(new THREE.ConeGeometry(0.9 * scale, h, 7), leafColor, x, h * 0.9, z);
-    else this.solid.add(new THREE.SphereGeometry((0.85 + 0.3 * rng()) * scale, 7, 5), leafColor, x, h * 0.7, z);
+    const conifer = rng() > 0.5;
+    if (!conifer) rng(); // the old sphere's size
+    const spot: TreeSpot = conifer
+      ? { x, y: this.solid.lift, z, height: h * 1.0, kind: 'conifer', color: new THREE.Color(0x2f6136).multiplyScalar(shade) }
+      : { x, y: this.solid.lift, z, height: h * 0.95, kind: 'broadleaf', color: new THREE.Color(0x4a7f3c).multiplyScalar(shade) };
+    (this.curTrees ?? this.treeSpots.get(-2)!).push(spot);
+  }
+
+  // All the trees, drawn again (after the city is built, and after blocks are redrawn).
+  private rebuildTrees(): void {
+    if (this.trees) {
+      this.scene.remove(this.trees.group);
+      this.trees.group.traverse((o) => (o as THREE.InstancedMesh).isInstancedMesh && (o as THREE.InstancedMesh).dispose());
+    }
+    this.trees = buildTrees([...this.treeSpots.values()].flat());
+    this.scene.add(this.trees.group);
   }
 
   // One instanced mesh per vehicle type (see vehicles.ts), plus a matching mesh for its
@@ -1220,27 +1408,34 @@ export class View3D {
       const geo = vehicleGeometry(kind, WORLD_PER_M, W);
       const body = new THREE.InstancedMesh(geo.body, bodyMat, MAX_CARS);
       body.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-      const lights = new THREE.InstancedMesh(geo.lights, this.carLightMat, MAX_CARS);
-      lights.instanceMatrix = body.instanceMatrix; // same poses as the bodies
+      const far = new THREE.InstancedMesh(geo.body, bodyMat, MAX_CARS);
+      far.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      // The lamps: one pose per car (near or far), kept in the brake mesh and shared.
       const brake = new THREE.InstancedMesh(geo.brake, this.brakeMat, MAX_CARS);
-      brake.instanceMatrix = body.instanceMatrix;
+      brake.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      const lights = new THREE.InstancedMesh(geo.lights, this.carLightMat, MAX_CARS);
+      lights.instanceMatrix = brake.instanceMatrix;
       const left = new THREE.InstancedMesh(geo.indicatorL, this.brakeMat, MAX_CARS);
-      left.instanceMatrix = body.instanceMatrix;
+      left.instanceMatrix = brake.instanceMatrix;
       const right = new THREE.InstancedMesh(geo.indicatorR, this.brakeMat, MAX_CARS);
-      right.instanceMatrix = body.instanceMatrix;
+      right.instanceMatrix = brake.instanceMatrix;
       let sirens: [THREE.InstancedMesh, THREE.InstancedMesh] | null = null;
       if (geo.sirenA && geo.sirenB) {
         sirens = [new THREE.InstancedMesh(geo.sirenA, this.brakeMat, MAX_CARS), new THREE.InstancedMesh(geo.sirenB, this.brakeMat, MAX_CARS)];
-        for (const m of sirens) m.instanceMatrix = body.instanceMatrix;
+        for (const m of sirens) m.instanceMatrix = brake.instanceMatrix;
       }
-      for (const m of [body, lights, brake, left, right, ...(sirens ?? [])]) {
+      for (const m of [body, far, lights, brake, left, right, ...(sirens ?? [])]) {
         m.count = 0;
         m.frustumCulled = false;
         this.scene.add(m);
       }
       this.carLights.push(lights);
-      const classic = { body: geo.body, sirens: geo.sirenA && geo.sirenB ? ([geo.sirenA, geo.sirenB] as [THREE.BufferGeometry, THREE.BufferGeometry]) : null };
-      this.fleet.set(kind, { body, lights, brake, left, right, sirens, n: 0, classic, wheels: null });
+      const classic = {
+        body: geo.body,
+        sirens: geo.sirenA && geo.sirenB ? ([geo.sirenA, geo.sirenB] as [THREE.BufferGeometry, THREE.BufferGeometry]) : null,
+        lamps: { lights: geo.lights, brake: geo.brake, indicatorL: geo.indicatorL, indicatorR: geo.indicatorR },
+      };
+      this.fleet.set(kind, { body, far, nn: 0, nf: 0, lights, brake, left, right, sirens, n: 0, classic, wheels: null });
     }
     // The Kenney models load in the background; until then (or if they fail) the classic ones show.
     loadKenneyKit(`${import.meta.env.BASE_URL}models/kenney-car-kit/`, WORLD_PER_M, W)
@@ -1271,11 +1466,18 @@ export class View3D {
   // material; the lights stay as they are, with the siren glows moved up onto the model's roof.
   setVehicleStyle(style: VehicleStyle): void {
     this.vehicleStyle = style;
+    this.applyBuildingStyle();
     const kit = style === 'models' ? this.kit : null;
     for (const [kind, f] of this.fleet) {
       const model = kit?.vehicles.get(kind);
       f.body.geometry = model ? model.body : f.classic.body;
       f.body.material = model ? kit!.material : this.bodyMat;
+      // Lamps on the model's own head and tail lamps.
+      const lamps = model ? model.lights : f.classic.lamps;
+      f.lights.geometry = lamps.lights;
+      f.brake.geometry = lamps.brake;
+      f.left.geometry = lamps.indicatorL;
+      f.right.geometry = lamps.indicatorR;
       if (f.sirens && f.classic.sirens) {
         const lift = model ? Math.max(0, model.top - this.topOf(f.classic.body)) : 0;
         f.sirens.forEach((m, k) => {
@@ -1308,7 +1510,9 @@ export class View3D {
     const yaw = -Math.atan2(hy, hx);
     this.tmp.position.set(this.wx(x), lift, this.wz(y));
     this.tmp.scale.setScalar(scale);
-    const model = f.wheels?.left.visible ? this.kit?.vehicles.get(kind) : undefined;
+    // The Kit model only near the camera; beyond CAR_LOD the classic body stands in.
+    const near = this.camera.position.distanceToSquared(this.tmp.position) < CAR_LOD * CAR_LOD;
+    const model = near && f.wheels?.left.visible ? this.kit?.vehicles.get(kind) : undefined;
     if (model && f.wheels) {
       // Steer and roll from how fast the heading turns per metre driven; spin from the distance.
       const now = this.sim.time;
@@ -1336,7 +1540,9 @@ export class View3D {
       this.tmp.updateMatrix();
       this.baseMatrix.copy(this.tmp.matrix);
       const w = f.wheels;
-      for (const slot of model.slots) {
+      // Wheels are most of a model's triangles; beyond WHEEL_NEAR they are a few pixels, so skip them.
+      const wheelsShown = this.camera.position.distanceToSquared(this.tmp.position) < WHEEL_NEAR * WHEEL_NEAR;
+      for (const slot of wheelsShown ? model.slots : []) {
         const mesh = slot.right ? w.right : w.left;
         const n = slot.right ? w.nr++ : w.nl++;
         if (n >= MAX_CARS * 2) continue;
@@ -1351,8 +1557,16 @@ export class View3D {
     }
     this.tmp.updateMatrix();
     this.tmp.rotation.order = 'XYZ';
-    f.body.setMatrixAt(f.n, this.tmp.matrix);
-    f.body.setColorAt(f.n, vehiclePaint(trip, kind, this.tmpColor));
+    const paint = vehiclePaint(trip, kind, this.tmpColor);
+    if (model || !f.wheels?.left.visible) {
+      // Near (or Graphics low, where the near mesh is the classic body anyway).
+      f.body.setMatrixAt(f.nn, this.tmp.matrix);
+      f.body.setColorAt(f.nn++, paint);
+    } else {
+      f.far.setMatrixAt(f.nf, this.tmp.matrix);
+      f.far.setColorAt(f.nf++, paint);
+    }
+    f.brake.setMatrixAt(f.n, this.tmp.matrix);
     f.brake.setColorAt(f.n, braking ? BRAKE_ON : BRAKE_OFF);
     f.left.setColorAt(f.n, this.blinkOn && turn === 'left' ? INDICATOR_ON : BRAKE_OFF);
     f.right.setColorAt(f.n, this.blinkOn && turn === 'right' ? INDICATOR_ON : BRAKE_OFF);
@@ -1362,6 +1576,35 @@ export class View3D {
       f.sirens[1].setColorAt(f.n, siren && this.sirenPhase === 1 ? SIREN_BLUE : BRAKE_OFF);
     }
     f.n++;
+  }
+
+  // Heading change (rad, positive to the right) of a car moving across the road: from how its
+  // sideways offset (m) changed over the distance it drove since the last frame, eased.
+  private sideSteer(id: number, off: number, v: number, now: number): number {
+    let st = this.sideways.get(id);
+    if (!st) {
+      st = { off, t: now, a: 0, seen: this.motionFrame };
+      this.sideways.set(id, st);
+    }
+    st.seen = this.motionFrame;
+    const ds = v * Math.max(0, now - st.t);
+    if (ds > 0.02) {
+      const target = THREE.MathUtils.clamp(Math.atan2(off - st.off, ds), -0.6, 0.6);
+      st.a += (target - st.a) * Math.min(1, ds / 3);
+      st.off = off;
+      st.t = now;
+    } else if (v < 0.1) {
+      st.a *= 0.9; // stopped: straighten up
+      st.off = off;
+      st.t = now;
+    }
+    return st.a;
+  }
+
+  // Indicating out round a blocked stretch (left) and back in (right).
+  private passTurn(veh: Vehicle): Turn {
+    const st = this.sideways.get(veh.trip.id);
+    return st && st.a > 0.02 ? 'right' : 'left';
   }
 
   // Which way a car is about to turn: on a turning connector, or approaching one.
@@ -1388,6 +1631,8 @@ export class View3D {
     this.sirenPhase = flash < 80 || (flash > 140 && flash < 220) ? 0 : flash > 300 && (flash < 380 || (flash > 440 && flash < 520)) ? 1 : -1;
     for (const f of this.fleet.values()) {
       f.n = 0;
+      f.nn = 0;
+      f.nf = 0;
       if (f.wheels) f.wheels.nl = f.wheels.nr = 0;
     }
     this.sirenCount = 0;
@@ -1423,14 +1668,21 @@ export class View3D {
         bezier(lot, c, road, s, this.bp, this.bd);
         // Indicates towards the road it is pulling onto.
         const turn = s < 0.7 ? this.sideOf(this.bp.x, this.bp.y, this.bd.x, this.bd.y, p.x + p.hx * 20, p.y + p.hy * 20) : null;
-        this.placeCar(kind, veh.trip, this.bp.x, this.bp.y, this.bd.x, this.bd.y, 0.08 + 0.18 * s, 0.6 + 0.4 * s, false, turn, veh.siren, (DRIVEWAY_M + 6) / DEPART_S);
+        this.placeCar(kind, veh.trip, this.bp.x, this.bp.y, this.bd.x, this.bd.y, PAVE_TOP + 0.01 - (PAVE_TOP + 0.01 - 0.26) * s, 0.6 + 0.4 * s, false, turn, veh.siren, (DRIVEWAY_M + 6) / DEPART_S);
       } else {
         // On the road surface; brake lights while slowing down or held at a stop. A car making way
         // for a siren sits up to SHOULDER_M to the right, indicating while it pulls over; one
         // passing a blocked stretch drives out in the oncoming lane.
         const off = veh.shift * SHOULDER_M - veh.pass * 2 * LANE_OFFSET;
-        const turn = veh.yielding && veh.shift < 1 ? 'right' : this.turnAhead(veh);
-        this.placeCar(kind, veh.trip, p.x - p.hy * off, p.y + p.hx * off, p.hx, p.hy, 0.26, 1, veh.acc < -0.8 || veh.v < 0.5, turn, veh.siren, veh.v, veh.acc);
+        const turn = veh.yielding && veh.shift < 1 ? 'right' : veh.pass > 0 && veh.pass < 1 ? this.passTurn(veh) : this.turnAhead(veh);
+        // Steered towards where it is moving across the road, so it drives out and back rather
+        // than sliding sideways.
+        const a = this.sideSteer(veh.trip.id, off, veh.v, now);
+        const c = Math.cos(a);
+        const sn = Math.sin(a);
+        const hx = p.hx * c - p.hy * sn;
+        const hy = p.hy * c + p.hx * sn;
+        this.placeCar(kind, veh.trip, p.x - p.hy * off, p.y + p.hx * off, hx, hy, 0.26, 1, veh.acc < -0.8 || veh.v < 0.5, turn, veh.siren, veh.v, veh.acc);
       }
     }
     // Cars that reached their destination this frame turn off into their lot.
@@ -1451,10 +1703,11 @@ export class View3D {
     for (const pk of this.parking) {
       const s = ease((now - pk.start) / pk.dur);
       bezier(pk.p0, pk.c, pk.p2, s, this.bp, this.bd);
-      this.placeCar(pk.kind, pk.trip, this.bp.x, this.bp.y, this.bd.x, this.bd.y, 0.26 - 0.18 * s, 1 - 0.4 * s, true, s < 0.6 ? pk.turn : null, false, PARK_SPEED);
+      this.placeCar(pk.kind, pk.trip, this.bp.x, this.bp.y, this.bd.x, this.bd.y, 0.26 + (PAVE_TOP + 0.01 - 0.26) * s, 1 - 0.4 * s, true, s < 0.6 ? pk.turn : null, false, PARK_SPEED);
     }
     for (const f of this.fleet.values()) {
-      f.body.count = f.n;
+      f.body.count = f.nn;
+      f.far.count = f.nf;
       f.lights.count = f.n;
       f.brake.count = f.n;
       f.left.count = f.n;
@@ -1463,14 +1716,28 @@ export class View3D {
       if (f.wheels) {
         f.wheels.left.count = Math.min(f.wheels.nl, MAX_CARS * 2);
         f.wheels.right.count = Math.min(f.wheels.nr, MAX_CARS * 2);
-        f.wheels.left.instanceMatrix.needsUpdate = true;
-        f.wheels.right.instanceMatrix.needsUpdate = true;
+        for (const w of [f.wheels.left, f.wheels.right]) {
+          w.instanceMatrix.clearUpdateRanges();
+          w.instanceMatrix.addUpdateRange(0, Math.max(1, w.count) * 16);
+          w.instanceMatrix.needsUpdate = true;
+        }
       }
-      f.body.instanceMatrix.needsUpdate = true;
-      if (f.body.instanceColor) f.body.instanceColor.needsUpdate = true;
-      for (const m of [f.brake, f.left, f.right, ...(f.sirens ?? [])]) if (m.instanceColor) m.instanceColor.needsUpdate = true;
+      // Upload only the slots in use, not all MAX_CARS.
+      const upload = (a: THREE.BufferAttribute | null | undefined, count: number, size: number) => {
+        if (!a || count === 0) return;
+        a.clearUpdateRanges();
+        a.addUpdateRange(0, count * size);
+        a.needsUpdate = true;
+      };
+      upload(f.body.instanceMatrix, f.nn, 16);
+      upload(f.far.instanceMatrix, f.nf, 16);
+      upload(f.brake.instanceMatrix, f.n, 16);
+      upload(f.body.instanceColor, f.nn, 3);
+      upload(f.far.instanceColor, f.nf, 3);
+      for (const m of [f.brake, f.left, f.right, ...(f.sirens ?? [])]) upload(m.instanceColor, f.n, 3);
     }
     for (const [id, st] of this.motion) if (st.seen !== this.motionFrame) this.motion.delete(id);
+    for (const [id, st] of this.sideways) if (st.seen !== this.motionFrame) this.sideways.delete(id);
     this.sirenMesh.count = this.sirenCount;
     this.sirenMesh.instanceMatrix.needsUpdate = true;
     if (this.sirenMesh.instanceColor) this.sirenMesh.instanceColor.needsUpdate = true;
@@ -1859,8 +2126,9 @@ export class View3D {
       if (shrink <= 0) {
         this.incidentGroup.remove(m.g);
         m.g.traverse((o) => {
-          if (o instanceof THREE.Mesh) {
-            o.geometry.dispose();
+          // Car Kit parts share the kit's geometry and material, which stay.
+          if ((o instanceof THREE.Mesh || o instanceof THREE.Sprite) && !o.userData.kit) {
+            if (o instanceof THREE.Mesh) o.geometry.dispose(); // sprites share three's quad
             (o.material as THREE.Material).dispose();
           }
         });
@@ -1868,6 +2136,9 @@ export class View3D {
         continue;
       }
       m.g.scale.setScalar(Math.max(0.001, ease(Math.min(grow, shrink))));
+      // The pin is for city zoom; close up it would stand in front of the scene.
+      const pin = m.g.getObjectByName('pin');
+      if (pin) pin.visible = this.camera.position.distanceTo(m.g.position) > BEACON_NEAR;
     }
     this.effects.update();
   }
@@ -1876,15 +2147,16 @@ export class View3D {
   private incidentEffects(inc: Incident, g: THREE.Group): void {
     const id = `inc:${inc.id}`;
     const named = (prefix: string) => {
-      const out: THREE.Mesh[] = [];
+      const out: (THREE.Mesh | THREE.Sprite)[] = [];
       g.traverse((o) => {
-        if (o instanceof THREE.Mesh && o.name.startsWith(prefix)) out.push(o);
+        if ((o instanceof THREE.Mesh || o instanceof THREE.Sprite) && o.name.startsWith(prefix)) out.push(o);
       });
       return out;
     };
-    const mats = (meshes: THREE.Mesh[]) => meshes.map((m) => m.material as THREE.MeshBasicMaterial);
+    const mats = (meshes: (THREE.Mesh | THREE.Sprite)[]) => meshes.map((m) => m.material as THREE.MeshBasicMaterial);
     // Hazard lights blink together; the arrow board lights in sequence; barrier lamps alternate.
     this.effects.flash(`${id}:hazard`, mats(named('hazard')), 0xffb21a, 0x4a3008, 900, 450);
+    this.effects.flash(`${id}:hazardGlow`, mats(named('glowHazard')), 0xffa018, 0x000000, 900, 450);
     this.effects.flash(`${id}:beacon`, mats(named('beacon')), 0xfff1c2, 0x6a4a10, 800, 400);
     this.effects.flash(`${id}:arrow`, mats(named('arrow')), 0xffc23a, 0x2a1e08, 1200, 700, 140);
     const lamps = named('lamp');
@@ -1894,6 +2166,60 @@ export class View3D {
     g.updateMatrixWorld(true);
     const smoke = named('smoke')[0];
     if (smoke) this.effects.emit(id, 'smoke', smoke.getWorldPosition(new THREE.Vector3()), { rate: 7, size: 0.4 });
+    // A few sparks and a wisp of smoke off each burning flare.
+    named('flareTip').forEach((f, k) => {
+      const at = f.getWorldPosition(new THREE.Vector3());
+      this.effects.emit(`${id}:spark${k}`, 'flame', at, { rate: 8, size: 0.06 });
+      this.effects.emit(`${id}:fume${k}`, 'smoke', at, { rate: 1.5, size: 0.12 });
+    });
+  }
+
+  private glowTex: THREE.Texture | null = null;
+  private sideways = new Map<number, { off: number; t: number; a: number; seen: number }>();
+  private glowTexture(): THREE.Texture {
+    return (this.glowTex ??= radialGlow());
+  }
+
+  // A crashed Car Kit car in an incident scene (`parent` is in metres): knocked askew and dipped
+  // at the damaged end, one front wheel off, hazard lamps flashing on the model's own lamps.
+  private kitWreck(parent: THREE.Object3D, kit: KenneyKit, model: KenneyVehicle, color: number, x: number, z: number, rot: number, seed: number): THREE.Group {
+    const car = new THREE.Group();
+    car.position.set(x, 0, z);
+    car.rotation.y = rot;
+    car.scale.setScalar(1 / WORLD_PER_M); // the model is in world units
+    parent.add(car);
+    const body = new THREE.InstancedMesh(model.body, kit.material, 1);
+    body.setMatrixAt(0, new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(0.03, 0, rot > 0 ? -0.05 : 0.06)));
+    body.setColorAt(0, new THREE.Color(color));
+    body.castShadow = true;
+    body.userData.kit = true;
+    car.add(body);
+    const lost = seed % 2 === 1; // which front wheel came off
+    for (const slot of model.slots) {
+      if (slot.front && slot.right === lost) continue;
+      const w = new THREE.Mesh(slot.right ? model.wheelR : model.wheelL, kit.material);
+      w.position.set(slot.x, slot.y, slot.z);
+      if (slot.front) w.rotation.y = lost ? 0.35 : -0.35;
+      w.userData.kit = true;
+      car.add(w);
+    }
+    const a = model.anchors;
+    for (const end of [a.front, a.rear]) {
+      for (const side of [-1, 1]) {
+        const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.03, 0.05), new THREE.MeshBasicMaterial({ color: 0x4a3008 }));
+        lamp.name = 'hazard';
+        lamp.position.set(end.x + Math.sign(end.x) * 0.004, end.y, side * a.side);
+        car.add(lamp);
+        const sp = new THREE.Sprite(
+          new THREE.SpriteMaterial({ map: this.glowTexture(), color: 0x000000, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false }),
+        );
+        sp.name = 'glowHazard';
+        sp.position.copy(lamp.position);
+        sp.scale.setScalar(0.16);
+        car.add(sp);
+      }
+    }
+    return car;
   }
 
   private incidentMarker(inc: Incident): THREE.Group {
@@ -1921,10 +2247,36 @@ export class View3D {
       local.add(m);
     };
     // Cones, beacons and wrecks are drawn 1.5x, like the slightly oversized cars, so they read.
+    // With the vehicle models on, cones, debris and wrecks come from the Car Kit instead.
+    const kit = this.vehicleStyle === 'models' ? this.kit : null;
+    const prop = (name: PropName, x: number, z: number, rot = 0, size = 1) => {
+      const geo = kit?.props.get(name);
+      if (!geo) return null;
+      const m = new THREE.Mesh(geo, kit!.material);
+      m.position.set(x, 0, z);
+      m.rotation.y = rot;
+      m.scale.setScalar(size / WORLD_PER_M); // the kit is in world units; `local` is in metres
+      m.userData.kit = true;
+      m.castShadow = true;
+      local.add(m);
+      return m;
+    };
     const cone = (x: number, z: number) => {
+      if (prop('cone', x, z, x * 1.7, 1.3)) return;
       const m = new THREE.Mesh(new THREE.ConeGeometry(0.6, 1.65, 10), mat(0xff7a1a));
       m.position.set(x, 0.85, z);
       local.add(m);
+    };
+    // A soft additive glow (a lamp's light), named so `effects` can flash or flicker it.
+    const glow = (name: string, color: number, size: number, x: number, y: number, z: number) => {
+      const sp = new THREE.Sprite(
+        new THREE.SpriteMaterial({ map: this.glowTexture(), color, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false }),
+      );
+      sp.name = name;
+      sp.position.set(x, y, z);
+      sp.scale.setScalar(size);
+      local.add(sp);
+      return sp;
     };
     // A lamp (switched by `effects`), found later by its name: beacon, hazard, arrow or lamp.
     const lamp = (name: string, geometry: THREE.BufferGeometry, x: number, y: number, z: number, parent: THREE.Object3D = local) => {
@@ -1938,7 +2290,9 @@ export class View3D {
     if (inc.kind === 'accident') {
       // Two cars at an angle in the lane with their hazard lights on, smoke from the front one,
       // debris on the road, flares and cones tapering in behind them.
-      const wreck = (color: number, x: number, z: number, rot: number) => {
+      const wreck = (color: number, x: number, z: number, rot: number, kind: VehicleKind = 'sedan') => {
+        const model = kit?.vehicles.get(kind);
+        if (model) return this.kitWreck(local, kit!, model, color, x, z, rot, inc.id);
         const car = new THREE.Group();
         car.position.set(x, 0.2, z);
         car.rotation.y = rot;
@@ -1951,27 +2305,49 @@ export class View3D {
         for (const end of [-3.4, 3.4]) for (const side of [-1.1, 1.1]) lamp('hazard', new THREE.BoxGeometry(0.2, 0.35, 0.5), end, 0.9, side, car);
         return car;
       };
-      wreck(0xe8e8e8, -2.5, 0.2, 0.4);
-      const front = wreck(0x8a1c1c, 3, -0.3, -0.3);
-      // Where the smoke comes from: the front car's bonnet.
+      // Paint for the two cars from the usual mix, and their types, fixed per incident.
+      const rng = mulberry32(inc.id * 7919);
+      const paint = () => vehiclePaint({ id: Math.floor(rng() * 1e6) } as Trip, 'sedan', this.tmpColor).getHex();
+      const kinds: VehicleKind[] = ['sedan', 'hatchback', 'suv', 'van'];
+      const pick = () => kinds[Math.floor(rng() * kinds.length)];
+      // The rear car ran into the front one: both knocked askew, the front one turned further.
+      wreck(kit ? paint() : 0xe8e8e8, -2.6, 0.3, 0.35, pick());
+      wreck(kit ? paint() : 0x8a1c1c, 2.8, -0.4, -0.55, pick());
+      // Where the smoke comes from: between the cars, off the rear one's crumpled bonnet.
       const smoke = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ visible: false }));
       smoke.name = 'smoke';
-      smoke.position.set(2.6, 1.6, 0);
-      front.add(smoke);
-      lamp('beacon', new THREE.SphereGeometry(0.9, 10, 8), -2.5, 3.4, 0.2);
-      const rng = mulberry32(inc.id * 7919);
-      for (let k = 0; k < 7; k++) {
-        box(0.4 + rng() * 0.9, 0.12, 0.3 + rng() * 0.6, k % 3 === 0 ? 0x8a1c1c : 0x2b2f36, -1 + rng() * 6, 0, -1.6 + rng() * 3.2, rng() * Math.PI);
+      smoke.position.set(-0.4, 1.3, 0.6);
+      local.add(smoke);
+      if (!kit) lamp('beacon', new THREE.SphereGeometry(0.9, 10, 8), -2.5, 3.4, 0.2);
+      // Debris between and around the cars: bumper, door, a tyre, panels, a spoiler.
+      const debris: PropName[] = ['debris-bumper', 'debris-door', 'debris-tire', 'debris-plate-a', 'debris-spoiler-a', 'debris-plate-a'];
+      for (const [k, name] of debris.entries()) {
+        const x = -0.8 + rng() * 4.5;
+        const z = -2 + rng() * 3.6;
+        if (!prop(name, x, z, rng() * Math.PI * 2)) box(0.4 + rng() * 0.9, 0.12, 0.3 + rng() * 0.6, k % 3 === 0 ? 0x8a1c1c : 0x2b2f36, x, 0, z, rng() * Math.PI);
       }
+      // Broken glass: small pale chips on the road.
+      for (let k = 0; k < 10; k++) box(0.15, 0.03, 0.12, 0xbfd4e0, -0.5 + rng() * 3, 0, -1.4 + rng() * 2.6, rng() * Math.PI);
+      // A taper of cones from the kerb out round the cars, with road flares between them.
+      const back = -stretch / 2 - 2;
+      for (let k = 0; k < 5; k++) cone(back - 3.2 * k, -1.6 + 0.75 * k);
       for (const k of [0, 1, 2]) {
-        cone(-stretch / 2 - 1 - 3 * k, -1.2 + 0.9 * k);
-        const flare = new THREE.Mesh(
-          new THREE.SphereGeometry(0.45, 8, 6),
-          new THREE.MeshBasicMaterial({ color: 0xff3a1a, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }),
+        const x = back - 1.6 - 3.2 * k;
+        const z = -0.8 + 0.75 * k;
+        // A flare: a red stick on the road, a flickering glow over it, and light pooled round it.
+        box(0.5, 0.08, 0.08, 0xc8241a, x, 0, z, 0.6 + k);
+        const tip = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ visible: false }));
+        tip.name = 'flareTip';
+        tip.position.set(x + 0.2, 0.1, z);
+        local.add(tip);
+        glow('flare', 0xff4a1e, 1.6, x + 0.2, 0.25, z);
+        const pool = new THREE.Mesh(
+          new THREE.CircleGeometry(2.6, 20).rotateX(-Math.PI / 2),
+          new THREE.MeshBasicMaterial({ map: this.glowTexture(), color: 0xc8301a, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false }),
         );
-        flare.name = 'flare';
-        flare.position.set(-stretch / 2 - 2.5 - 3.5 * k, 0.25, -0.6 + 0.9 * k);
-        local.add(flare);
+        pool.name = 'flare';
+        pool.position.set(x, 0.04, z);
+        local.add(pool);
       }
     } else if (inc.kind === 'lane') {
       // Cones along the lane's inner edge, tapering in from the kerb, and an arrow board whose
@@ -2003,6 +2379,7 @@ export class View3D {
       new THREE.MeshBasicMaterial({ color: INCIDENT_HEX[inc.kind], depthTest: false }),
     );
     pin.renderOrder = 10;
+    pin.name = 'pin';
     g.add(pin);
     return g;
   }
@@ -2139,6 +2516,341 @@ export class View3D {
 
   get followedTrip(): number | null {
     return this.followTrip;
+  }
+
+  // Call scenes (W12): units parked at the address with their lights going; a fire burning from
+  // the moment the call comes in, with a hose and water once an engine is there; police tape at a
+  // crime scene. `scenes` is the full current list; anything missing from it is cleared.
+  setScenes(scenes: CallScene[]): void {
+    const live = new Set<string>();
+    for (const sc of scenes) {
+      const id = `scene:${sc.id}`;
+      live.add(id);
+      const key = `${sc.burning}|${sc.units.join(',')}|${this.vehicleStyle}`;
+      const old = this.scenes.get(id);
+      if (old?.key === key) continue;
+      if (old) this.dropScene(id, old.g);
+      const g = this.buildScene(id, sc);
+      this.scenes.set(id, { key, g });
+      this.scene.add(g);
+    }
+    for (const [id, sc] of this.scenes) if (!live.has(id)) this.dropScene(id, sc.g);
+  }
+
+  private dropScene(id: string, g: THREE.Group): void {
+    this.effects.clear(id);
+    this.scene.remove(g);
+    g.traverse((o) => {
+      if ((o instanceof THREE.Mesh || o instanceof THREE.Sprite) && !o.userData.kit) {
+        if (o instanceof THREE.Mesh) o.geometry.dispose();
+        (o.material as THREE.Material).dispose();
+      }
+    });
+    this.scenes.delete(id);
+  }
+
+  // The building on a site's lot: the City Kit slot nearest the lot's middle, if there is one.
+  private buildingAt(site: Site): { x: number; z: number; h: number; w: number } {
+    const q = this.area(site.lot);
+    const cx = (q.x0 + q.x1) / 2;
+    const cz = (q.z0 + q.z1) / 2;
+    let best: BuildingSlot | null = null;
+    for (const sl of this.kitSlots.get(site.zone) ?? []) {
+      if (sl.x < q.x0 || sl.x > q.x1 || sl.z < q.z0 || sl.z > q.z1) continue;
+      if (!best || Math.hypot(sl.x - cx, sl.z - cz) < Math.hypot(best.x - cx, best.z - cz)) best = sl;
+    }
+    return best ? { x: best.x, z: best.z, h: best.h, w: Math.min(best.w, best.d) } : { x: cx, z: cz, h: 2 * FLOOR, w: Math.min(q.x1 - q.x0, q.z1 - q.z0) * 0.5 };
+  }
+
+  private buildScene(id: string, sc: CallScene): THREE.Group {
+    const g = new THREE.Group();
+    const M = WORLD_PER_M;
+    const site = sc.site;
+    // Along the street (ax, az) and out from the lot towards it (nx, nz), world axes.
+    const [nx, nz] = { n: [0, -1], s: [0, 1], w: [-1, 0], e: [1, 0] }[site.front];
+    const [ax, az] = [-nz, nx];
+    const door = { x: this.wx(site.door.x), z: this.wz(site.door.y) };
+    const y = PAVE_TOP;
+    const building = this.buildingAt(site);
+    // Units: parked on the pavement in front of the door, side by side along the street.
+    const kit = this.vehicleStyle === 'models' ? this.kit : null;
+    const parked: THREE.Vector3[] = [];
+    sc.units.forEach((kind, k) => {
+      const off = (k - (sc.units.length - 1) / 2) * 8 * M;
+      const px = door.x + nx * 3.2 * M + ax * off;
+      const pz = door.z + nz * 3.2 * M + az * off;
+      const car = new THREE.Group();
+      car.position.set(px, y, pz);
+      car.rotation.y = -Math.atan2(az, ax); // facing along the street
+      g.add(car);
+      parked.push(car.position.clone());
+      const model = kit?.vehicles.get(kind);
+      let top = 0.3;
+      if (model) {
+        const body = new THREE.Mesh(model.body, kit!.material);
+        body.userData.kit = true;
+        body.castShadow = true;
+        car.add(body);
+        for (const slot of model.slots) {
+          const w = new THREE.Mesh(slot.right ? model.wheelR : model.wheelL, kit!.material);
+          w.position.set(slot.x, slot.y, slot.z);
+          w.userData.kit = true;
+          car.add(w);
+        }
+        top = model.top;
+      } else {
+        const body = new THREE.Mesh(this.fleet.get(kind)!.classic.body, this.bodyMat);
+        body.userData.kit = true;
+        car.add(body);
+      }
+      // Roof lights: red one side, blue the other, flashing in turn.
+      for (const [side, color, name] of [[-1, 0xff2a2a, 'sceneA'], [1, 0x2a6bff, 'sceneB']] as const) {
+        const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTexture(), color, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false }));
+        sp.name = name;
+        sp.position.set(0, top + 0.03, side * 0.07);
+        sp.scale.setScalar(0.32);
+        car.add(sp);
+        (sp.material as THREE.SpriteMaterial).userData.on = color;
+      }
+    });
+    const named = (n: string) => {
+      const out: THREE.SpriteMaterial[] = [];
+      g.traverse((o) => o instanceof THREE.Sprite && o.name === n && out.push(o.material as THREE.SpriteMaterial));
+      return out;
+    };
+    this.effects.flash(`${id}:a`, named('sceneA'), 0xff2a2a, 0x000000, 600, 220);
+    this.effects.flash(`${id}:b`, named('sceneB'), 0x2a6bff, 0x000000, 600, 220, 0, 300);
+    // Fire: flames from the windows and roof, thick smoke above; a hose and water once an engine is there.
+    if (sc.kind === 'fire' && sc.burning) {
+      const top = new THREE.Vector3(building.x, y + building.h * 0.85, building.z);
+      for (let k = 0; k < 3; k++) {
+        const at = top.clone().add(new THREE.Vector3((k - 1) * building.w * 0.25, -k * building.h * 0.2, 0));
+        this.effects.emit(`${id}:flame${k}`, 'flame', at, { rate: 34, size: 0.7 });
+      }
+      this.effects.emit(`${id}:smoke`, 'smoke', top.clone().setY(y + building.h + 0.3), { rate: 10, size: 1.1 });
+      const engine = sc.units.indexOf('fire');
+      if (engine >= 0) {
+        const from = parked[engine].clone().setY(y + 0.03);
+        const to = new THREE.Vector3(door.x - nx * 1.5 * M, y + 0.03, door.z - nz * 1.5 * M);
+        const mid = from.clone().lerp(to, 0.5).add(new THREE.Vector3(ax, 0, az).multiplyScalar(1.2 * M));
+        const hose = new THREE.Mesh(
+          new THREE.TubeGeometry(new THREE.CatmullRomCurve3([from, mid, to]), 24, 0.012, 6),
+          new THREE.MeshStandardMaterial({ color: 0xd8c27a, roughness: 0.8 }),
+        );
+        g.add(hose);
+        // The jet: from the nozzle at the door, up and onto the burning floors.
+        const nozzle = to.clone().setY(y + 0.12);
+        const aim = new THREE.Vector3(building.x - nozzle.x, 0, building.z - nozzle.z);
+        const dist = Math.max(0.5, aim.length());
+        const rise = building.h * 0.7;
+        const tFlight = 0.9;
+        const dir = aim.normalize().multiplyScalar(dist / tFlight).setY(rise / tFlight + (1.4 * tFlight) / 2);
+        this.effects.emit(`${id}:water`, 'water', nozzle, { rate: 70, size: 0.07, dir });
+      }
+    }
+    // Crime: police tape round the front of the lot, from post to post.
+    if (sc.kind === 'crime' && sc.units.includes('police')) {
+      // A cordon on the pavement in front of the door, round the police car, open on the lot side.
+      const out = 5 * M;
+      const half = Math.max(7, sc.units.length * 4.5) * M;
+      const inner = -1 * M;
+      const corners = [
+        [door.x + ax * half + nx * inner, door.z + az * half + nz * inner],
+        [door.x + ax * half + nx * out, door.z + az * half + nz * out],
+        [door.x - ax * half + nx * out, door.z - az * half + nz * out],
+        [door.x - ax * half + nx * inner, door.z - az * half + nz * inner],
+      ];
+      const post = new THREE.MeshStandardMaterial({ color: 0x3a3f45 });
+      const tape = new THREE.MeshStandardMaterial({ color: 0xf2c21a, side: THREE.DoubleSide, emissive: 0x3a2e00 });
+      corners.forEach(([x, z]) => {
+        const m = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.014, 1.3 * M, 6), post);
+        m.position.set(x, y + 0.65 * M, z);
+        g.add(m);
+      });
+      for (let k = 0; k < 3; k++) {
+        const [x0, z0] = corners[k];
+        const [x1, z1] = corners[k + 1];
+        const len = Math.hypot(x1 - x0, z1 - z0);
+        // Drawn a little wide (like the cones) so it reads from street view.
+        const m = new THREE.Mesh(new THREE.PlaneGeometry(len, 0.22 * M), tape);
+        m.position.set((x0 + x1) / 2, y + 1.1 * M, (z0 + z1) / 2);
+        m.rotation.y = -Math.atan2(z1 - z0, x1 - x0);
+        g.add(m);
+      }
+    }
+    return g;
+  }
+
+  // For the traffic sound: moving cars near the camera (louder nearer and faster), and how many close
+  // by are stuck in a queue. Far above the city it fades to nothing.
+  trafficSound(): { level: number; wet: boolean; stuck: number } {
+    const cam = this.camera.position;
+    const cx = cam.x / WORLD_PER_M + this.sim.grid.width / 2;
+    const cy = cam.z / WORLD_PER_M + this.sim.grid.height / 2;
+    const ch = cam.y / WORLD_PER_M;
+    let level = 0;
+    let stuck = 0;
+    for (const v of this.sim.traffic.vehicles) {
+      const p = this.sim.traffic.pose(v);
+      const d2 = (p.x - cx) ** 2 + (p.y - cy) ** 2 + ch * ch;
+      if (d2 > 400 * 400) continue;
+      level += (0.35 + Math.min(1, v.v / 14)) * (900 / (900 + d2)); // full weight within ~30 m
+      if (v.v < 0.5 && d2 < 120 * 120) stuck++;
+    }
+    return { level: Math.sqrt(level) * 0.35, wet: this.weatherNow === 'rain', stuck };
+  }
+
+  // For the ambient sound: the wind, and birdsong by day with the camera low over the city.
+  ambience(): { wind: number; birds: number } {
+    const low = THREE.MathUtils.clamp(1 - (this.camera.position.y - 20) / 100, 0, 1);
+    const day = 1 - this.sky.night;
+    return { wind: wind.strength.value, birds: this.weatherNow === 'rain' ? 0 : day * low };
+  }
+
+  // Breeze, birds and clouds, on real time: the wind blows harder in rain and drops in fog.
+  private syncNature(): void {
+    const now = performance.now();
+    const dt = Math.min(0.1, (now - this.lastNatureMs) / 1000);
+    this.lastNatureMs = now;
+    wind.time.value = now / 1000;
+    this.trees?.update(this.camera.position);
+    const w = this.weatherNow;
+    wind.strength.value += ((w === 'rain' ? 1.25 : w === 'fog' ? 0.2 : 0.55) - wind.strength.value) * 0.02;
+    this.birds.update(dt, this.sky.night + (w === 'rain' ? 0.7 : 0));
+    this.sky.cloudLight(this.cloudLight);
+    this.clouds.update(this.cloudLight, w === 'rain' ? 1 : w === 'fog' ? 0.8 : 0.45, 0.8 + 2.2 * wind.strength.value);
+  }
+
+  // Weather: an overcast sky and fog, wet roads and falling rain round the camera.
+  private weatherNow: Weather = 'clear';
+  setWeather(w: Weather): void {
+    this.weatherNow = w;
+    this.sky.overcastTarget = w === 'clear' ? 0 : w === 'rain' ? 0.8 : 0.55;
+    this.sky.fogTarget = w === 'fog' ? 0.01 : w === 'rain' ? 0.004 : BASE_FOG;
+    const roads = this.roads.material as THREE.MeshStandardMaterial;
+    roads.roughness = w === 'rain' ? 0.38 : 0.9; // wet asphalt shines
+    roads.metalness = w === 'rain' ? 0.15 : 0;
+    if (w === 'rain' && !this.rain) this.buildRain();
+    if (this.rain) this.rain.visible = w === 'rain';
+  }
+
+  // Rain drops: short slanted streaks in a box that follows the camera's target.
+  private buildRain(): void {
+    const N = 5000;
+    const pos = new Float32Array(N * 6);
+    this.rainVel = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const x = (Math.random() - 0.5) * RAIN_BOX;
+      const y = Math.random() * RAIN_HEIGHT;
+      const z = (Math.random() - 0.5) * RAIN_BOX;
+      pos.set([x, y, z, x + 0.06, y + 0.7, z + 0.03], i * 6);
+      this.rainVel[i] = 24 + Math.random() * 8; // world units a second
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+    this.rain = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0xaebfd0, transparent: true, opacity: 0.45, depthWrite: false }));
+    this.rain.frustumCulled = false;
+    this.scene.add(this.rain);
+  }
+
+  private syncRain(): void {
+    const now = performance.now();
+    const dt = Math.min(0.1, (now - this.lastRainMs) / 1000);
+    this.lastRainMs = now;
+    if (!this.rain?.visible) return;
+    const t = this.controls.target;
+    this.rain.position.set(t.x, 0, t.z);
+    const pos = this.rain.geometry.attributes.position as THREE.BufferAttribute;
+    const a = pos.array as Float32Array;
+    for (let i = 0; i < this.rainVel.length; i++) {
+      const k = i * 6;
+      let y = a[k + 1] - this.rainVel[i] * dt;
+      if (y < 0) y += RAIN_HEIGHT;
+      a[k + 1] = y;
+      a[k + 4] = y + 0.7;
+    }
+    pos.needsUpdate = true;
+  }
+
+  // Bus lines (L): each line's route both ways in its colour, its stops, and a pin over each bus.
+  get showBusLines(): boolean {
+    return this.busOverlay?.visible ?? false;
+  }
+
+  set showBusLines(on: boolean) {
+    if (on && !this.busOverlay) this.buildBusOverlay();
+    if (this.busOverlay) this.busOverlay.visible = on;
+    if (this.busPins) this.busPins.visible = on;
+  }
+
+  private buildBusOverlay(): void {
+    const traffic = this.sim.traffic;
+    const routes = new StaticBatch();
+    const stops = new StaticBatch();
+    const white = new THREE.Color(0xf4f4f4);
+    const y = 0.285;
+    // A flat strip from (x0, z0) to (x1, z1), world units.
+    const strip = (x0: number, z0: number, x1: number, z1: number, color: THREE.Color) => {
+      const len = Math.hypot(x1 - x0, z1 - z0);
+      if (len < 1e-3) return;
+      routes.add(new THREE.PlaneGeometry(len, 0.3).rotateX(-Math.PI / 2), color, (x0 + x1) / 2, y, (z0 + z1) / 2, 0, -Math.atan2(z1 - z0, x1 - x0));
+    };
+    this.sim.busLines.forEach((line, k) => {
+      const color = new THREE.Color(BUS_LINE_HEX[k % BUS_LINE_HEX.length]);
+      for (const d of [0, 1] as const) {
+        let prev: { x: number; z: number } | null = null;
+        for (const link of line.routes[d]) {
+          const g = traffic.lanes[link].geom;
+          const a = { x: this.wx(g.x0), z: this.wz(g.y0) };
+          const b = { x: this.wx(g.x0 + g.dx * g.length), z: this.wz(g.y0 + g.dy * g.length) };
+          if (prev) strip(prev.x, prev.z, a.x, a.z, color); // across the junction
+          strip(a.x, a.z, b.x, b.z, color);
+          prev = b;
+        }
+        for (const stop of line.stops[d]) {
+          const p = traffic.lanes[stop.link].geom.pose(Math.max(0, stop.pos - 6));
+          stops.add(new THREE.CylinderGeometry(0.3, 0.3, 0.02, 16), white, this.wx(p.x), y + 0.01, this.wz(p.y));
+          stops.add(new THREE.CylinderGeometry(0.2, 0.2, 0.02, 16), color, this.wx(p.x), y + 0.02, this.wz(p.y));
+        }
+      }
+    });
+    const mat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.85, depthWrite: false });
+    const group = new THREE.Group();
+    group.add(routes.build(mat, false, false), stops.build(new THREE.MeshBasicMaterial({ vertexColors: true }), false, false));
+    group.renderOrder = 3;
+    this.busOverlay = group;
+    this.scene.add(group);
+    // Pins over the buses: a downward cone in the line's colour.
+    const pin = new THREE.ConeGeometry(0.32, 0.8, 10).rotateX(Math.PI);
+    this.busPins = new THREE.InstancedMesh(pin, new THREE.MeshBasicMaterial(), 64);
+    this.busPins.count = 0;
+    this.busPins.frustumCulled = false;
+    this.scene.add(this.busPins);
+  }
+
+  private syncBusPins(): void {
+    const pins = this.busPins;
+    if (!pins || !pins.visible) return;
+    let n = 0;
+    const bob = 0.15 * Math.sin(performance.now() / 300);
+    for (const v of this.sim.traffic.vehicles) {
+      if (v.trip.kind !== 'bus' || n >= 64) continue;
+      const at = this.sim.busLineOf(v.trip);
+      const p = this.sim.traffic.pose(v);
+      this.tmp.position.set(this.wx(p.x), 0, this.wz(p.y));
+      // Bigger and higher further away, so every bus stays easy to spot from city zoom.
+      const k = THREE.MathUtils.clamp(this.camera.position.distanceTo(this.tmp.position) / 30, 1, 4);
+      this.tmp.position.y = (1.9 + bob) * k;
+      this.tmp.rotation.set(0, 0, 0);
+      this.tmp.scale.setScalar(k);
+      this.tmp.updateMatrix();
+      pins.setMatrixAt(n, this.tmp.matrix);
+      pins.setColorAt(n, this.tmpColor.setHex(BUS_LINE_HEX[(at?.line ?? 0) % BUS_LINE_HEX.length]));
+      n++;
+    }
+    pins.count = n;
+    pins.instanceMatrix.needsUpdate = true;
+    if (pins.instanceColor) pins.instanceColor.needsUpdate = true;
   }
 
   // The car under a screen point that `accept` takes, or null if none is within reach.
@@ -2355,6 +3067,10 @@ export class View3D {
     this.syncFollow();
     this.syncSignals();
     this.syncIncidents(now);
+    this.syncBusPins();
+    this.syncRain();
+    this.syncNature();
+    if (this.kitBuildings?.group.visible) this.kitBuildings.update(this.camera.position);
     this.syncBoids();
     this.syncTags();
     if (now - this.lastCongestion > CONGESTION_REFRESH_MS) {

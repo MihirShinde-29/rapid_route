@@ -5,12 +5,14 @@ import type { Weather } from '../src/traffic/traffic';
 
 // Rain and fog (W12): cars drive below the limit and leave longer gaps, so trips take longer,
 // and the network still flows (no gridlock removals) at the morning peak.
-function peak(weather: Weather) {
+async function peak(weather: Weather) {
   const sim = new Simulation({ ...DEFAULT_CONFIG, startHour: 7.5 });
   sim.weather = weather;
   const starts = new Map<number, number>();
   const times: number[] = [];
+  let n = 0;
   while (sim.time < 8.25 * HOUR) {
+    if (++n % 3000 === 0) await breather();
     const spawned = sim.step();
     if (sim.time < 8 * HOUR) for (const t of spawned) starts.set(t.id, t.departTime);
     for (const t of sim.arrivals) {
@@ -27,11 +29,14 @@ function peak(weather: Weather) {
   };
 }
 
+// Long runs hand control back now and then, so the test runner's worker can report in.
+const breather = () => new Promise<void>((r) => setTimeout(r, 0));
+
 describe('weather (W12)', () => {
-  it('rain and fog lengthen trips, fog the most, without gridlock', () => {
-    const clear = peak('clear');
-    const rain = peak('rain');
-    const fog = peak('fog');
+  it('rain and fog lengthen trips, fog the most, without gridlock', async () => {
+    const clear = await peak('clear');
+    const rain = await peak('rain');
+    const fog = await peak('fog');
     console.log('weather', JSON.stringify({ clear, rain, fog }));
     expect(rain.meanTrip).toBeGreaterThan(clear.meanTrip);
     expect(fog.meanTrip).toBeGreaterThan(rain.meanTrip);

@@ -5,7 +5,7 @@ import { Simulation, DEFAULT_CONFIG } from '../src/sim';
 // Cars already on the road look again at their route as streets slow down (W12). Here the busiest
 // arterial is jammed to walking pace at the morning peak (as a broken signal or roadworks would);
 // with live rerouting on, cars already heading down it should find other ways.
-function jammedPeak(live: boolean) {
+async function jammedPeak(live: boolean) {
   const sim = new Simulation({ ...DEFAULT_CONFIG, startHour: 7.5 });
   sim.rerouteLive = live;
   sim.rerouteQueues = false; // the accident-queue rule is tested on its own
@@ -33,6 +33,7 @@ function jammedPeak(live: boolean) {
   let steps = 0;
   let stepMs = 0;
   while (sim.time < end) {
+    if (steps % 3000 === 0) await breather();
     const t0 = performance.now();
     const spawned = sim.step();
     const ms = performance.now() - t0;
@@ -68,10 +69,13 @@ function jammedPeak(live: boolean) {
   };
 }
 
+// Long runs hand control back now and then, so the test runner's worker can report in.
+const breather = () => new Promise<void>((r) => setTimeout(r, 0));
+
 describe('live rerouting (W12)', () => {
-  it('cars on the road switch away from a street that slows down, and trips get no slower', () => {
-    const on = jammedPeak(true);
-    const off = jammedPeak(false);
+  it('cars on the road switch away from a street that slows down, and trips get no slower', async () => {
+    const on = await jammedPeak(true);
+    const off = await jammedPeak(false);
     console.log('live reroute on', JSON.stringify(on), 'off', JSON.stringify(off));
     expect(on.rerouted).toBeGreaterThan(0);
     expect(off.rerouted).toBe(0);

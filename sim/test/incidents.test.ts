@@ -90,11 +90,14 @@ describe('incidents', () => {
   }, 60_000);
 });
 
+// Long runs hand control back now and then, so the test runner's worker can report in.
+const breather = () => new Promise<void>((r) => setTimeout(r, 0));
+
 describe('queues at a blockage', () => {
   // Mean number of cars standing in the queue for a blocked lane (on it, or on the streets just
   // before it with a route through it), sampled every second for half an hour after an accident
   // on the busiest arterial at the morning peak.
-  function accidentQueue(reroute: boolean, live = false) {
+  async function accidentQueue(reroute: boolean, live = false) {
     const sim = new Simulation({ ...DEFAULT_CONFIG, startHour: 7.5 });
     sim.rerouteQueues = reroute;
     sim.rerouteLive = false; // same city up to the accident in every run
@@ -110,6 +113,7 @@ describe('queues at a blockage', () => {
     const end = sim.time + 0.5 * HOUR;
     while (sim.time < end) {
       sim.step();
+      if (steps % 3000 === 0) await breather();
       if (++steps % 10 !== 0) continue;
       let q = sim.traffic.lanes[link].vehicles.filter((v) => v.v < 2).length;
       for (const f of feeders) q += sim.traffic.lanes[f].vehicles.filter((v) => v.v < 2 && v.route.includes(link)).length;
@@ -120,9 +124,9 @@ describe('queues at a blockage', () => {
     return { mean: sum / samples, rerouted: sim.queueReroutes, removed: sim.traffic.removedGridlock };
   }
 
-  it('cars heading for an accident find a way round as its queue grows, so the queue stays shorter', () => {
-    const on = accidentQueue(true);
-    const off = accidentQueue(false);
+  it('cars heading for an accident find a way round as its queue grows, so the queue stays shorter', async () => {
+    const on = await accidentQueue(true);
+    const off = await accidentQueue(false);
     console.log('queue on', on.mean, 'off', off.mean);
     expect(on.rerouted).toBeGreaterThan(0);
     expect(off.rerouted).toBe(0);
@@ -130,9 +134,9 @@ describe('queues at a blockage', () => {
     expect(on.removed).toBe(0);
   }, 300_000);
 
-  it('with live rerouting on as well (the game default) the queue is no longer than with neither', () => {
-    const both = accidentQueue(true, true);
-    const neither = accidentQueue(false, false);
+  it('with live rerouting on as well (the game default) the queue is no longer than with neither', async () => {
+    const both = await accidentQueue(true, true);
+    const neither = await accidentQueue(false, false);
     console.log('queue both', both.mean, 'neither', neither.mean);
     expect(both.mean).toBeLessThan(neither.mean);
     expect(both.removed).toBe(0);

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dispatch: A6 Feature Freeze</title>
+<style>
+  @page { size: Letter; margin: 0.45in 0.5in; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 8.5pt; line-height: 1.27; color: #111; margin: 0; }
+  h1 { font-size: 14.5pt; margin: 0 0 2px; }
+  h2 { font-size: 10pt; margin: 7px 0 3px; border-bottom: 1px solid #999; padding-bottom: 1px; }
+  .meta { color: #333; margin-bottom: 3px; }
+  a { color: #0645ad; }
+  p { margin: 2px 0 3px; }
+  table { border-collapse: collapse; width: 100%; font-size: 7.6pt; }
+  th, td { border: 1px solid #aaa; padding: 2px 4px; vertical-align: top; text-align: left; }
+  th { background: #eee; }
+  tr.buffer td { background: #f3f3f3; font-weight: 600; }
+  ul, ol { margin: 2px 0 3px; padding-left: 15px; }
+  li { margin: 1px 0; }
+  .todo { background: #fff3a8; }
+  .page2 { break-before: page; }
+</style>
+</head>
+<body>
+<h1>Dispatch: Feature Freeze and Playtest (Assignment 6)</h1>
+<div class="meta">Group Rapid Route: Mihir Shinde, Ananya Das Hullumane Neelameghashyam · CS 549 · Live build: <a href="https://mihirshinde-29.github.io/rapid_route/">mihirshinde-29.github.io/rapid_route</a> · Code: <a href="https://github.com/MihirShinde-29/rapid_route">github.com/MihirShinde-29/rapid_route</a> · Playtest kit: <code>docs/A6_PLAYTEST_KIT.md</code></div>
+
+<h2>Feature freeze</h2>
+<p>Every feature planned for the final build is in the live build as of Nov 18. From here on we only fix bugs, retune and polish, working from the playtest results below. The could-have items in the A5 schedule (adaptive signals, two-lane arterials, snow) are cut.</p>
+
+<h2>Release notes: changes since the Beta (A5)</h2>
+<ul>
+<li><b>Street life:</b> people walk the pavements of every block, with legs and arms that swing as they walk. How many are out follows the time of day and the district (busy downtown and by the shops at midday, few at night), and fewer go out in rain, where they carry umbrellas. <b>Parked cars</b> fill the car parks of shops, offices and industry by day and the house driveways at night. Close to the camera they use the Car Kit model and further away the simple one, so street life costs about 5 FPS on Graphics high.</li>
+<li><b>Street lights:</b> pavement lanterns along every street besides the tall lamps. They come on one by one at dusk, and some come on by day in rain or fog. Each lamp lights a pool of light on the pavement.</li>
+<li><b>Fires char buildings:</b> a building on fire darkens the longer it burns, and stays charred after the fire is out.</li>
+<li><b>End-of-shift call map:</b> the result screen draws the city with the stations and every call of the shift (handled in time, late, or missed). Hovering over a call shows what it was and how it went.</li>
+<li><b>Graphics levels:</b> high, medium and low (button or G), remembered between visits. Medium drops shadows and birds and shows half the people. Low also drops clouds, shows a quarter of the people and uses the simple vehicle models. Measured uncapped in headless Chrome at the morning peak on our laptop: high 80, medium 93, low 119 FPS. This was before the walking people got limbs; the playtests re-measure it on other machines.</li>
+<li><b>Sound and weather:</b> a volume slider beside the mute button, remembered between visits. The shift menu has a weather choice (clear, rain, fog), and best scores are kept for each weather.</li>
+<li><b>Playtest log</b> (<code>?playtest=S1</code>): records clicks, keys, tutorial step times, every call and how long it waited, the frame rate every 5 s, any second under 40 FPS or freeze over 0.25 s with what was on screen, and the shift result. It stays in the browser until saved as JSON from a badge in the corner.</li>
+<li><b>Stability:</b> 84 automated tests (80 in the Beta), all passing.</li>
+</ul>
+
+<h2>Weekly schedule to the final</h2>
+<table>
+<thead><tr><th style="width:13%">Week</th><th style="width:43%">Engineering</th><th style="width:16%">Assets</th><th style="width:12%">Milestone</th><th style="width:16%">Owner</th></tr></thead>
+<tbody>
+<tr><td>W12 (Nov 16 – 22), done</td><td>Street life, street lights, charring, call map, graphics levels, volume, shift weather, playtest log and kit</td><td>Person and umbrella models, lanterns</td><td>Feature freeze Nov 18</td><td>Mihir</td></tr>
+<tr><td>W13 (Nov 23 – 29)</td><td>Playtest sessions with 5+ classmates; fix what they found (A7 action items below); retune difficulty</td><td>Screenshots for the report</td><td>A6 submitted</td><td>Both</td></tr>
+<tr><td>W14 (Nov 30 – Dec 6)</td><td>Remaining action items and bug fixes; a second, shorter round of playtests on the fixes</td><td>Video, report figures, final slides</td><td>Release candidate Dec 6</td><td>Both</td></tr>
+<tr class="buffer"><td>W15 (Dec 7 – 13): buffer</td><td>No new features. Bug fixes, documentation, README, final report and video</td><td></td><td>Final submission</td><td>Both</td></tr>
+</tbody>
+</table>
+
+<div class="page2">
+<h2>User study</h2>
+<p><b>Method.</b> <span class="todo">[N]</span> classmates outside our group (S1–S<span class="todo">[N]</span>) each played one shift on the live build, on <span class="todo">[machines / browsers]</span>, between <span class="todo">[dates]</span>. Each started from a cleared game, so they saw the first-shift tutorial. We read a fixed script, explained no controls, and asked them to think aloud. An observer took notes and helped only after about 2 minutes stuck. Every session ran with the playtest log on. Afterwards each answered the same 8 interview questions (kit section 5). Sessions lasted about <span class="todo">[X]</span> minutes of play.</p>
+
+<table>
+<thead><tr><th>Subject</th><th>Setup</th><th>Result (grade, missed)</th><th>Controls 1–10</th><th>Difficulty</th><th>Tutorial time</th><th>FPS (median / dips)</th><th>Main problem</th></tr></thead>
+<tbody>
+<tr class="todo"><td>S1</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr class="todo"><td>S2</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr class="todo"><td>S3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr class="todo"><td>S4</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr class="todo"><td>S5</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+</tbody>
+</table>
+
+<p><b>What we saw</b> <span class="todo">[problems seen by two or more subjects, from the notes and logs]</span></p>
+<ul class="todo">
+<li>Confusing or frustrating: </li>
+<li>Controls: </li>
+<li>Visual glitches and lag (with what was on screen): </li>
+<li>Difficulty: </li>
+<li>What they liked: </li>
+</ul>
+
+<h2>Action items for A7</h2>
+<ol class="todo">
+<li>[action] (seen in: …)</li>
+<li>[action] (seen in: …)</li>
+<li>[action] (seen in: …)</li>
+</ol>
+</div>
+</body>
+</html>

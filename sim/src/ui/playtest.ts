@@ -32,6 +32,7 @@ export class PlaytestLog {
   private lastStep: string | null = null;
   private stepSince = 0;
   private saveTimer = 0;
+  private lastFrame = 0;
 
   constructor(subject: string) {
     this.key = `dispatch.playtest.${subject}`;
@@ -84,6 +85,7 @@ export class PlaytestLog {
     window.addEventListener('error', (e) => this.log('error', { message: String(e.message) }));
     window.addEventListener('unhandledrejection', (e) => this.log('error', { message: String(e.reason) }));
     window.addEventListener('beforeunload', () => this.persist());
+    document.addEventListener('visibilitychange', () => this.log(document.hidden ? 'tab_hidden' : 'tab_shown'));
   }
 
   private now(): number {
@@ -107,8 +109,20 @@ export class PlaytestLog {
   }
 
   // Every frame: frame time, plus what is on screen when it dips.
+  // A gap of a second or more is the tab hidden or a dialog open, not stutter: it starts the
+  // windows again instead of counting as a dip. A shorter freeze (a quarter second or more) is
+  // logged on its own as a hitch, since the main loop caps frame time at 100 ms.
   frame(dtMs: number, context: () => Record<string, unknown>): void {
     const now = performance.now();
+    const gap = this.lastFrame ? now - this.lastFrame : 0;
+    this.lastFrame = now;
+    if (gap >= 1000 || document.hidden) {
+      this.win = { start: now, frames: 0, worst: 0 };
+      this.sample = { start: now, frames: 0, worst: 0 };
+      return;
+    }
+    if (gap >= 250) this.log('hitch', { ms: Math.round(gap), ...context() });
+    dtMs = Math.max(dtMs, gap);
     for (const w of [this.win, this.sample]) {
       if (w.start === 0) w.start = now;
       w.frames++;

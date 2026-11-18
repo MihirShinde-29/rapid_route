@@ -1,6 +1,6 @@
 import { Simulation, FIXED_DT, DEFAULT_CONFIG, BLOCK_JUNCTION_M, STATION_KINDS, type Incident, type IncidentKind } from './sim';
 import type { Site } from './city/sites';
-import { View3D, INCIDENT_HEX, BUS_LINE_HEX, type CallScene } from './render3d/view3d';
+import { View3D, INCIDENT_HEX, BUS_LINE_HEX, type CallScene, type Quality } from './render3d/view3d';
 import { OdHeatmap } from './render3d/odHeatmap';
 import { DISTRICTS } from './demand/districts';
 import { formatClock, periodAt, HOUR, type Period } from './core/time';
@@ -8,9 +8,11 @@ import type { ZoneType } from './demand/zones';
 import { VEHICLE_KINDS, VEHICLE_SPECS, type EmergencyKind, type VehicleKind } from './traffic/vehicleTypes';
 import { DispatchCenter, sortCallsByPriority, type CallKind, type DispatchMode, type EmergencyCall } from './dispatch/dispatch';
 import { responseChart, formatMinutes } from './ui/responseChart';
+import { callMap } from './ui/callMap';
 import { SirenAudio } from './render3d/sirenAudio';
 import { callIcon } from './ui/icons';
 import { Tutorial } from './ui/tutorial';
+import { PlaytestLog } from './ui/playtest';
 import type { Vehicle, Weather } from './traffic/traffic';
 
 // ?start=7.75 opens at 07:45 with the previous 30 sim minutes already run,
@@ -33,6 +35,9 @@ const pageParams = new URLSearchParams(location.search);
 const warmUntil = startHour !== null ? startHour * HOUR : -Infinity;
 const WARMUP_STEPS_PER_FRAME = 600;
 const $ = (id: string) => document.getElementById(id)!;
+// ?playtest=S1 records this subject's session for the user study (see ui/playtest.ts).
+const playtestId = pageParams.get('playtest');
+const playtest = playtestId && /^[\w-]{1,20}$/.test(playtestId) ? new PlaytestLog(playtestId) : null;
 
 const view = new View3D($('three-container'), sim);
 const heatmap = new OdHeatmap($('odCanvas') as HTMLCanvasElement, $('odReadout'), sim);
@@ -93,6 +98,7 @@ startDispatchBtn.onclick = () => {
     throw new RangeError('Invalid dispatch setup');
   }
   endMoving();
+  setWeather(shiftWeatherSel.value as Weather); // kept in the address, so it survives the reload below
   if (stationMove) pageParams.set('move', `${stationMove.from.id}.${stationMove.to.id}`);
   else pageParams.delete('move');
   // The shift starts at its own time of day with traffic already on the roads: unless the city is
@@ -108,6 +114,7 @@ startDispatchBtn.onclick = () => {
   }
   playedKey = bestKey();
   resultShown = false;
+  playtest?.log('shift_start', { mode: modeValue, shift: shiftSelect.value, difficulty: difficultySelect.value, weather: sim.weather, quality: view.quality });
   sirenTrips.clear();
   lastSirenTrip.clear();
   dispatch = new DispatchCenter(sim, {
@@ -403,6 +410,8 @@ function syncScenes(): void {
     const open = call.state === 'created' || call.state === 'assigned' || call.state === 'en_route';
     const units = dispatch!.units.filter((u) => u.state === 'on_scene' && u.callId === call.id).map((u) => u.kind);
     const burning = call.kind === 'fire' && open;
+    // The building chars as it burns (fully after 10 sim minutes) and stays that way.
+    if (burning) view.charBuilding(call.site, 0.25 + (sim.time - call.createdAt) / 800);
     if (units.length === 0 && !burning) continue;
     scenes.push({ id: call.id, kind: call.kind, site: call.site, units, burning });
   }
@@ -562,6 +571,10 @@ function setWeather(w: Weather): void {
   history.replaceState(null, '', `${location.pathname}?${pageParams.toString()}`);
 }
 weatherSel.onchange = () => setWeather(weatherSel.value as Weather);
+// The shift menu's weather starts as the city's and sets it when the shift starts.
+const shiftWeatherSel = $('dispatchWeather') as HTMLSelectElement;
+shiftWeatherSel.value = pageParams.get('weather') ?? 'clear';
+shiftWeatherSel.onchange = () => showBest();
 {
   const w = pageParams.get('weather');
   if (w === 'rain' || w === 'fog') setWeather(w);
@@ -731,15 +744,35 @@ muteBtn.onclick = () => {
   muteBtn.textContent = sirens.muted ? '🔇 Muted' : '🔊 Sound';
 };
 window.addEventListener('pointerdown', () => sirens.unlock());
-// Graphics quality (G): high draws the Kenney vehicle models, low the simple built-in ones. Kept
-// for this browser.
-const graphicsBtn = $('graphics') as HTMLButtonElement;
-function setGraphics(high: boolean): void {
-  view.setVehicleStyle(high ? 'models' : 'classic');
-  view.effects.enabled = high;
-  graphicsBtn.textContent = `Graphics: ${high ? 'high' : 'low'}`;
+// Volume: one slider over every sound; kept for this browser.
+const volumeInput = $('volume') as HTMLInputElement;
+try {
+  const v = Number(localStorage.getItem('dispatch.volume'));
+  if (localStorage.getItem('dispatch.volume') !== null && v >= 0 && v <= 1) sirens.volume = v;
+} catch {
+  // storage blocked: default volume
+}
+volumeInput.value = String(Math.round(sirens.volume * 100));
+volumeInput.oninput = () => {
+  sirens.unlock();
+  sirens.volume = Number(volumeInput.value) / 100;
+  if (sirens.muted && sirens.volume > 0) muteBtn.click();
   try {
-    localStorage.setItem('dispatch.graphics', high ? 'high' : 'low');
+    localStorage.setItem('dispatch.volume', String(sirens.volume));
+  } catch {
+    // storage blocked: the choice lasts this visit only
+  }
+};
+
+// Graphics quality (G cycles): high has the Kenney models, shadows, birds and full crowds; medium
+// drops shadows, birds and half the people; low uses the simple built-in models. Kept for this browser.
+const graphicsBtn = $('graphics') as HTMLButtonElement;
+const QUALITIES: Quality[] = ['high', 'medium', 'low'];
+function setGraphics(q: Quality): void {
+  view.setQuality(q);
+  graphicsBtn.textContent = `Graphics: ${q}`;
+  try {
+    localStorage.setItem('dispatch.graphics', q);
   } catch {
     // storage blocked: the choice lasts this visit only
   }
@@ -750,8 +783,8 @@ try {
 } catch {
   savedGraphics = null;
 }
-setGraphics(savedGraphics !== 'low');
-graphicsBtn.onclick = () => setGraphics(view.vehicleStyle !== 'models');
+setGraphics(QUALITIES.includes(savedGraphics as Quality) ? (savedGraphics as Quality) : 'high');
+graphicsBtn.onclick = () => setGraphics(QUALITIES[(QUALITIES.indexOf(view.quality) + 1) % QUALITIES.length]);
 $('help').onclick = () => {
   $('helpOverlay').hidden = false;
 };
@@ -1138,7 +1171,9 @@ interface BestScore { points: number; grade: string; date: string }
 let playedKey = '';
 let resultShown = false;
 function bestKey(): string {
-  return `${dispatchModeSelect.value}:${shiftSelect.value}:${difficultySelect.value}`;
+  // Clear weather keeps the key from before weather was a shift option.
+  const w = shiftWeatherSel.value === 'clear' ? '' : `:${shiftWeatherSel.value}`;
+  return `${dispatchModeSelect.value}:${shiftSelect.value}:${difficultySelect.value}${w}`;
 }
 function loadBest(): Record<string, BestScore> {
   try {
@@ -1172,6 +1207,7 @@ function gradeOf(center: DispatchCenter, outcome: string): { letter: string; wit
 
 function showResult(center: DispatchCenter, outcome: string): void {
   const { letter, within, finished, mean } = gradeOf(center, outcome);
+  playtest?.log('shift_end', { outcome, grade: letter, points: center.score.points, finished, within, missed: center.score.missedCalls, meanResponseS: Math.round(center.score.meanResponseTime) });
   $('resultGrade').textContent = letter;
   $('resultGradeNote').textContent = finished > 0
     ? `${Math.round(mean)} points per call · ${within} of ${finished} reached within target`
@@ -1215,6 +1251,10 @@ function showResult(center: DispatchCenter, outcome: string): void {
   }
   const chartBox = $('responseChart');
   chartBox.replaceChildren(responseChart(center.calls, Math.max(200, chartBox.clientWidth || 288)));
+  const mapBox = $('callMap');
+  const streets = { width: sim.grid.width, height: sim.grid.height, nodes: sim.grid.net.nodes, links: sim.grid.net.links };
+  const stations = sim.sites.filter((s) => STATION_KINDS.includes(s.kind));
+  mapBox.replaceChildren(callMap(center.calls, streets, stations, Math.max(200, mapBox.clientWidth || 288)));
   const done = center.calls.filter((c) => c.state === 'resolved' || c.state === 'missed');
   $('responseRows').replaceChildren(
     ...done.map((call, k) => {
@@ -1273,13 +1313,18 @@ function showAlert(call: EmergencyCall, missed: boolean): void {
 function handleDispatchEvents(): void {
   if (!dispatch) return;
   if (dispatch.mode === 'sandbox') {
-    dispatch.drainEvents(); // units go on their own; no alerts
+    for (const e of dispatch.drainEvents()) playtest?.log(`sandbox_${e.type}`, { callId: e.callId });
     return;
   }
   let chime = false;
   let alarm = false;
   for (const e of dispatch.drainEvents()) {
     const call = e.callId === undefined ? undefined : dispatch.calls.find((c) => c.id === e.callId);
+    if (playtest) {
+      // Sim times in seconds since the call came in, so the study can see how long players took.
+      const since = call ? Math.round(sim.time - call.createdAt) : undefined;
+      playtest.log(`call_${e.type}`, { callId: e.callId, kind: call?.kind, severity: call?.severity, simSecondsSinceCall: since, unitId: e.unitId });
+    }
     if (!call) continue;
     if (e.type === 'call' && dispatch.mode === 'dispatcher') {
       showAlert(call, false);
@@ -1490,6 +1535,19 @@ function frame(now: number): void {
   handleDispatchEvents();
   syncCallMarkers();
   updateTutorial();
+  if (playtest) {
+    playtest.tutorialStep(tutorial.current);
+    // Not while fast-forwarding to the start time: those frames are slow on purpose.
+    if (!warming) playtest.frame(realDt * 1000, () => ({
+      quality: view.quality,
+      speed: speedSel.value,
+      paused,
+      riding: view.following,
+      weather: sim.weather,
+      cars: sim.traffic.vehicles.size,
+      drawCalls: view.renderer.info.render.calls,
+    }));
+  }
   perf.drawMs = smooth(perf.drawMs, performance.now() - drawStart);
   if (now - lastSidebar > SIDEBAR_MS) {
     lastSidebar = now;

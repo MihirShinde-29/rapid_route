@@ -46,6 +46,7 @@ interface Lamp {
 
 export class Effects {
   enabled = true;
+  amount = 1; // share of particles emitted (Graphics medium and low emit fewer)
   private emitters = new Map<string, Emitter>();
   private particles: Particle[] = [];
   private points: THREE.Points;
@@ -154,7 +155,7 @@ export class Effects {
       return;
     }
     for (const e of this.emitters.values()) {
-      e.carry += e.rate * dt;
+      e.carry += e.rate * this.amount * dt;
       while (e.carry >= 1 && this.particles.length < MAX_PARTICLES) {
         e.carry--;
         const smoke = e.kind === 'smoke';

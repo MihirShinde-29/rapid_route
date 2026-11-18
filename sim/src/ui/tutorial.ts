@@ -74,6 +74,11 @@ export class Tutorial {
     return this.step >= 0;
   }
 
+  // The step on screen, as "n/N title", or null (for the playtest log).
+  get current(): string | null {
+    return this.step >= 0 ? `${this.step + 1}/${STEPS.length} ${STEPS[this.step].title}` : null;
+  }
+
   // Called every frame with what the player has done.
   update(state: TutorialState): void {
     if (this.step < 0) return;

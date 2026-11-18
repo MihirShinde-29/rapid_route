@@ -21,6 +21,16 @@ export class SirenAudio {
   private nextChirp = 0;
   private nextHorn = 0;
   muted = false;
+  // Master volume, 0..1, over every sound (the volume slider).
+  private master: GainNode | null = null;
+  private vol = 0.8;
+  get volume(): number {
+    return this.vol;
+  }
+  set volume(v: number) {
+    this.vol = Math.max(0, Math.min(1, v));
+    if (this.master && this.ctx) this.master.gain.setTargetAtTime(this.vol * this.vol * 1.4, this.ctx.currentTime, 0.05);
+  }
 
   // Browsers only allow audio after a user gesture; call this from one (a click or key press).
   unlock(): void {
@@ -31,6 +41,9 @@ export class SirenAudio {
     const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!Ctx) return;
     const ctx = new Ctx();
+    this.master = ctx.createGain();
+    this.master.gain.value = this.vol * this.vol * 1.4; // 0.8 is about as loud as before the slider
+    this.master.connect(ctx.destination);
     const osc = ctx.createOscillator();
     osc.type = 'sawtooth';
     osc.frequency.value = BASE_HZ;
@@ -45,7 +58,7 @@ export class SirenAudio {
     filter.frequency.value = 2400;
     const gain = ctx.createGain();
     gain.gain.value = 0;
-    osc.connect(filter).connect(gain).connect(ctx.destination);
+    osc.connect(filter).connect(gain).connect(this.master!);
     osc.start();
     lfo.start();
     this.ctx = ctx;
@@ -69,7 +82,7 @@ export class SirenAudio {
     swell.connect(swellDepth).connect(band.frequency);
     const windGain = ctx.createGain();
     windGain.gain.value = 0;
-    src.connect(band).connect(windGain).connect(ctx.destination);
+    src.connect(band).connect(windGain).connect(this.master!);
     src.start();
     swell.start();
     this.windGain = windGain;
@@ -84,7 +97,7 @@ export class SirenAudio {
     low.frequency.value = 260;
     const rumbleGain = ctx.createGain();
     rumbleGain.gain.value = 0;
-    rumbleSrc.connect(low).connect(rumbleGain).connect(ctx.destination);
+    rumbleSrc.connect(low).connect(rumbleGain).connect(this.master!);
     const hissSrc = ctx.createBufferSource();
     hissSrc.buffer = noise;
     hissSrc.loop = true;
@@ -94,7 +107,7 @@ export class SirenAudio {
     high.Q.value = 0.7;
     const hissGain = ctx.createGain();
     hissGain.gain.value = 0;
-    hissSrc.connect(high).connect(hissGain).connect(ctx.destination);
+    hissSrc.connect(high).connect(hissGain).connect(this.master!);
     rumbleSrc.start();
     hissSrc.start();
     this.rumbleGain = rumbleGain;
@@ -124,7 +137,7 @@ export class SirenAudio {
       const lp = this.ctx.createBiquadFilter();
       lp.type = 'lowpass';
       lp.frequency.value = 1500;
-      lp.connect(env).connect(this.ctx.destination);
+      lp.connect(env).connect(this.master!);
       const base = 380 + Math.random() * 120;
       for (const hz of [base, base * 1.26]) {
         const o = this.ctx.createOscillator();
@@ -160,7 +173,7 @@ export class SirenAudio {
     env.gain.setValueAtTime(0, t0);
     env.gain.linearRampToValueAtTime(peak, t0 + 0.01);
     env.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.09);
-    osc.connect(env).connect(ctx.destination);
+    osc.connect(env).connect(this.master!);
     osc.start(t0);
     osc.stop(t0 + 0.1);
   }
@@ -193,7 +206,7 @@ export class SirenAudio {
     env.gain.setValueAtTime(0, t0);
     env.gain.linearRampToValueAtTime(peak, t0 + 0.01);
     env.gain.exponentialRampToValueAtTime(0.0001, t0 + length);
-    osc.connect(env).connect(ctx.destination);
+    osc.connect(env).connect(this.master!);
     osc.start(t0);
     osc.stop(t0 + length + 0.02);
   }

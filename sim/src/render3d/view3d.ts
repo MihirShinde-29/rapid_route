@@ -11,6 +11,7 @@ import type { BlockPlan, Rect as CityRect, Site } from '../city/sites';
 import type { Light } from '../traffic/signals';
 import type { Zone, ZoneType } from '../demand/zones';
 import { hourOf } from '../core/time';
+import { StreetLife, type WalkRing, type ParkSpot } from './streetLife';
 import { BASE_FOG, Sky, Terrain } from './environment';
 import { Birds, buildTrees, Clouds, wind, type Trees, type TreeSpot } from './nature';
 import type { Weather } from '../traffic/traffic';
@@ -96,6 +97,9 @@ export interface CallScene {
 }
 
 export type VehicleStyle = 'models' | 'classic';
+// Graphics quality: high has everything; medium drops shadows, birds and half the people; low
+// also uses the simple vehicle and building models.
+export type Quality = 'high' | 'medium' | 'low';
 
 type Area = { x0: number; x1: number; z0: number; z1: number }; // world units
 
@@ -369,6 +373,15 @@ export class View3D {
   // Coverage map: a translucent sheet over the city through every junction, coloured by the
   // seconds from the nearest free unit to it (built on first use).
   private coverageMesh: THREE.Mesh | null = null;
+  // People on the pavements and parked cars (visual only): walks round the blocks, and parking
+  // spaces by block (-1 superblocks) so a redrawn block can replace its own.
+  private walkRings: WalkRing[] = [];
+  private parkSpots = new Map<number, ParkSpot[]>();
+  private curSpots: ParkSpot[] | null = null;
+  private life: StreetLife | null = null;
+  quality: Quality = 'high';
+  // Buildings that burned: how dark they are now (0 untouched, 1 fully charred), by building.
+  private charred = new Map<string, { x: number; z: number; w: number; h: number; amount: number; shell: THREE.Mesh | null }>();
 
   constructor(
     private container: HTMLElement,
@@ -456,6 +469,7 @@ export class View3D {
     this.buildArcPool();
     this.effects = new Effects(this.scene);
     this.buildCars();
+    this.buildLife();
     this.emergencyRouteHighlight = new THREE.LineSegments(
       new THREE.BufferGeometry(),
       new THREE.LineBasicMaterial({ color: 0x35d7ff, transparent: true, opacity: 1, depthTest: false }),
@@ -533,25 +547,36 @@ export class View3D {
     this.flat.add(new THREE.PlaneGeometry(w, h), new THREE.Color(0x4a4d51), 0, 0.01, 0, -Math.PI / 2);
   }
 
-  // A lamp post at the middle of every street, on alternating sides (both sides on arterials).
-  // Heads glow and light pools appear on the road at night.
+  // Street lighting. A tall lamp post at the middle of every street (alternating sides, both
+  // sides on arterials), and pedestrian lanterns along the pavements between the street trees.
+  // Each lamp has its own switch-on point (aSwitch, a darkness 0..1), so at dusk they come on one
+  // by one, and some come on early under a dark rain sky; off by day they are dull glass.
   private buildStreetLamps(): void {
     const { net } = this.sim.grid;
     const heads = new StaticBatch();
     const pools = new StaticBatch();
     const post = new THREE.Color(0x3a4048);
     const lamp = new THREE.Color(LAMP_COLOR);
+    const rnd = mulberry32(this.sim.config.seed + 77);
+    // Tag every vertex of a lamp's glowing parts with that lamp's switch-on point.
+    const tagged = (g: THREE.BufferGeometry, at: number) => {
+      g.setAttribute('aSwitch', new THREE.BufferAttribute(new Float32Array(g.attributes.position.count).fill(at), 1));
+      return g;
+    };
     let k = 0;
     for (const link of net.links) {
       if (link.from > link.to) continue;
       const a = net.nodes[link.from];
       const b = net.nodes[link.to];
-      const mx = this.wx((a.x + b.x) / 2);
-      const mz = this.wz((a.y + b.y) / 2);
+      const ax = this.wx(a.x);
+      const az = this.wz(a.y);
+      const len = Math.hypot(this.wx(b.x) - ax, this.wz(b.y) - az);
       const dx = (b.x - a.x) / link.length;
       const dz = (b.y - a.y) / link.length;
       const angle = -Math.atan2(dz, dx);
       const half = link.arterial ? 0.8 : 0.65;
+      const mx = ax + dx * len / 2;
+      const mz = az + dz * len / 2;
       const sides = link.arterial ? [-1, 1] : [k++ % 2 === 0 ? 1 : -1];
       for (const side of sides) {
         // Normal to the street, pointing to this side.
@@ -563,10 +588,31 @@ export class View3D {
         const hx = px - nx * 0.4;
         const hz = pz - nz * 0.4;
         this.solid.add(new THREE.BoxGeometry(0.42, 0.04, 0.04), post, (px + hx) / 2, 1.68, (pz + hz) / 2, 0, angle + Math.PI / 2);
-        heads.add(new THREE.BoxGeometry(0.24, 0.05, 0.12), lamp, hx, 1.64, hz, 0, angle + Math.PI / 2);
-        pools.add(new THREE.CircleGeometry(1.05, 18), lamp, hx, 0.27, hz, -Math.PI / 2);
+        const at = 0.25 + 0.2 * rnd();
+        heads.add(tagged(new THREE.BoxGeometry(0.24, 0.05, 0.12), at), lamp, hx, 1.64, hz, 0, angle + Math.PI / 2);
+        pools.add(tagged(new THREE.CircleGeometry(1.05, 18), at), lamp, hx, 0.27, hz, -Math.PI / 2);
+      }
+      // Lanterns (about 4.5 m) near the kerb, halfway between the street trees (see
+      // buildStreetTrees), clear of the tall lamp: both sides on arterials, alternating on locals.
+      let j = 0;
+      for (let t = 3.5; t < len - 2.4; t += 2.2) {
+        if (Math.abs(t - len / 2) < 1.2) continue;
+        const both = link.arterial ? [-1, 1] : [j % 2 === 0 ? 1 : -1];
+        j++;
+        for (const side of both) {
+          const nx = -dz * side;
+          const nz = dx * side;
+          const px = ax + dx * t + nx * (half + 0.16);
+          const pz = az + dz * t + nz * (half + 0.16);
+          this.solid.add(new THREE.CylinderGeometry(0.016, 0.024, 0.58, 6), post, px, PAVE_TOP + 0.29, pz);
+          this.solid.add(new THREE.CylinderGeometry(0.045, 0.03, 0.03, 8), post, px, PAVE_TOP + 0.665, pz); // cap
+          const at = 0.22 + 0.25 * rnd();
+          heads.add(tagged(new THREE.SphereGeometry(0.038, 8, 6), at), lamp, px, PAVE_TOP + 0.625, pz);
+          pools.add(tagged(new THREE.CircleGeometry(0.55, 14), at), lamp, px, PAVE_TOP + 0.006, pz, -Math.PI / 2);
+        }
       }
     }
+    this.switchMaterial(this.lampHeadMat, 0.3);
     this.scene.add(heads.build(this.lampHeadMat, false, false));
     this.lampPoolMat = new THREE.MeshBasicMaterial({
       vertexColors: true,
@@ -575,8 +621,24 @@ export class View3D {
       blending: THREE.AdditiveBlending,
       depthWrite: false,
     });
+    this.switchMaterial(this.lampPoolMat, 0);
     this.lampPools = pools.build(this.lampPoolMat, false, false);
     this.scene.add(this.lampPools);
+  }
+
+  // A lamp is lit once the darkness passes its aSwitch (a short fade); `off` is its brightness unlit.
+  private lampDark = { value: 0 };
+  private switchMaterial(m: THREE.MeshBasicMaterial, off: number): void {
+    m.onBeforeCompile = (sh) => {
+      sh.uniforms.uDark = this.lampDark;
+      sh.vertexShader = sh.vertexShader
+        .replace('#include <common>', '#include <common>\nattribute float aSwitch;\nuniform float uDark;\nvarying float vLit;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvLit = smoothstep(aSwitch, aSwitch + 0.03, uDark);');
+      sh.fragmentShader = sh.fragmentShader
+        .replace('#include <common>', '#include <common>\nvarying float vLit;')
+        .replace('#include <dithering_fragment>', `#include <dithering_fragment>\ngl_FragColor.rgb *= mix(${off.toFixed(2)}, 1.0, vLit);`);
+    };
+    m.customProgramCacheKey = () => `lamp-switch-${off}`;
   }
 
   // Arterials: solid double yellow centre line and white edge lines. Local streets: a dashed
@@ -670,6 +732,7 @@ export class View3D {
         [bl.x + kerb(st.w, a, d), bl.y - kerb(st.s, d, c)],
       ].map(([x, y]) => new THREE.Vector3(this.wx(x), 0, this.wz(y)));
       this.flat.add(slab(walk, 0, PAVE_TOP), new THREE.Color(0x8a8c8f), 0, 0, 0);
+      if (st.n && st.e && st.s && st.w) this.addWalkRing(z, walk);
       const tint = new THREE.Color(ZONE_HEX[z.type]);
       // Low-density blocks read as lawns; denser blocks as paved lots tinted by zone type.
       const plateColor =
@@ -695,6 +758,8 @@ export class View3D {
     this.kitSlots.set(-1, this.curSlots);
     this.curTrees = [];
     this.treeSpots.set(-1, this.curTrees);
+    this.curSpots = [];
+    this.parkSpots.set(-1, this.curSpots);
     this.onPavement(() => {
       for (const sb of layout.superblocks) {
         if (sb.kind === 'park') this.addPark(this.area(sb.rect), rng, true);
@@ -703,7 +768,94 @@ export class View3D {
     });
     this.curSlots = null;
     this.curTrees = null;
+    this.curSpots = null;
     this.buildStreetTrees(rng);
+  }
+
+  // A walk round a block along the middle of its pavement; busier downtown and round parks.
+  private addWalkRing(z: Zone, kerb: THREE.Vector3[]): void {
+    const cx = kerb.reduce((a, p) => a + p.x, 0) / kerb.length;
+    const cz = kerb.reduce((a, p) => a + p.z, 0) / kerb.length;
+    const inset = (BLOCK_INSET - ROAD_HALF.arterial) / 2;
+    const pts = kerb.map((p) => new THREE.Vector2(p.x + Math.sign(cx - p.x) * inset, p.z + Math.sign(cz - p.z) * inset));
+    const len = pts.reduce((a, p, k) => a + p.distanceTo(pts[(k + 1) % pts.length]), 0);
+    const kind: WalkRing['kind'] = z.type === 'commercial' ? 'downtown' : z.type;
+    const rate = { downtown: 0.45, park: 0.3, residential: 0.08, industrial: 0.05 }[kind];
+    this.walkRings.push({ pts, y: PAVE_TOP, kind, people: Math.round(len * rate * (0.5 + z.density)) });
+  }
+
+  // People and parked cars; built again when a block is redrawn (its parking may have changed).
+  private buildLife(): void {
+    if (this.life) {
+      this.scene.remove(this.life.group);
+      this.life.group.traverse((o) => (o as THREE.InstancedMesh).isInstancedMesh && (o as THREE.InstancedMesh).dispose());
+    }
+    const car = this.fleet.get('sedan')!;
+    this.life = new StreetLife(this.walkRings, [...this.parkSpots.values()].flat(), car.classic.body, this.bodyMat, WORLD_PER_M, BLOCK_INSET - ROAD_HALF.arterial);
+    this.life.amount = { high: 1, medium: 0.5, low: 0.25 }[this.quality];
+    this.life.raining = this.weatherNow === 'rain';
+    this.scene.add(this.life.group);
+    this.applyLifeModel();
+  }
+
+  // Parked cars as Kit cars with Graphics high or medium, the simple ones on low.
+  private applyLifeModel(): void {
+    if (!this.life) return;
+    const model = this.vehicleStyle === 'models' ? this.kit?.vehicles.get('sedan') : undefined;
+    const classic = this.fleet.get('sedan')!.classic.body;
+    if (model) {
+      const wheels = mergeGeometries(model.slots.map((sl) => (sl.right ? model.wheelR : model.wheelL).clone().translate(sl.x, sl.y, sl.z)))!;
+      this.life.setCarModel(classic, this.bodyMat, { body: model.body, wheels, material: this.kit!.material });
+    } else {
+      this.life.setCarModel(classic, this.bodyMat, null);
+    }
+  }
+
+  // Graphics quality (see Quality). Shadows go with the sun's castShadow, so materials recompile
+  // on their own; the drawing buffer drops to one pixel per CSS pixel below high.
+  setQuality(q: Quality): void {
+    this.quality = q;
+    this.sky.sun.castShadow = q === 'high';
+    this.renderer.setPixelRatio(q === 'high' ? Math.min(window.devicePixelRatio || 1, 2) : 1);
+    this.resize();
+    this.birds.mesh.visible = q === 'high';
+    this.clouds.mesh.visible = q !== 'low';
+    if (this.life) this.life.amount = { high: 1, medium: 0.5, low: 0.25 }[q];
+    this.effects.amount = q === 'high' ? 1 : q === 'medium' ? 0.6 : 0.35;
+    const style: VehicleStyle = q === 'low' ? 'classic' : 'models';
+    if (style !== this.vehicleStyle) this.setVehicleStyle(style);
+  }
+
+  // A fire leaves its building charred: darker while it burns, and it stays that way after. On the
+  // City Kit buildings the instance is tinted; on the classic ones a sooty shell goes over it.
+  charBuilding(site: Site, amount: number): void {
+    const b = this.buildingAt(site);
+    const key = `${site.id}`;
+    let c = this.charred.get(key);
+    if (!c) {
+      c = { x: b.x, z: b.z, w: b.w, h: b.h, amount: 0, shell: null };
+      this.charred.set(key, c);
+    }
+    if (amount <= c.amount + 0.01) return;
+    c.amount = Math.min(1, amount);
+    this.applyChar(c);
+  }
+
+  private applyChar(c: { x: number; z: number; w: number; h: number; amount: number; shell: THREE.Mesh | null }): void {
+    const kitShown = this.kitBuildings?.group.visible ?? false;
+    const tinted = kitShown && this.kitBuildings!.tint(c.x, c.z, 1 - 0.78 * c.amount);
+    if (!tinted) {
+      if (!c.shell) {
+        c.shell = new THREE.Mesh(
+          new THREE.BoxGeometry(c.w * 1.04, c.h * 1.02, c.w * 1.04).translate(0, (c.h * 1.02) / 2, 0),
+          new THREE.MeshStandardMaterial({ color: 0x14100d, roughness: 1, transparent: true, depthWrite: false }),
+        );
+        c.shell.position.set(c.x, PAVE_LIFT, c.z);
+        this.scene.add(c.shell);
+      }
+      (c.shell.material as THREE.MeshStandardMaterial).opacity = 0.75 * c.amount;
+    }
+    if (c.shell) c.shell.visible = !tinted;
   }
 
   // Draw with the three city batches lifted onto the pavement.
@@ -771,6 +923,7 @@ export class View3D {
     for (const block of new Set(sites.map((s) => s.zone))) {
       hide(this.blockRanges.get(block));
       this.blockRanges.delete(block);
+      this.parkSpots.delete(block);
       const z = this.sim.zones[block];
       redraw(`block ${block}`, () => this.drawBlock(layout.blocks[block], z, new THREE.Color(ZONE_HEX[z.type]), mulberry32(this.sim.config.seed + block)));
     }
@@ -782,6 +935,7 @@ export class View3D {
     this.kitDirty = true;
     this.applyBuildingStyle();
     this.rebuildTrees();
+    this.buildLife();
   }
 
   // City Kit buildings with Graphics high once the kits have loaded, the classic ones otherwise.
@@ -798,6 +952,7 @@ export class View3D {
     }
     if (this.kitBuildings) this.kitBuildings.group.visible = models;
     for (const m of this.replaceable) m.visible = !models;
+    for (const c of this.charred.values()) this.applyChar(c);
   }
 
   // Draw a building that the City Kit can replace: into the replaceable batches, and as a slot.
@@ -878,6 +1033,9 @@ export class View3D {
     this.kitSlots.set(plan.zone, this.curSlots);
     this.curTrees = [];
     this.treeSpots.set(plan.zone, this.curTrees);
+    this.curSpots = [];
+    this.parkSpots.set(plan.zone, this.curSpots);
+    const lotKind: ParkSpot['kind'] = z.type === 'industrial' ? 'work' : z.type === 'residential' ? 'home' : 'shops';
     const face = (site: Site) => FACE[site.front];
     const r = this.area(plan.rect);
     const w = r.x1 - r.x0;
@@ -906,7 +1064,7 @@ export class View3D {
           const q = lot(site);
           if (site.kind === 'tower') this.addTower(q.x, q.z, q.cell, z.density, color(), rng, face(site));
           else if (site.kind === 'plaza') this.addPlaza(q, rng);
-          else if (site.kind === 'parking') this.addParkingLot(q, rng);
+          else if (site.kind === 'parking') this.addParkingLot(q, rng, lotKind);
           else this.replaceableBuilding('shop', q.x, q.z, q.x1 - q.x0, q.z1 - q.z0, 2 * FLOOR, face(site), () => this.addBlock(q.x1 - q.x0, 2 * FLOOR, q.z1 - q.z0, q.x, 0, q.z, color(), rng));
         }
         break;
@@ -1107,6 +1265,8 @@ export class View3D {
     const dx = this.wx(site.door.x);
     const dz = this.wz(site.door.y);
     this.flat.add(new THREE.PlaneGeometry(nx !== 0 ? dl : 0.5, nz !== 0 ? dl : 0.5), new THREE.Color(0x5a5f66), dx - nx * dl * 0.5, 0.045, dz - nz * dl * 0.5, -Math.PI / 2);
+    // A car on the driveway, nose to the house, when the household is home.
+    if (dl > 0.7) this.curSpots?.push({ x: dx - nx * dl * 0.55, y: PAVE_LIFT + 0.05, z: dz - nz * dl * 0.55, rot: Math.atan2(nz, -nx), kind: 'home', seed: rng() });
     const bx = fx - nx * deep * 0.88;
     const bz = fz - nz * deep * 0.88;
     const extra = rng();
@@ -1154,21 +1314,19 @@ export class View3D {
     }
   }
 
-  // Painted bays with parked cars in the usual paint colours.
-  private addParkingLot(r: Area, rng: Rng): void {
+  // Painted bays; the cars in them come and go with the time of day (see streetLife.ts).
+  private addParkingLot(r: Area, rng: Rng, kind: ParkSpot['kind']): void {
     this.taken.push({ ...r });
     const line = new THREE.Color(0xbfc4ca);
     this.flat.add(new THREE.PlaneGeometry(r.x1 - r.x0, r.z1 - r.z0), new THREE.Color(0x2b3036), (r.x0 + r.x1) / 2, 0.04, (r.z0 + r.z1) / 2, -Math.PI / 2);
     const bay = 0.4; // ~2.8 m
     const rowDepth = 0.75;
-    const paints = [0xe9e9ea, 0x1b1c1f, 0xa9aeb5, 0x5b6068, 0x24467e, 0x9b1f1f];
     for (let z = r.z0 + 0.3; z + rowDepth <= r.z1 - 0.2; z += rowDepth * 2 + 0.6) {
       for (let x = r.x0 + 0.3; x + bay <= r.x1 - 0.3; x += bay) {
         this.flat.add(new THREE.PlaneGeometry(0.025, rowDepth), line, x, 0.05, z + rowDepth / 2, -Math.PI / 2);
-        if (rng() < 0.6) {
-          const car = new THREE.Color(paints[Math.floor(rng() * paints.length)]);
-          this.solid.add(new THREE.BoxGeometry(0.28, 0.2, 0.6), car, x + bay / 2, 0.12, z + rowDepth / 2);
-        }
+        // Nose in, alternate rows facing each other.
+        const row = Math.round((z - r.z0 - 0.3) / (rowDepth * 2 + 0.6));
+        this.curSpots?.push({ x: x + bay / 2, y: PAVE_LIFT + 0.045, z: z + rowDepth / 2, rot: row % 2 ? Math.PI / 2 : -Math.PI / 2, kind, seed: rng() });
       }
     }
   }
@@ -1226,7 +1384,7 @@ export class View3D {
     const w = r.x1 - r.x0;
     const d = r.z1 - r.z0;
     const cx = (r.x0 + r.x1) / 2;
-    this.addParkingLot({ x0: r.x0, x1: r.x1, z0: r.z0 + d * 0.48, z1: r.z1 }, rng);
+    this.addParkingLot({ x0: r.x0, x1: r.x1, z0: r.z0 + d * 0.48, z1: r.z1 }, rng, 'shops');
     const bw = w * 0.82;
     const bd = d * 0.38;
     const bz = r.z0 + d * 0.06 + bd / 2;
@@ -1497,6 +1655,7 @@ export class View3D {
       }
       if (f.wheels) f.wheels.left.visible = f.wheels.right.visible = model !== undefined;
     }
+    this.applyLifeModel();
   }
 
   private topOf(g: THREE.BufferGeometry): number {
@@ -2716,7 +2875,7 @@ export class View3D {
     this.trees?.update(this.camera.position);
     const w = this.weatherNow;
     wind.strength.value += ((w === 'rain' ? 1.25 : w === 'fog' ? 0.2 : 0.55) - wind.strength.value) * 0.02;
-    this.birds.update(dt, this.sky.night + (w === 'rain' ? 0.7 : 0));
+    if (this.quality === 'high') this.birds.update(dt, this.sky.night + (w === 'rain' ? 0.7 : 0));
     this.sky.cloudLight(this.cloudLight);
     this.clouds.update(this.cloudLight, w === 'rain' ? 1 : w === 'fog' ? 0.8 : 0.45, 0.8 + 2.2 * wind.strength.value);
   }
@@ -2725,6 +2884,7 @@ export class View3D {
   private weatherNow: Weather = 'clear';
   setWeather(w: Weather): void {
     this.weatherNow = w;
+    if (this.life) this.life.raining = w === 'rain';
     this.sky.overcastTarget = w === 'clear' ? 0 : w === 'rain' ? 0.8 : 0.55;
     this.sky.fogTarget = w === 'fog' ? 0.01 : w === 'rain' ? 0.004 : BASE_FOG;
     const roads = this.roads.material as THREE.MeshStandardMaterial;
@@ -3035,9 +3195,10 @@ export class View3D {
     this.sky.update(hourOf(this.sim.time), this.camera);
     const night = this.sky.night;
     this.facadeMat.emissiveIntensity = 0.04 + 0.9 * night;
-    this.lampHeadMat.color.setScalar(0.35 + 0.65 * night);
-    this.lampPoolMat.color.setScalar(0.32 * night);
-    this.lampPools.visible = night > 0.02;
+    // Darkness for the lamps' switches: night, or a dark rain sky by day.
+    this.lampDark.value = Math.max(night, this.weatherNow === 'rain' ? 0.32 : this.weatherNow === 'fog' ? 0.26 : 0);
+    this.lampPoolMat.color.setScalar(0.32 * (0.45 + 0.55 * night)); // pools show less against daylight
+    this.lampPools.visible = this.lampDark.value > 0.2;
     this.carLightMat.color.setScalar(night);
     for (const m of this.carLights) m.visible = night > 0.02;
   }
@@ -3070,6 +3231,7 @@ export class View3D {
     this.syncBusPins();
     this.syncRain();
     this.syncNature();
+    this.life?.update(hourOf(this.sim.time), this.camera.position);
     if (this.kitBuildings?.group.visible) this.kitBuildings.update(this.camera.position);
     this.syncBoids();
     this.syncTags();

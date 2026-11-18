@@ -46,6 +46,7 @@
       .brand .sub { font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); letter-spacing: 0.06em; }
       .controls { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-family: var(--font-mono); font-size: 12px; }
       .controls button, .controls select { padding: 7px 9px; }
+      .controls input[type='range'] { width: 72px; accent-color: var(--accent); }
       .controls .clock { color: var(--text); min-width: 96px; font-variant-numeric: tabular-nums; }
       .controls .clock span { color: var(--text-dim); text-transform: uppercase; margin-left: 6px; }
       button, select {
@@ -262,6 +263,13 @@
       .proof-item strong { display: block; font-family: var(--font-mono); font-size: 11px; font-weight: 500; }
       .proof-item span { display: block; color: var(--text-dim); font-size: 10px; margin-top: 2px; }
 
+      .playtest-badge {
+        position: fixed; right: 12px; bottom: 3px; z-index: 30; /* over the footer, clear of the sidebar buttons */ display: flex; align-items: center; gap: 6px;
+        font-family: var(--font-mono); font-size: 10.5px; color: var(--text); background: rgba(6, 9, 13, 0.9);
+        border: 1px solid #c0392b; border-radius: 4px; padding: 1px 6px;
+      }
+      .playtest-badge span { color: #ff8a80; }
+      .playtest-badge button { font-size: 10px; padding: 2px 6px; }
       footer {
         padding: 8px 20px; border-top: 1px solid var(--line); background: var(--panel-2);
         font-family: var(--font-mono); font-size: 10.5px; color: var(--text-faint);
@@ -317,7 +325,8 @@
           <option value="fog">Fog</option>
         </select>
         <button id="mute" aria-pressed="false" title="All sound on or off (M): traffic, sirens, wind and birds">🔊 Sound</button>
-        <button id="graphics" title="Graphics quality (G): high uses detailed vehicle models, low the simple ones">Graphics: high</button>
+        <input id="volume" type="range" min="0" max="100" step="5" value="80" aria-label="Volume" title="Volume of all sound" />
+        <button id="graphics" title="Graphics quality (G): high has detailed models, shadows, birds and full crowds; medium drops shadows, birds and half the people; low uses simple models for slow machines">Graphics: high</button>
         <button id="help" title="Keyboard shortcuts (?)">?</button>
         <button id="reset">Reset</button>
       </div>
@@ -380,6 +389,13 @@
                   <option value="hard">Hard</option>
                 </select>
               </label>
+              <label for="dispatchWeather">Weather
+                <select id="dispatchWeather" aria-label="Weather for the shift">
+                  <option value="clear">Clear</option>
+                  <option value="rain">Rain · slower traffic, longer gaps</option>
+                  <option value="fog">Fog · slowest traffic</option>
+                </select>
+              </label>
               <div class="note best-score" id="bestScore"></div>
               <button id="moveStation" title="Before the shift: move one station to another building; the coverage map shows the effect">Move a station (optional)</button>
               <div class="note" id="moveStationNote" hidden></div>
@@ -438,6 +454,14 @@
               <span><i style="background: #fab219"></i>over target</span>
               <span><i class="cross">×</i>missed</span>
               <span><i class="tick"></i>target</span>
+            </div>
+            <div class="dispatch-subhead" style="text-align: left">Where the calls were</div>
+            <div class="response-chart" id="callMap"></div>
+            <div class="chart-legend">
+              <span><i style="background: #0ca30c; border-radius: 50%"></i>within target</span>
+              <span><i style="background: #fab219; border-radius: 50%"></i>over target</span>
+              <span><i class="cross">×</i>missed</span>
+              <span>H F P stations</span>
             </div>
             <details class="result-table">
               <summary>Show as a table</summary>
@@ -531,7 +555,7 @@
           <kbd>L</kbd><span>Bus lines: routes, stops and every bus, with a button to follow one</span>
           <kbd>W</kbd><span>Weather: clear, rain, fog (rain and fog slow traffic and lengthen gaps)</span>
           <kbd>M</kbd><span>Mute or unmute all sound (traffic, sirens, wind and birds)</span>
-          <kbd>G</kbd><span>Graphics quality: high (detailed vehicles and buildings) or low (simple ones, for slow machines)</span>
+          <kbd>G</kbd><span>Graphics quality: high (detailed models, shadows, birds), medium (no shadows or birds, fewer people) or low (simple models, for slow machines)</span>
           <kbd>Esc</kbd><span>Stop riding along, cancel placing, close this; on the end screen, back to the menu</span>
           <kbd>?</kbd><span>Show or hide this help</span>
         </div>

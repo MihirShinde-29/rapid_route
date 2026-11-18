@@ -173,6 +173,8 @@ export interface KitBuildings {
   group: THREE.Group;
   // Full models near the camera, stand-ins further away.
   update(camera: THREE.Vector3): void;
+  // Darken the building standing at (x, z) to `shade` of its colours (1 as built). False if none is there.
+  tint(x: number, z: number, shade: number): boolean;
 }
 
 // One batched mesh per kit (one draw call each, culled per building), every slot an instance.
@@ -244,6 +246,20 @@ export function buildKitBuildings(kit: CityKit, slots: BuildingSlot[]): KitBuild
           l.isNear = near;
         }
       }
+    },
+    tint(x: number, z: number, shade: number) {
+      let best: (typeof lods)[number] | null = null;
+      let bestD = 4; // world units squared: the building's own slot, not a neighbour's
+      for (const l of lods) {
+        const d = (l.at.x - x) ** 2 + (l.at.z - z) ** 2;
+        if (d < bestD) {
+          bestD = d;
+          best = l;
+        }
+      }
+      if (!best) return false;
+      best.mesh.setColorAt(best.id, new THREE.Color(shade, shade * 0.95, shade * 0.9));
+      return true;
     },
   };
 }

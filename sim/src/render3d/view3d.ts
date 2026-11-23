@@ -37,6 +37,9 @@ const WORLD_PER_M = 0.14; // 100 m block spacing -> 14 world units, as in the pr
 const BLOCK_INSET = 1.4;
 const CAR_LOD = 45; // world units (~320 m): Kit car models within this of the camera, classic bodies beyond
 const WHEEL_NEAR = 45; // world units (~320 m): model wheels are drawn only for cars this close to the camera
+// Sharp (high-DPI) screens draw at most 1.5 pixels per CSS pixel, not 2: a little softer, but
+// about half the pixels to shade on a MacBook-class display.
+const MAX_PIXEL_RATIO = 1.5;
 const RAIN_BOX = 140; // world units across, round the camera's target
 const RAIN_HEIGHT = 60;
 // Blocks stand on the pavement: a kerbed sidewalk from the road edge (top at 0.255) to the block,
@@ -284,7 +287,7 @@ export class View3D {
   private blinkOn = false;
   private brakeMat = new THREE.MeshBasicMaterial({ transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
   private signals: Signal[] = [];
-  private signalLamps!: THREE.InstancedMesh; // three per signal: red, yellow, green
+  private signalLamps: { mesh: THREE.InstancedMesh; at: number }[] = []; // three per signal: red, yellow, green
   private tags!: { start: HTMLDivElement; end: HTMLDivElement; car: HTMLDivElement };
   private pinNodes: [number | null, number | null] = [null, null];
   private tagV = new THREE.Vector3();
@@ -388,7 +391,7 @@ export class View3D {
     private sim: Simulation,
   ) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     container.appendChild(this.renderer.domElement);
@@ -623,9 +626,11 @@ export class View3D {
       }
     }
     // The tall posts cast shadows; the lantern posts are too thin for theirs to show.
-    this.scene.add(tallPost.build(this.solidMat, true, true), lanternPost.build(this.solidMat, false, true));
+    const cell = this.propCell();
+    // Only the thousands of lanterns are split by cell; the few hundred tall lamps aren't worth the draw calls.
+    this.scene.add(tallPost.build(this.solidMat, true, true), lanternPost.buildCells(this.solidMat, false, true, cell));
     this.switchMaterial(this.lampHeadMat, 0.3);
-    this.scene.add(tallHead.build(this.lampHeadMat, false, false), lanternHead.build(this.lampHeadMat, false, false));
+    this.scene.add(tallHead.build(this.lampHeadMat, false, false), lanternHead.buildCells(this.lampHeadMat, false, false, cell));
     this.lampPoolMat = new THREE.MeshBasicMaterial({
       vertexColors: true,
       map: radialGlow(),
@@ -635,8 +640,14 @@ export class View3D {
     });
     this.switchMaterial(this.lampPoolMat, 0);
     this.lampPools = new THREE.Group();
-    this.lampPools.add(tallPool.build(this.lampPoolMat, false, false), lanternPool.build(this.lampPoolMat, false, false));
+    this.lampPools.add(tallPool.build(this.lampPoolMat, false, false), lanternPool.buildCells(this.lampPoolMat, false, false, cell));
     this.scene.add(this.lampPools);
+  }
+
+  // The most numerous street props (lanterns, signal lamps) are split into a 4 by 4 grid of cells
+  // over the city, so those off screen are culled.
+  private propCell(): number {
+    return (Math.max(this.sim.grid.width, this.sim.grid.height) * WORLD_PER_M) / 4 + 0.01;
   }
 
   // A lamp is lit once the darkness passes its aSwitch (a short fade); `off` is its brightness unlit.
@@ -829,7 +840,7 @@ export class View3D {
   setQuality(q: Quality): void {
     this.quality = q;
     this.sky.sun.castShadow = q === 'high';
-    this.renderer.setPixelRatio(q === 'high' ? Math.min(window.devicePixelRatio || 1, 2) : 1);
+    this.renderer.setPixelRatio(q === 'high' ? Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO) : 1);
     this.resize();
     this.birds.mesh.visible = q === 'high';
     this.clouds.mesh.visible = q !== 'low';
@@ -1969,30 +1980,32 @@ export class View3D {
       }
     }
     for (const [p, cast] of [[stopPost, true], [stopSign, true], [signalPole, true], [signalHousing, true]] as const) if (p.count > 0) this.scene.add(p.build(this.solidMat, cast, true));
-    this.signalLamps = new THREE.InstancedMesh(new THREE.SphereGeometry(0.058, 8, 4), new THREE.MeshBasicMaterial(), Math.max(1, lampPos.length));
-    this.signalLamps.count = lampPos.length;
-    const m = new THREE.Matrix4();
-    lampPos.forEach((p, i) => {
-      this.signalLamps.setMatrixAt(i, m.makeTranslation(p.x, p.y, p.z));
-      this.signalLamps.setColorAt(i, SIGNAL.redOff);
-    });
-    this.scene.add(this.signalLamps);
+    // The lamps too, by cell; each signal's three lamps are recoloured where they ended up.
+    const lamps = new PropInstances(new THREE.SphereGeometry(0.058, 8, 4), SIGNAL.redOff);
+    for (const p of lampPos) lamps.add(p.x, p.y, p.z);
+    this.scene.add(lamps.buildCells(new THREE.MeshBasicMaterial(), false, false, this.propCell()));
+    this.signalLamps = lamps.where;
+    for (const { mesh, at } of this.signalLamps) mesh.setColorAt(at, SIGNAL.redOff);
   }
 
   private syncSignals(): void {
     const plans = this.sim.traffic.signals;
     if (!plans) return;
-    let changed = false;
+    const changed = new Set<THREE.InstancedMesh>();
+    const set = (k: number, c: THREE.Color) => {
+      const { mesh, at } = this.signalLamps[k];
+      mesh.setColorAt(at, c);
+      changed.add(mesh);
+    };
     this.signals.forEach((sg, i) => {
       const light = plans.light(sg.lane, this.sim.time);
       if (light === sg.light) return;
       sg.light = light;
-      changed = true;
-      this.signalLamps.setColorAt(3 * i, light === 'red' ? SIGNAL.red : SIGNAL.redOff);
-      this.signalLamps.setColorAt(3 * i + 1, light === 'yellow' ? SIGNAL.yellow : SIGNAL.yellowOff);
-      this.signalLamps.setColorAt(3 * i + 2, light === 'green' ? SIGNAL.green : SIGNAL.greenOff);
+      set(3 * i, light === 'red' ? SIGNAL.red : SIGNAL.redOff);
+      set(3 * i + 1, light === 'yellow' ? SIGNAL.yellow : SIGNAL.yellowOff);
+      set(3 * i + 2, light === 'green' ? SIGNAL.green : SIGNAL.greenOff);
     });
-    if (changed) this.signalLamps.instanceColor!.needsUpdate = true;
+    for (const m of changed) m.instanceColor!.needsUpdate = true;
   }
 
   // Street tint follows the slower direction's mean speed relative to the limit.

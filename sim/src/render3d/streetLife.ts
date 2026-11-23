@@ -92,7 +92,11 @@ export class StreetLife {
   // as the moving cars do; a thousand full models in the car parks cost about 15 fps.
   private near: THREE.InstancedMesh | null = null;
   private wheels: THREE.InstancedMesh | null = null;
-  private far: THREE.InstancedMesh;
+  // The simple bodies are split into a 4 by 4 grid of cells over the car parks, each its own
+  // mesh with fixed bounds, so the cells off screen are culled.
+  private far: THREE.InstancedMesh[] = [];
+  private cellOf: number[] = []; // spot -> cell
+  private cellBounds: THREE.Sphere[] = [];
   private lastCam = new THREE.Vector3(Infinity, 0, 0);
   private carMat = new THREE.Matrix4();
   private lastHour = -1;
@@ -115,6 +119,7 @@ export class StreetLife {
     private worldPerM: number,
     private pavementWidth: number,
   ) {
+    this.splitCells();
     this.lens = rings.map((r) => r.pts.reduce((a, p, k) => a + p.distanceTo(r.pts[(k + 1) % r.pts.length]), 0));
     let seed = 1;
     const rnd = () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646;
@@ -195,18 +200,59 @@ export class StreetLife {
     const fabric = new THREE.MeshStandardMaterial({ roughness: 0.55, side: THREE.DoubleSide });
     add(canopy, fabric, umbrellaColor, null, 0, 'only');
     add(shaft, new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.5 }), this.walkers.map(() => new THREE.Color(0xffffff)), null, 0, 'only');
-    this.far = this.makeCars(carBody, carMaterial, false);
+    this.far = this.makeFar(carBody, carMaterial);
+  }
+
+  private splitCells(): void {
+    const box = new THREE.Box3();
+    for (const s of this.spots) box.expandByPoint(new THREE.Vector3(s.x, s.y, s.z));
+    const size = box.getSize(new THREE.Vector3());
+    const cell = Math.max(size.x, size.z, 1) / 4 + 0.01;
+    const index = new Map<string, number>();
+    const boxes: THREE.Box3[] = [];
+    this.spots.forEach((s, i) => {
+      const k = `${Math.floor((s.x - box.min.x) / cell)},${Math.floor((s.z - box.min.z) / cell)}`;
+      let c = index.get(k);
+      if (c === undefined) {
+        c = boxes.length;
+        index.set(k, c);
+        boxes.push(new THREE.Box3());
+      }
+      this.cellOf[i] = c;
+      boxes[c].expandByPoint(new THREE.Vector3(s.x, s.y, s.z));
+    });
+    // Each cell's bounds, with room for a car's length round its outermost spaces.
+    this.cellBounds = boxes.map((b) => {
+      const sp = b.getBoundingSphere(new THREE.Sphere());
+      sp.radius += 1;
+      return sp;
+    });
+  }
+
+  private makeFar(body: THREE.BufferGeometry, material: THREE.Material): THREE.InstancedMesh[] {
+    const per = new Array(this.cellBounds.length).fill(0);
+    for (const c of this.cellOf) per[c]++;
+    return this.cellBounds.map((sphere, c) => {
+      const m = new THREE.InstancedMesh(body, material, Math.max(1, per[c]));
+      m.setColorAt(0, new THREE.Color());
+      m.count = 0;
+      m.boundingSphere = sphere.clone(); // fixed: the spaces don't move, only which are taken
+      m.castShadow = false;
+      m.receiveShadow = true;
+      this.group.add(m);
+      return m;
+    });
   }
 
   // Parked cars: `kit` is the Kit car (body, wheels, material) for near the camera, or null for
   // the simple body everywhere (Graphics low).
   setCarModel(far: THREE.BufferGeometry, farMaterial: THREE.Material, kit: { body: THREE.BufferGeometry; wheels: THREE.BufferGeometry; material: THREE.Material } | null): void {
-    for (const m of [this.far, this.near, this.wheels]) {
+    for (const m of [...this.far, this.near, this.wheels]) {
       if (!m) continue;
       this.group.remove(m);
       m.dispose();
     }
-    this.far = this.makeCars(far, farMaterial, false);
+    this.far = this.makeFar(far, farMaterial);
     this.near = kit ? this.makeCars(kit.body, kit.material, true) : null;
     this.wheels = kit ? this.makeCars(kit.wheels, kit.material, true, false) : null;
     this.lastHour = -1; // place them again
@@ -242,9 +288,9 @@ export class StreetLife {
     const near2 = this.near ? PARK_NEAR * PARK_NEAR : -1;
     const c = new THREE.Color();
     let nn = 0;
-    let nf = 0;
-    for (const s of this.spots) {
-      if (s.seed >= shares[s.kind]) continue;
+    const nf = new Array(this.far.length).fill(0);
+    this.spots.forEach((s, i) => {
+      if (s.seed >= shares[s.kind]) return;
       this.carMat.makeRotationY(s.rot).setPosition(s.x, s.y, s.z);
       c.setHex(PAINTS[Math.floor(s.seed * 7919) % PAINTS.length]);
       const d2 = (s.x - camera.x) ** 2 + (s.y - camera.y) ** 2 + (s.z - camera.z) ** 2;
@@ -254,12 +300,15 @@ export class StreetLife {
         this.wheels!.setMatrixAt(nn, this.carMat);
         nn++;
       } else {
-        this.far.setMatrixAt(nf, this.carMat);
-        this.far.setColorAt(nf, c);
-        nf++;
+        const cell = this.cellOf[i];
+        const far = this.far[cell];
+        far.setMatrixAt(nf[cell], this.carMat);
+        far.setColorAt(nf[cell], c);
+        nf[cell]++;
       }
-    }
-    for (const [m, n] of [[this.near, nn], [this.wheels, nn], [this.far, nf]] as const) {
+    });
+    const sets: [THREE.InstancedMesh | null, number][] = [[this.near, nn], [this.wheels, nn], ...this.far.map((m, k) => [m, nf[k]] as [THREE.InstancedMesh, number])];
+    for (const [m, n] of sets) {
       if (!m) continue;
       m.count = n;
       m.instanceMatrix.needsUpdate = true;
@@ -342,6 +391,6 @@ export class StreetLife {
   }
 
   get parked(): number {
-    return this.far.count + (this.near?.count ?? 0);
+    return this.far.reduce((a, m) => a + m.count, 0) + (this.near?.count ?? 0);
   }
 }

@@ -99,4 +99,40 @@ export class PropInstances {
     this.matrices = [];
     return mesh;
   }
+
+  // Where each placement ended up after buildCells: its cell's mesh and its index there, so a
+  // caller can recolour one (the signal lamps).
+  where: { mesh: THREE.InstancedMesh; at: number }[] = [];
+
+  // As build, but split into square cells `cell` wide, one instanced mesh per cell with its own
+  // bounds, so the cells off screen are culled instead of the whole city's props being drawn
+  // every frame. The cells share the vertex buffers; only the per-instance data differs.
+  buildCells(material: THREE.Material, cast: boolean, receive: boolean, cell: number): THREE.Group {
+    const cells = new Map<string, number[]>();
+    this.matrices.forEach((m, i) => {
+      const k = `${Math.floor(m.elements[12] / cell)},${Math.floor(m.elements[14] / cell)}`;
+      const list = cells.get(k);
+      if (list) list.push(i);
+      else cells.set(k, [i]);
+    });
+    const group = new THREE.Group();
+    this.where = new Array(this.matrices.length);
+    for (const ids of cells.values()) {
+      const geo = new THREE.BufferGeometry();
+      geo.setIndex(this.geo.index);
+      for (const [name, attr] of Object.entries(this.geo.attributes)) geo.setAttribute(name, attr);
+      for (const [k, list] of this.floats) geo.setAttribute(k, new THREE.InstancedBufferAttribute(Float32Array.from(ids, (i) => list[i] ?? 0), 1));
+      const mesh = new THREE.InstancedMesh(geo, material, ids.length);
+      ids.forEach((i, j) => {
+        mesh.setMatrixAt(j, this.matrices[i]);
+        this.where[i] = { mesh, at: j };
+      });
+      mesh.castShadow = cast;
+      mesh.receiveShadow = receive;
+      mesh.computeBoundingSphere();
+      group.add(mesh);
+    }
+    this.matrices = [];
+    return group;
+  }
 }

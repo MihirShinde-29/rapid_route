@@ -15,7 +15,7 @@ import { StreetLife, type WalkRing, type ParkSpot } from './streetLife';
 import { BASE_FOG, Sky, Terrain } from './environment';
 import { Birds, buildTrees, Clouds, wind, type Trees, type TreeSpot } from './nature';
 import type { Weather } from '../traffic/traffic';
-import { StaticBatch } from './batch';
+import { PropInstances, StaticBatch } from './batch';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { vehicleGeometry, vehiclePaint, type VehicleLights } from './vehicles';
 import { loadKenneyKit, type KenneyKit, type KenneyVehicle, type PropName } from './kenney';
@@ -318,7 +318,7 @@ export class View3D {
   private facadeMat!: THREE.MeshStandardMaterial;
   private lampHeadMat = new THREE.MeshBasicMaterial({ vertexColors: true });
   private lampPoolMat!: THREE.MeshBasicMaterial;
-  private lampPools!: THREE.Mesh;
+  private lampPools!: THREE.Group;
   private carLightMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
   private carLights: THREE.InstancedMesh[] = [];
   private probePins: THREE.Mesh[] = [];
@@ -553,16 +553,30 @@ export class View3D {
   // by one, and some come on early under a dark rain sky; off by day they are dull glass.
   private buildStreetLamps(): void {
     const { net } = this.sim.grid;
-    const heads = new StaticBatch();
-    const pools = new StaticBatch();
     const post = new THREE.Color(0x3a4048);
     const lamp = new THREE.Color(LAMP_COLOR);
     const rnd = mulberry32(this.sim.config.seed + 77);
-    // Tag every vertex of a lamp's glowing parts with that lamp's switch-on point.
-    const tagged = (g: THREE.BufferGeometry, at: number) => {
-      g.setAttribute('aSwitch', new THREE.BufferAttribute(new Float32Array(g.attributes.position.count).fill(at), 1));
-      return g;
-    };
+    // Thousands of identical lamps: each part is one shared geometry drawn per lamp (instanced),
+    // not a copy per lamp. The tall lamp's post and arm are built pointing along +x (towards the
+    // street) and turned into place; the lantern's post and cap are one piece.
+    const tallPost = new PropInstances(
+      mergeGeometries([
+        new THREE.CylinderGeometry(0.045, 0.06, 1.7, 5).translate(0, 0.85, 0),
+        new THREE.BoxGeometry(0.42, 0.04, 0.04).translate(0.2, 1.68, 0),
+      ])!,
+      post,
+    );
+    const tallHead = new PropInstances(new THREE.BoxGeometry(0.24, 0.05, 0.12), lamp);
+    const tallPool = new PropInstances(new THREE.CircleGeometry(1.05, 18), lamp);
+    const lanternPost = new PropInstances(
+      mergeGeometries([
+        new THREE.CylinderGeometry(0.016, 0.024, 0.58, 6, 1, true).translate(0, 0.29, 0), // open: its ends are hidden
+        new THREE.CylinderGeometry(0.045, 0.03, 0.03, 6).translate(0, 0.665, 0), // cap
+      ])!,
+      post,
+    );
+    const lanternHead = new PropInstances(new THREE.SphereGeometry(0.038, 6, 4), lamp);
+    const lanternPool = new PropInstances(new THREE.CircleGeometry(0.55, 14), lamp);
     let k = 0;
     for (const link of net.links) {
       if (link.from > link.to) continue;
@@ -573,7 +587,6 @@ export class View3D {
       const len = Math.hypot(this.wx(b.x) - ax, this.wz(b.y) - az);
       const dx = (b.x - a.x) / link.length;
       const dz = (b.y - a.y) / link.length;
-      const angle = -Math.atan2(dz, dx);
       const half = link.arterial ? 0.8 : 0.65;
       const mx = ax + dx * len / 2;
       const mz = az + dz * len / 2;
@@ -584,13 +597,13 @@ export class View3D {
         const nz = dx * side;
         const px = mx + nx * (half + 0.45);
         const pz = mz + nz * (half + 0.45);
-        this.solid.add(new THREE.CylinderGeometry(0.045, 0.06, 1.7, 5), post, px, 0.85, pz);
+        const turn = Math.atan2(nz, -nx); // local +x towards the street
         const hx = px - nx * 0.4;
         const hz = pz - nz * 0.4;
-        this.solid.add(new THREE.BoxGeometry(0.42, 0.04, 0.04), post, (px + hx) / 2, 1.68, (pz + hz) / 2, 0, angle + Math.PI / 2);
-        const at = 0.25 + 0.2 * rnd();
-        heads.add(tagged(new THREE.BoxGeometry(0.24, 0.05, 0.12), at), lamp, hx, 1.64, hz, 0, angle + Math.PI / 2);
-        pools.add(tagged(new THREE.CircleGeometry(1.05, 18), at), lamp, hx, 0.27, hz, -Math.PI / 2);
+        const at = { aSwitch: 0.25 + 0.2 * rnd() };
+        tallPost.add(px, 0, pz, 0, turn);
+        tallHead.add(hx, 1.64, hz, 0, turn, at);
+        tallPool.add(hx, 0.27, hz, -Math.PI / 2, 0, at);
       }
       // Lanterns (about 4.5 m) near the kerb, halfway between the street trees (see
       // buildStreetTrees), clear of the tall lamp: both sides on arterials, alternating on locals.
@@ -600,20 +613,19 @@ export class View3D {
         const both = link.arterial ? [-1, 1] : [j % 2 === 0 ? 1 : -1];
         j++;
         for (const side of both) {
-          const nx = -dz * side;
-          const nz = dx * side;
-          const px = ax + dx * t + nx * (half + 0.16);
-          const pz = az + dz * t + nz * (half + 0.16);
-          this.solid.add(new THREE.CylinderGeometry(0.016, 0.024, 0.58, 6), post, px, PAVE_TOP + 0.29, pz);
-          this.solid.add(new THREE.CylinderGeometry(0.045, 0.03, 0.03, 8), post, px, PAVE_TOP + 0.665, pz); // cap
-          const at = 0.22 + 0.25 * rnd();
-          heads.add(tagged(new THREE.SphereGeometry(0.038, 8, 6), at), lamp, px, PAVE_TOP + 0.625, pz);
-          pools.add(tagged(new THREE.CircleGeometry(0.55, 14), at), lamp, px, PAVE_TOP + 0.006, pz, -Math.PI / 2);
+          const px = ax + dx * t - dz * side * (half + 0.16);
+          const pz = az + dz * t + dx * side * (half + 0.16);
+          const at = { aSwitch: 0.22 + 0.25 * rnd() };
+          lanternPost.add(px, PAVE_TOP, pz);
+          lanternHead.add(px, PAVE_TOP + 0.625, pz, 0, 0, at);
+          lanternPool.add(px, PAVE_TOP + 0.006, pz, -Math.PI / 2, 0, at);
         }
       }
     }
+    // The tall posts cast shadows; the lantern posts are too thin for theirs to show.
+    this.scene.add(tallPost.build(this.solidMat, true, true), lanternPost.build(this.solidMat, false, true));
     this.switchMaterial(this.lampHeadMat, 0.3);
-    this.scene.add(heads.build(this.lampHeadMat, false, false));
+    this.scene.add(tallHead.build(this.lampHeadMat, false, false), lanternHead.build(this.lampHeadMat, false, false));
     this.lampPoolMat = new THREE.MeshBasicMaterial({
       vertexColors: true,
       map: radialGlow(),
@@ -622,7 +634,8 @@ export class View3D {
       depthWrite: false,
     });
     this.switchMaterial(this.lampPoolMat, 0);
-    this.lampPools = pools.build(this.lampPoolMat, false, false);
+    this.lampPools = new THREE.Group();
+    this.lampPools.add(tallPool.build(this.lampPoolMat, false, false), lanternPool.build(this.lampPoolMat, false, false));
     this.scene.add(this.lampPools);
   }
 
@@ -1912,6 +1925,11 @@ export class View3D {
     const stopRed = new THREE.Color(0xb3191c);
     const white = new THREE.Color(0xf2f2f2);
     const lampPos: THREE.Vector3[] = [];
+    // Poles, housings and stop signs repeat at every junction: one shared geometry each, instanced.
+    const stopPost = new PropInstances(new THREE.CylinderGeometry(0.02, 0.02, 0.5, 5), pole);
+    const stopSign = new PropInstances(new THREE.CylinderGeometry(0.11, 0.11, 0.015, 8).rotateX(Math.PI / 2).rotateZ(Math.PI / 8), stopRed); // octagon
+    const signalPole = new PropInstances(new THREE.CylinderGeometry(0.035, 0.045, 1.3, 6).translate(0, 0.65, 0), pole);
+    const signalHousing = new PropInstances(new THREE.BoxGeometry(0.13, 0.46, 0.13), housing);
     for (let node = 0; node < net.nodes.length; node++) {
       const signalised = traffic.signals?.isSignalised(node) ?? false;
       if (!signalised && !traffic.isStopSign(node)) continue;
@@ -1936,14 +1954,13 @@ export class View3D {
         const line = new THREE.PlaneGeometry(0.06, half * WORLD_PER_M * 0.95).rotateX(-Math.PI / 2);
         this.solid.add(line, white, lx, 0.27, lz, 0, -Math.atan2(dy, dx));
         if (stop) {
-          this.solid.add(new THREE.CylinderGeometry(0.02, 0.02, 0.5, 5), pole, x, 0.25, z);
+          stopPost.add(x, 0.25, z);
           // Octagon facing the oncoming cars.
-          const sign = new THREE.CylinderGeometry(0.11, 0.11, 0.015, 8).rotateX(Math.PI / 2).rotateZ(Math.PI / 8);
-          this.solid.add(sign, stopRed, x - dx * 0.02, 0.52, z - dy * 0.02, 0, Math.atan2(dx, dy));
+          stopSign.add(x - dx * 0.02, 0.52, z - dy * 0.02, 0, Math.atan2(dx, dy));
           continue;
         }
-        this.solid.add(new THREE.CylinderGeometry(0.035, 0.045, 1.3, 6), pole, x, 0.65, z);
-        this.solid.add(new THREE.BoxGeometry(0.13, 0.46, 0.13), housing, x, 1.42, z);
+        signalPole.add(x, 0, z);
+        signalHousing.add(x, 1.42, z);
         // Lamps face the oncoming cars: red, yellow, green from the top.
         const fx = x - dx * 0.07;
         const fz = z - dy * 0.07;
@@ -1951,7 +1968,8 @@ export class View3D {
         this.signals.push({ lane: id, light: null });
       }
     }
-    this.signalLamps = new THREE.InstancedMesh(new THREE.SphereGeometry(0.058, 8, 6), new THREE.MeshBasicMaterial(), Math.max(1, lampPos.length));
+    for (const [p, cast] of [[stopPost, true], [stopSign, true], [signalPole, true], [signalHousing, true]] as const) if (p.count > 0) this.scene.add(p.build(this.solidMat, cast, true));
+    this.signalLamps = new THREE.InstancedMesh(new THREE.SphereGeometry(0.058, 8, 4), new THREE.MeshBasicMaterial(), Math.max(1, lampPos.length));
     this.signalLamps.count = lampPos.length;
     const m = new THREE.Matrix4();
     lampPos.forEach((p, i) => {

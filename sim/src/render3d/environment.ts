@@ -325,16 +325,20 @@ export class Terrain {
     return group;
   }
 
-  // Forest: instanced trees on gentle land outside the suburbs, away from water and fields.
-  buildForest(count: number): THREE.InstancedMesh {
+  // Forest: instanced trees on gentle land outside the suburbs, away from water and fields. All
+  // trees share one conifer geometry and material; they are split into eight sectors round the
+  // city, each its own instanced mesh with its own bounds, so the sectors behind the camera are
+  // culled instead of the whole forest being drawn every frame.
+  buildForest(count: number): THREE.Group {
     // Tiered conifers (see nature.ts), 6.3 world units tall at scale 1, swaying in the breeze.
-    const mesh = new THREE.InstancedMesh(coniferGeometry(23).scale(6.3, 6.3, 6.3), windMaterial(), count);
+    const geo = coniferGeometry(23).scale(6.3, 6.3, 6.3);
+    const mat = windMaterial();
+    const SECTORS = 8;
+    const placed: { m: THREE.Matrix4; c: THREE.Color }[][] = Array.from({ length: SECTORS }, () => []);
     const rng = mulberry32(17);
-    const m = new THREE.Matrix4();
     const q = new THREE.Quaternion();
     const s = new THREE.Vector3();
     const p = new THREE.Vector3();
-    const col = new THREE.Color();
     let n = 0;
     for (let tries = 0; n < count && tries < count * 20; tries++) {
       const x = (rng() - 0.5) * this.size * 0.8;
@@ -348,13 +352,23 @@ export class Terrain {
       p.set(x, h - 0.1, z);
       q.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, rng() * Math.PI * 2);
       s.set(scale, scale * (0.8 + rng() * 0.5), scale);
-      mesh.setMatrixAt(n, m.compose(p, q, s));
-      mesh.setColorAt(n, col.setHex(0x2f5a2c).multiplyScalar(0.7 + rng() * 0.6));
+      const sector = Math.min(SECTORS - 1, Math.floor(((Math.atan2(z, x) + Math.PI) / (2 * Math.PI)) * SECTORS));
+      placed[sector].push({ m: new THREE.Matrix4().compose(p, q, s), c: new THREE.Color(0x2f5a2c).multiplyScalar(0.7 + rng() * 0.6) });
       n++;
     }
-    mesh.count = n;
-    mesh.castShadow = false; // outside the shadow map's area: its shadows would never show
-    mesh.receiveShadow = true;
-    return mesh;
+    const group = new THREE.Group();
+    for (const trees of placed) {
+      if (trees.length === 0) continue;
+      const mesh = new THREE.InstancedMesh(geo, mat, trees.length);
+      trees.forEach((t, i) => {
+        mesh.setMatrixAt(i, t.m);
+        mesh.setColorAt(i, t.c);
+      });
+      mesh.computeBoundingSphere();
+      mesh.castShadow = false; // outside the shadow map's area: its shadows would never show
+      mesh.receiveShadow = true;
+      group.add(mesh);
+    }
+    return group;
   }
 }

@@ -784,7 +784,48 @@ try {
   savedGraphics = null;
 }
 setGraphics(QUALITIES.includes(savedGraphics as Quality) ? (savedGraphics as Quality) : 'high');
-graphicsBtn.onclick = () => setGraphics(QUALITIES[(QUALITIES.indexOf(view.quality) + 1) % QUALITIES.length]);
+graphicsBtn.onclick = () => {
+  autoGfx.manual = true; // the player chose: no more automatic changes this visit
+  $('gfxNote').hidden = true;
+  setGraphics(QUALITIES[(QUALITIES.indexOf(view.quality) + 1) % QUALITIES.length]);
+};
+
+// Automatic step down: if the frame rate stays under 40 fps for 5 s in a row, graphics drop one
+// level (high to medium, medium to low) and a note says so. Not in the first 10 s after loading or
+// a change (models load, shaders compile), not with the tab hidden, and never again once the
+// player has picked a level themselves.
+const AUTO_GFX_FPS = 40;
+const AUTO_GFX_SECONDS = 5;
+const autoGfx = { manual: false, armedAt: performance.now() + 10_000, winStart: 0, frames: 0, slow: 0, lastFrame: 0, noteTimer: 0 };
+function watchFrameRate(now: number): void {
+  const gap = now - autoGfx.lastFrame;
+  autoGfx.lastFrame = now;
+  if (autoGfx.manual || view.quality === 'low') return;
+  if (document.hidden || gap > 1000 || now < autoGfx.armedAt) {
+    autoGfx.winStart = now;
+    autoGfx.frames = 0;
+    autoGfx.slow = 0;
+    return;
+  }
+  autoGfx.frames++;
+  if (now - autoGfx.winStart < 1000) return;
+  const fps = (autoGfx.frames * 1000) / (now - autoGfx.winStart);
+  autoGfx.winStart = now;
+  autoGfx.frames = 0;
+  autoGfx.slow = fps < AUTO_GFX_FPS ? autoGfx.slow + 1 : 0;
+  if (autoGfx.slow < AUTO_GFX_SECONDS) return;
+  const from = view.quality;
+  const to: Quality = from === 'high' ? 'medium' : 'low';
+  setGraphics(to);
+  playtest?.log('graphics_auto', { from, to, fps: Math.round(fps) });
+  autoGfx.slow = 0;
+  autoGfx.armedAt = now + 10_000;
+  const note = $('gfxNote');
+  note.textContent = `Running slowly (${Math.round(fps)} fps), so graphics are now ${to}. Press G to change.`;
+  note.hidden = false;
+  window.clearTimeout(autoGfx.noteTimer);
+  autoGfx.noteTimer = window.setTimeout(() => (note.hidden = true), 8000);
+}
 $('help').onclick = () => {
   $('helpOverlay').hidden = false;
 };
@@ -1559,6 +1600,8 @@ function frame(now: number): void {
       `${view.renderer.info.render.calls} draw calls · ${sim.traffic.vehicles.size} cars`;
   }
   requestAnimationFrame(frame);
+  if (!warming) watchFrameRate(now);
+  else Object.assign(autoGfx, { lastFrame: now, winStart: now, frames: 0, slow: 0 }); // fast-forward frames are slow on purpose
   if (!warming && pageParams.get('replay') === '1') startDispatchBtn.click();
 }
 requestAnimationFrame(frame);
